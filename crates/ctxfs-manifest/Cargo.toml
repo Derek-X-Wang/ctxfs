@@ -1,0 +1,16 @@
+[package]
+name = "ctxfs-manifest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ctxfs-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "ctxfs-cache"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ctxfs-core = { workspace = true }
+ctxfs-manifest = { workspace = true }
+linked-hash-map = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

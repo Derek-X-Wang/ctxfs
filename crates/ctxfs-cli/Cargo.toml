@@ -1,0 +1,26 @@
+[package]
+name = "ctxfs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "ctxfs"
+path = "src/main.rs"
+
+[dependencies]
+ctxfs-core = { workspace = true }
+ctxfs-ipc = { workspace = true }
+ctxfs-daemon = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+tarpc = { workspace = true }
+
+[lints]
+workspace = true

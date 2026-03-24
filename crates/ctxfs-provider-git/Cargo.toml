@@ -1,0 +1,27 @@
+[package]
+name = "ctxfs-provider-git"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ctxfs-core = { workspace = true }
+ctxfs-manifest = { workspace = true }
+ctxfs-cache = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "ctxfs-daemon"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ctxfs-core = { workspace = true }
+ctxfs-manifest = { workspace = true }
+ctxfs-cache = { workspace = true }
+ctxfs-ipc = { workspace = true }
+ctxfs-provider-git = { workspace = true }
+ctxfs-fuse = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tarpc = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+fuser = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true

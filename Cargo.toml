@@ -1,0 +1,90 @@
+[workspace]
+# ctxfs-fuse, ctxfs-daemon, and ctxfs-cli require macFUSE (macOS) or libfuse (Linux).
+# Build with: cargo build (requires FUSE) or cargo build -p ctxfs-core -p ctxfs-manifest ... (no FUSE)
+members = [
+    "crates/ctxfs-core",
+    "crates/ctxfs-manifest",
+    "crates/ctxfs-cache",
+    "crates/ctxfs-ipc",
+    "crates/ctxfs-provider-git",
+    "crates/ctxfs-fuse",
+    "crates/ctxfs-daemon",
+    "crates/ctxfs-cli",
+]
+resolver = "2"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unused_results = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic overrides — too noisy or stylistic
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+return_self_not_must_use = "allow"
+wildcard_imports = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+
+[workspace.dependencies]
+# Internal crates
+ctxfs-core = { path = "crates/ctxfs-core", version = "0.0.0" }
+ctxfs-manifest = { path = "crates/ctxfs-manifest", version = "0.0.0" }
+ctxfs-cache = { path = "crates/ctxfs-cache", version = "0.0.0" }
+ctxfs-ipc = { path = "crates/ctxfs-ipc", version = "0.0.0" }
+ctxfs-provider-git = { path = "crates/ctxfs-provider-git", version = "0.0.0" }
+ctxfs-fuse = { path = "crates/ctxfs-fuse", version = "0.0.0" }
+ctxfs-daemon = { path = "crates/ctxfs-daemon", version = "0.0.0" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# FUSE
+fuser = "0.15"
+
+# IPC
+tarpc = { version = "0.35", features = ["tokio1", "serde-transport", "unix"] }
+tokio-serde = { version = "0.9", features = ["json"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Hashing
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Async trait
+async-trait = "0.1"
+
+# Utilities
+linked-hash-map = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+tokio-stream = "0.1"
+futures = "0.3"
+libc = "0.2"
+tempfile = "3"
