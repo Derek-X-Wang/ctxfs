@@ -1,3 +1,5 @@
+mod setup;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ctxfs_core::config::Config;
@@ -52,6 +54,21 @@ enum Commands {
         #[command(subcommand)]
         action: CacheAction,
     },
+    /// One-time setup for passwordless NFS mounts
+    Setup {
+        #[command(subcommand)]
+        action: SetupAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupAction {
+    /// Install sudoers entry for passwordless mount/umount
+    Install,
+    /// Remove the sudoers entry
+    Uninstall,
+    /// Check if sudoers is already configured
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -271,6 +288,24 @@ async fn main() -> Result<()> {
                 println!("  Freed:       {} bytes", stats.freed_bytes);
                 println!("  Entries:     {}", stats.entry_count);
                 println!("  Total size:  {} bytes", stats.total_bytes);
+            }
+        },
+
+        Commands::Setup { action } => match action {
+            SetupAction::Install => {
+                setup::install_sudoers()?;
+            }
+            SetupAction::Uninstall => {
+                setup::uninstall_sudoers()?;
+            }
+            SetupAction::Check => {
+                let username = whoami::username();
+                if setup::is_configured(&username) {
+                    println!("Configured: /etc/sudoers.d/ctxfs exists for user '{username}'.");
+                    println!("mount/umount will not prompt for a password.");
+                } else {
+                    println!("Not configured. Run `ctxfs setup install` for passwordless mounts.");
+                }
             }
         },
     }

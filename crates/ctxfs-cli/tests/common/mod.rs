@@ -68,8 +68,12 @@ impl TestEnv {
                 "CTXFS_LOG_LEVEL",
                 std::env::var("CTXFS_TEST_LOG").unwrap_or_else(|_| "error".into()),
             ),
-            // Don't let a developer's ambient token affect cache behavior.
-            ("GITHUB_TOKEN", String::new()),
+            // Pass through the developer's token if set — needed for rate limits.
+            // Tests that don't hit the network are unaffected.
+            (
+                "GITHUB_TOKEN",
+                std::env::var("GITHUB_TOKEN").unwrap_or_default(),
+            ),
         ]
     }
 

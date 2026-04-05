@@ -21,6 +21,15 @@ use common::TestEnv;
 use predicates::prelude::*;
 
 #[test]
+fn setup_check_reports_not_configured() {
+    let env = TestEnv::new();
+    env.ctxfs(&["setup", "check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Not configured"));
+}
+
+#[test]
 fn daemon_status_reports_not_running_when_no_daemon() {
     let env = TestEnv::new();
 
