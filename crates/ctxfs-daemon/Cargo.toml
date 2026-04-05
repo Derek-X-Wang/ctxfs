@@ -11,6 +11,7 @@ ctxfs-cache = { workspace = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-provider-git = { workspace = true }
 ctxfs-fuse = { workspace = true }
+ctxfs-nfs = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

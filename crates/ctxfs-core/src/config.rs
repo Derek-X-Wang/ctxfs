@@ -34,6 +34,9 @@ impl Config {
         if let Ok(v) = std::env::var("CTXFS_SOCKET") {
             config.socket_path = PathBuf::from(v);
         }
+        if let Ok(v) = std::env::var("CTXFS_PID_FILE") {
+            config.pid_file = PathBuf::from(v);
+        }
         if let Ok(v) = std::env::var("CTXFS_CACHE_DIR") {
             config.cache_dir = PathBuf::from(v);
         }
@@ -45,7 +48,10 @@ impl Config {
         if let Ok(v) = std::env::var("CTXFS_LOG_LEVEL") {
             config.log_level = v;
         }
-        config.github_token = std::env::var("GITHUB_TOKEN").ok();
+        // Empty string is treated as "no token" to match common shell patterns.
+        config.github_token = std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         config
     }
@@ -69,6 +75,27 @@ mod tests {
         assert!(config.cache_dir.to_string_lossy().contains("cache"));
         assert_eq!(config.cache_max_bytes, 512 * 1024 * 1024);
         assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn from_env_respects_pid_file_override() {
+        // Save and clear any existing value so the test is hermetic.
+        let prev = std::env::var("CTXFS_PID_FILE").ok();
+        // SAFETY: single-threaded test with env cleanup.
+        unsafe { std::env::set_var("CTXFS_PID_FILE", "/tmp/ctxfs-test-override.pid") };
+
+        let config = Config::from_env();
+
+        // Restore before asserting so a failing assert doesn't leak the env var.
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CTXFS_PID_FILE", v) },
+            None => unsafe { std::env::remove_var("CTXFS_PID_FILE") },
+        }
+
+        assert_eq!(
+            config.pid_file,
+            PathBuf::from("/tmp/ctxfs-test-override.pid")
+        );
     }
 
     #[test]

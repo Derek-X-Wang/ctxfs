@@ -9,9 +9,9 @@ use fuser::{
 };
 use std::ffi::OsStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 use tokio::runtime::Handle;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 const TTL: Duration = Duration::from_secs(3600); // 1 hour — immutable snapshot
 const BLOCK_SIZE: u32 = 4096;
@@ -22,7 +22,16 @@ pub struct CtxfsFilesystem {
     source: SourceSpec,
     cache: Arc<BlobCache>,
     inodes: InodeTable,
+    #[allow(dead_code)] // retained for future snapshot refresh
     snapshot: Snapshot,
+}
+
+impl std::fmt::Debug for CtxfsFilesystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CtxfsFilesystem")
+            .field("source", &self.source.to_string())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CtxfsFilesystem {
@@ -51,7 +60,7 @@ impl CtxfsFilesystem {
         let options = vec![
             MountOption::RO,
             MountOption::FSName("ctxfs".to_string()),
-            MountOption::NoBrowse,
+            MountOption::CUSTOM("nobrowse".to_string()),
             MountOption::CUSTOM("volname=ContextFS".to_string()),
         ];
 
@@ -94,7 +103,7 @@ impl CtxfsFilesystem {
         for dir_entry in &dir.entries {
             match dir_entry {
                 DirEntry::File(f) => {
-                    self.inodes.allocate_inode(
+                    let _ = self.inodes.allocate_inode(
                         ino,
                         f.name.clone(),
                         InodeKind::File {
@@ -106,7 +115,7 @@ impl CtxfsFilesystem {
                     );
                 }
                 DirEntry::Directory(d) => {
-                    self.inodes.allocate_inode(
+                    let _ = self.inodes.allocate_inode(
                         ino,
                         d.name.clone(),
                         InodeKind::Directory {
@@ -117,7 +126,7 @@ impl CtxfsFilesystem {
                     );
                 }
                 DirEntry::Symlink(s) => {
-                    self.inodes.allocate_inode(
+                    let _ = self.inodes.allocate_inode(
                         ino,
                         s.name.clone(),
                         InodeKind::Symlink {

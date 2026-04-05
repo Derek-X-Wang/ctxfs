@@ -31,6 +31,7 @@ impl CtxfsService for MockServer {
             commit_sha: "abc123".into(),
             status: MountStatus::Ready,
             mounted_at: "2025-01-01T00:00:00Z".into(),
+            nfs_port: 11111,
         };
         self.mounts.write().await.push(info.clone());
         Ok(info)

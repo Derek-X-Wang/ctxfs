@@ -1,6 +1,7 @@
 [workspace]
-# ctxfs-fuse, ctxfs-daemon, and ctxfs-cli require macFUSE (macOS) or libfuse (Linux).
-# Build with: cargo build (requires FUSE) or cargo build -p ctxfs-core -p ctxfs-manifest ... (no FUSE)
+# Two filesystem backends available:
+# - ctxfs-nfs: zero-dependency loopback NFSv3 server (no kernel extension needed)
+# - ctxfs-fuse: macFUSE on macOS, libfuse on Linux (legacy, requires system install)
 members = [
     "crates/ctxfs-core",
     "crates/ctxfs-manifest",
@@ -8,6 +9,7 @@ members = [
     "crates/ctxfs-ipc",
     "crates/ctxfs-provider-git",
     "crates/ctxfs-fuse",
+    "crates/ctxfs-nfs",
     "crates/ctxfs-daemon",
     "crates/ctxfs-cli",
 ]
@@ -40,6 +42,7 @@ ctxfs-cache = { path = "crates/ctxfs-cache", version = "0.0.0" }
 ctxfs-ipc = { path = "crates/ctxfs-ipc", version = "0.0.0" }
 ctxfs-provider-git = { path = "crates/ctxfs-provider-git", version = "0.0.0" }
 ctxfs-fuse = { path = "crates/ctxfs-fuse", version = "0.0.0" }
+ctxfs-nfs = { path = "crates/ctxfs-nfs", version = "0.0.0" }
 ctxfs-daemon = { path = "crates/ctxfs-daemon", version = "0.0.0" }
 
 # Async runtime
@@ -56,8 +59,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# FUSE
+# FUSE (macFUSE/libfuse) — legacy backend
 fuser = "0.15"
+
+# NFS backend (zero-install alternative)
+nfsserve = "0.11"
+dashmap = "6"
 
 # IPC
 tarpc = { version = "0.35", features = ["tokio1", "serde-transport", "unix"] }

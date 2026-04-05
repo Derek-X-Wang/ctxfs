@@ -1,5 +1,5 @@
 [package]
-name = "ctxfs-fuse"
+name = "ctxfs-nfs"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -9,11 +9,16 @@ ctxfs-core = { workspace = true }
 ctxfs-manifest = { workspace = true }
 ctxfs-cache = { workspace = true }
 async-trait = { workspace = true }
-fuser = { workspace = true }
-libc = { workspace = true }
+dashmap = { workspace = true }
+nfsserve = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+ctxfs-provider-git = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

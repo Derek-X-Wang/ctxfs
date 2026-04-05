@@ -27,6 +27,9 @@ pub struct MountInfo {
     pub commit_sha: String,
     pub status: MountStatus,
     pub mounted_at: String,
+    /// Loopback port where the daemon's NFS server for this mount is listening.
+    /// The CLI uses this to invoke `mount_nfs` on the user's behalf.
+    pub nfs_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +75,7 @@ mod tests {
             commit_sha: "abc123def456".into(),
             status: MountStatus::Ready,
             mounted_at: "2025-01-01T00:00:00Z".into(),
+            nfs_port: 11111,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -93,6 +97,7 @@ mod tests {
             commit_sha: "000000".into(),
             status: MountStatus::Error("FUSE unavailable".into()),
             mounted_at: "2025-01-01T00:00:00Z".into(),
+            nfs_port: 0,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -141,6 +146,7 @@ mod tests {
             commit_sha: "sha".into(),
             status: MountStatus::Ready,
             mounted_at: "now".into(),
+            nfs_port: 12345,
         };
         let debug = format!("{info:?}");
         assert!(debug.contains("MountInfo"));

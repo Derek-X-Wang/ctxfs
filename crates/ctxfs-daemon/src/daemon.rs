@@ -1,14 +1,16 @@
 use anyhow::{bail, Context, Result};
 use ctxfs_cache::BlobCache;
 use ctxfs_core::config::Config;
+use ctxfs_core::provider::Provider;
 use ctxfs_core::source::SourceSpec;
-use ctxfs_fuse::CtxfsFilesystem;
 use ctxfs_ipc::service::{CacheStats, CtxfsService, MountInfo, MountStatus};
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
+use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
 use ctxfs_provider_git::GitHubProvider;
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::net::TcpListener;
 use std::sync::Arc;
 use tarpc::server::Channel;
 use tokio::sync::RwLock;
@@ -17,7 +19,8 @@ use tracing::{error, info};
 
 struct MountHandle {
     info: MountInfo,
-    session: fuser::BackgroundSession,
+    /// Keeps the NFS server task alive for the lifetime of the mount.
+    _nfs: NfsServerHandle,
 }
 
 pub struct Daemon {
@@ -25,6 +28,14 @@ pub struct Daemon {
     cache: Arc<BlobCache>,
     mounts: Arc<RwLock<HashMap<String, MountHandle>>>,
     cancel: CancellationToken,
+}
+
+impl std::fmt::Debug for Daemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Daemon")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -78,7 +89,13 @@ impl Daemon {
                         Ok(transport) => {
                             let server_clone = server.clone();
                             let channel = tarpc::server::BaseChannel::with_defaults(transport);
-                            tokio::spawn(channel.execute(server_clone.serve()));
+                            let _ = tokio::spawn(
+                                channel
+                                    .execute(server_clone.serve())
+                                    .for_each(|resp| async {
+                                        let _ = tokio::spawn(resp);
+                                    }),
+                            );
                         }
                         Err(e) => {
                             error!("accept error: {e}");
@@ -91,6 +108,9 @@ impl Daemon {
             },
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received, shutting down");
+            },
+            _ = wait_for_sigterm() => {
+                info!("SIGTERM received, shutting down");
             },
         }
 
@@ -125,8 +145,10 @@ impl Daemon {
         let ids: Vec<String> = mounts.keys().cloned().collect();
         for id in ids {
             if let Some(handle) = mounts.remove(&id) {
-                info!("unmounting {}", handle.info.mount_point);
-                drop(handle.session);
+                info!("stopping NFS server for {}", handle.info.mount_point);
+                // Dropping the handle stops the NFS server task; the kernel
+                // mount is the CLI's responsibility to tear down.
+                drop(handle);
             }
         }
 
@@ -141,7 +163,38 @@ impl Daemon {
     }
 }
 
+/// Wait for a single SIGTERM and then return. Tokio's `signal::ctrl_c()` only
+/// listens for SIGINT; `ctxfs daemon stop` sends SIGTERM, so we need both.
+async fn wait_for_sigterm() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sig) => {
+            let _ = sig.recv().await;
+        }
+        Err(e) => {
+            error!("failed to install SIGTERM handler: {e}");
+            // If signal install fails, never resolve — fall through to other select arms.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Reserve a loopback TCP port by binding and immediately dropping.
+/// Small TOCTOU window, acceptable for a local dev tool.
+fn pick_free_port() -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("failed to reserve port: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read local addr: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
 impl DaemonServer {
+    /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
+    /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
+    /// terminal instead of the daemon's log.
     fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
         let source =
             SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
@@ -165,17 +218,17 @@ impl DaemonServer {
         let id = source.id();
         let commit_sha = snapshot.commit_sha.clone();
 
-        let fs = CtxfsFilesystem::new(
-            self.rt_handle.clone(),
-            provider,
-            source,
-            self.cache.clone(),
-            snapshot,
-        );
+        // Pick a loopback port and spawn the NFS server in the daemon's runtime.
+        let port = pick_free_port()?;
+        let addr = format!("127.0.0.1:{port}");
 
-        let session = fs
-            .mount(mount_point)
-            .map_err(|e| format!("FUSE mount failed: {e}"))?;
+        let fs = CtxfsNfs::new(provider, source, self.cache.clone(), snapshot);
+        let nfs_handle = self
+            .rt_handle
+            .block_on(fs.spawn(&addr))
+            .map_err(|e| format!("failed to start NFS server on {addr}: {e}"))?;
+
+        info!("NFS server listening on {} for {source_str}", nfs_handle.addr);
 
         let info = MountInfo {
             id: id.clone(),
@@ -184,15 +237,16 @@ impl DaemonServer {
             commit_sha,
             status: MountStatus::Ready,
             mounted_at: chrono::Utc::now().to_rfc3339(),
+            nfs_port: port,
         };
 
         let handle = MountHandle {
             info: info.clone(),
-            session,
+            _nfs: nfs_handle,
         };
 
         self.rt_handle.block_on(async {
-            self.mounts.write().await.insert(id, handle);
+            let _ = self.mounts.write().await.insert(id, handle);
         });
 
         Ok(info)
@@ -225,8 +279,10 @@ impl CtxfsService for DaemonServer {
         match key {
             Some(k) => {
                 if let Some(handle) = mounts.remove(&k) {
-                    drop(handle.session);
-                    info!("unmounted {target}");
+                    // Dropping the handle stops the NFS server task; the CLI
+                    // has already run the kernel `umount` before calling us.
+                    drop(handle);
+                    info!("stopped NFS server for {target}");
                     Ok(())
                 } else {
                     Err(format!("mount not found: {target}"))

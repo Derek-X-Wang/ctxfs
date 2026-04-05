@@ -23,6 +23,11 @@ const MODE_EXECUTABLE: &str = "100755";
 pub struct GitHubProvider {
     client: reqwest::Client,
     cache: Arc<BlobCache>,
+    /// The most-recently-fetched source. `fetch_snapshot` records it so that
+    /// subsequent `fetch_blob` calls (which only receive a `Digest`) can locate
+    /// the right repo for the GitHub blob API. A provider instance is scoped
+    /// to a single mount, so this is always consistent at read time.
+    active_source: std::sync::Mutex<Option<SourceSpec>>,
 }
 
 impl std::fmt::Debug for GitHubProvider {
@@ -82,7 +87,11 @@ impl GitHubProvider {
             .build()
             .expect("failed to build HTTP client");
 
-        Self { client, cache }
+        Self {
+            client,
+            cache,
+            active_source: std::sync::Mutex::new(None),
+        }
     }
 
     fn api_url(owner: &str, repo: &str, path: &str) -> String {
@@ -337,6 +346,9 @@ impl Provider for GitHubProvider {
     async fn fetch_snapshot(&self, source: &SourceSpec) -> Result<Vec<u8>, CtxfsError> {
         debug!("fetching snapshot for {source}");
 
+        // Record the source so later `fetch_blob` calls know which repo to hit.
+        *self.active_source.lock().unwrap() = Some(source.clone());
+
         let commit_sha = self.resolve_ref(source).await?;
         debug!("resolved ref {} -> {}", source.git_ref, commit_sha);
 
@@ -378,39 +390,23 @@ impl Provider for GitHubProvider {
     }
 
     async fn fetch_blob(&self, digest: &Digest) -> Result<Vec<u8>, CtxfsError> {
-        // Try cache first
         if let Some(data) = self.cache.get(digest) {
             return Ok(data);
         }
 
-        // For blobs, the digest hex is the Git SHA — we need the source context
-        // to construct the API URL. Since we don't have it here, the FUSE layer
-        // should pass it through the daemon. For now, return not found.
-        // The daemon/FUSE layer handles fetching via the source-aware method.
-        Err(CtxfsError::NotFound(format!(
-            "blob {digest} not in cache"
-        )))
-    }
-}
+        let source = self
+            .active_source
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                CtxfsError::Provider(
+                    "fetch_blob called before fetch_snapshot; no active source".into(),
+                )
+            })?;
 
-impl GitHubProvider {
-    /// Fetch a blob by its Git SHA, with source context for the API URL.
-    pub async fn fetch_blob_with_source(
-        &self,
-        source: &SourceSpec,
-        digest: &Digest,
-    ) -> Result<Vec<u8>, CtxfsError> {
-        // Try cache first
-        if let Some(data) = self.cache.get(digest) {
-            return Ok(data);
-        }
-
-        let data = self.fetch_blob_content(source, &digest.hex).await?;
-
-        // Verify the content matches (Git SHA-1 is different from SHA-256, so we skip
-        // digest verification for Git blobs — the Git SHA is the identifier)
+        let data = self.fetch_blob_content(&source, &digest.hex).await?;
         self.cache.put(digest, &data)?;
-
         Ok(data)
     }
 }
