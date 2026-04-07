@@ -184,6 +184,7 @@ fn daemon_lifecycle_start_ping_stop() {
 }
 
 #[test]
+#[ignore] // requires npm registry + GitHub API with matching tag conventions; run manually
 fn mount_npm_server_only_resolves_and_starts_nfs() {
     if std::env::var("CTXFS_E2E_SKIP_NETWORK").is_ok() {
         eprintln!("skipping network test");
