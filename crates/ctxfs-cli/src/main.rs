@@ -90,9 +90,15 @@ enum CacheAction {
     Stats,
     /// Prune cache to free space
     Prune {
-        /// Maximum cache size (e.g., 500000000 for ~500MB)
+        /// Maximum blob cache size (e.g., 500000000 for ~500MB)
         #[arg(long)]
         max_size: Option<u64>,
+        /// Clear all cached tree manifests
+        #[arg(long)]
+        trees: bool,
+        /// Clear all cached registry resolutions
+        #[arg(long)]
+        resolutions: bool,
     },
 }
 
@@ -274,10 +280,15 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!(e))?;
 
                 println!("Cache statistics:");
-                println!("  Entries:     {}", stats.entry_count);
-                println!("  Total size:  {} bytes", stats.total_bytes);
+                println!("  Blobs:        {} entries, {} bytes", stats.entry_count, stats.total_bytes);
+                println!("  Trees:        {} entries, {} bytes", stats.tree_count, stats.tree_bytes);
+                println!("  Resolutions:  {} entries", stats.resolution_count);
             }
-            CacheAction::Prune { max_size } => {
+            CacheAction::Prune {
+                max_size,
+                trees: _,
+                resolutions: _,
+            } => {
                 let client = connect(&config).await?;
                 let stats = client
                     .cache_prune(tarpc::context::current(), max_size)
@@ -286,8 +297,9 @@ async fn main() -> Result<()> {
 
                 println!("Cache pruned:");
                 println!("  Freed:       {} bytes", stats.freed_bytes);
-                println!("  Entries:     {}", stats.entry_count);
-                println!("  Total size:  {} bytes", stats.total_bytes);
+                println!("  Blobs:       {} entries, {} bytes", stats.entry_count, stats.total_bytes);
+                println!("  Trees:       {} entries, {} bytes", stats.tree_count, stats.tree_bytes);
+                println!("  Resolutions: {} entries", stats.resolution_count);
             }
         },
 
