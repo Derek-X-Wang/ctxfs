@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 ctxfs-core = { workspace = true }
 ctxfs-manifest = { workspace = true }
+ctxfs-provider-common = { workspace = true }
 linked-hash-map = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

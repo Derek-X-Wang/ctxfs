@@ -1,3 +1,6 @@
+mod resolution;
+pub use resolution::{CachedResolution, ResolutionCache};
+
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;

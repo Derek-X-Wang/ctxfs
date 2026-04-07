@@ -2,9 +2,10 @@
 
 use async_trait::async_trait;
 use ctxfs_core::error::CtxfsError;
+use serde::{Deserialize, Serialize};
 
 /// The result of resolving a package to its GitHub source repository.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSource {
     pub owner: String,
     pub repo: String,
