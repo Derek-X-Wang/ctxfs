@@ -234,6 +234,9 @@ mod tests {
         });
         let result = extract_repo_info(&json);
         // Empty directory should still be Some("") — the resolver passes it through
-        assert_eq!(result, Some(("owner".into(), "repo".into(), Some(String::new()))));
+        assert_eq!(
+            result,
+            Some(("owner".into(), "repo".into(), Some(String::new())))
+        );
     }
 }

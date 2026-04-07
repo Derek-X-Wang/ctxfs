@@ -220,6 +220,9 @@ mod tests {
                 "home_page": "https://github.com/owner/repo"
             }
         });
-        assert_eq!(extract_repo_url(&json), Some(("owner".into(), "repo".into())));
+        assert_eq!(
+            extract_repo_url(&json),
+            Some(("owner".into(), "repo".into()))
+        );
     }
 }
