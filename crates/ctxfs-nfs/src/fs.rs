@@ -98,8 +98,8 @@ impl CtxfsNfs {
 
     /// Create a new `CtxfsNfs` with an optional subpath.
     ///
-    /// When `subpath` is `Some`, [`resolve_subpath`](Self::resolve_subpath) must
-    /// be called before [`spawn`](Self::spawn) to walk the directory tree and
+    /// When `subpath` is `Some`, [`spawn`](Self::spawn) will automatically call
+    /// [`resolve_subpath`](Self::resolve_subpath) to walk the directory tree and
     /// re-root the filesystem at the named subdirectory.
     #[must_use]
     pub fn new_with_subpath(

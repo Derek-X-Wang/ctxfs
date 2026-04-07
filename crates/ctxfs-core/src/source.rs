@@ -73,9 +73,10 @@ impl SourceSpec {
         rest: &str,
         original: &str,
     ) -> Result<Self, CtxfsError> {
-        // Split off optional subpath (after second ':')
+        // Split off optional subpath (after second ':'); treat empty subpath as None
         let (repo_ref, subpath) = match rest.split_once(':') {
-            Some((rr, sp)) => (rr, Some(sp.to_string())),
+            Some((rr, sp)) if !sp.is_empty() => (rr, Some(sp.to_string())),
+            Some((rr, _)) => (rr, None),
             None => (rest, None),
         };
 

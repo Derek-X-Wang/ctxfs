@@ -217,7 +217,10 @@ impl DaemonServer {
 
         // Step 1: Resolve "latest" to an exact version.
         if source.version == "latest" {
-            let res = resolver.as_ref().expect("resolver required for latest");
+            let res = resolver.as_ref().ok_or_else(|| {
+                "GitHub sources do not support '@latest'; specify a branch, tag, or commit SHA"
+                    .to_string()
+            })?;
             source.version = self
                 .rt_handle
                 .block_on(res.resolve_latest(&source.name))

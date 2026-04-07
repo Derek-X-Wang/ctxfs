@@ -29,7 +29,7 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 
 ## Architecture
 
-11-crate workspace. Dependency graph:
+12-crate workspace. Dependency graph:
 - ctxfs-core: Digest, SourceSpec, Provider trait, Config, Error
 - ctxfs-manifest: Snapshot, Directory, InodeTable (depends on core)
 - ctxfs-cache: Content-addressable blob cache with LRU (depends on core, manifest)
