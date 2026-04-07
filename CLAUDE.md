@@ -39,6 +39,7 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 - ctxfs-provider-npm: npm registry resolver (depends on core, provider-common)
 - ctxfs-provider-pypi: PyPI registry resolver (depends on core, provider-common)
 - ctxfs-provider-crate: crates.io registry resolver (depends on core, provider-common)
+- ctxfs-cache-redis: Optional Redis shared tree cache (depends on cache)
 - ctxfs-nfs: NFSv3 loopback server (depends on core, manifest, cache)
 - ctxfs-daemon: Background service (depends on all above)
 - ctxfs-cli: clap CLI binary (depends on core, ipc, daemon)
@@ -50,3 +51,6 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 - `CTXFS_CACHE_DIR`: Override cache directory (default: ~/.ctxfs/cache)
 - `CTXFS_CACHE_MAX_BYTES`: Override max cache size (default: 512MB)
 - `CTXFS_LOG_LEVEL`: Override log level (default: info)
+- `CTXFS_REDIS_URL`: Optional Redis URL for shared tree caching
+- `CTXFS_LATEST_TTL_SECS`: TTL for @latest resolution cache (default: 3600)
+- `CTXFS_TREE_CACHE_MAX_BYTES`: Max local tree cache size (default: 500MB)
