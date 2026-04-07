@@ -8,7 +8,10 @@ use ctxfs_ipc::transport;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "ctxfs", about = "ContextFS — AI-native read-only mountable filesystem")]
+#[command(
+    name = "ctxfs",
+    about = "ContextFS — AI-native read-only mountable filesystem"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -252,17 +255,13 @@ async fn main() -> Result<()> {
                 }
                 println!("Could not find daemon PID");
             }
-            DaemonAction::Status => {
-                match connect(&config).await {
-                    Ok(client) => {
-                        match client.ping(tarpc::context::current()).await {
-                            Ok(resp) => println!("Daemon is running ({resp})"),
-                            Err(e) => println!("Daemon unreachable: {e}"),
-                        }
-                    }
-                    Err(_) => println!("Daemon is not running"),
-                }
-            }
+            DaemonAction::Status => match connect(&config).await {
+                Ok(client) => match client.ping(tarpc::context::current()).await {
+                    Ok(resp) => println!("Daemon is running ({resp})"),
+                    Err(e) => println!("Daemon unreachable: {e}"),
+                },
+                Err(_) => println!("Daemon is not running"),
+            },
         },
 
         Commands::Cache { action } => match action {
@@ -338,13 +337,7 @@ fn run_mount_nfs(port: u16, mount_point: &str) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("sudo")
-        .args([
-            "mount_nfs",
-            "-o",
-            opts.as_str(),
-            "127.0.0.1:/",
-            mount_point,
-        ])
+        .args(["mount_nfs", "-o", opts.as_str(), "127.0.0.1:/", mount_point])
         .status()
         .context("failed to invoke sudo mount_nfs")?;
 

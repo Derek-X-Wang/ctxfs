@@ -201,7 +201,10 @@ impl CtxfsNfs {
         // Fast path: already populated.
         {
             let node = self.nodes.get(&dirid).ok_or(nfsstat3::NFS3ERR_NOENT)?;
-            if let NodeKind::Directory { populated: true, .. } = &node.kind {
+            if let NodeKind::Directory {
+                populated: true, ..
+            } = &node.kind
+            {
                 drop(node);
                 if let Some(children) = self.dir_children.get(&dirid) {
                     return Ok(children.clone());
@@ -218,14 +221,10 @@ impl CtxfsNfs {
             }
         };
 
-        let data = self
-            .provider
-            .fetch_directory(&digest)
-            .await
-            .map_err(|e| {
-                error!("fetch_directory({}) failed: {}", digest, e);
-                nfsstat3::NFS3ERR_IO
-            })?;
+        let data = self.provider.fetch_directory(&digest).await.map_err(|e| {
+            error!("fetch_directory({}) failed: {}", digest, e);
+            nfsstat3::NFS3ERR_IO
+        })?;
 
         let directory: Directory = serde_json::from_slice(&data).map_err(|e| {
             error!("parse directory {}: {}", digest, e);
@@ -301,7 +300,11 @@ impl CtxfsNfs {
             ..
         } = &node.kind
         {
-            debug!("inline content for file id={} ({} bytes)", node.id, content.len());
+            debug!(
+                "inline content for file id={} ({} bytes)",
+                node.id,
+                content.len()
+            );
             let _ = digest;
             return Ok(content.clone());
         }
@@ -372,11 +375,7 @@ impl NFSFileSystem for CtxfsNfs {
         offset: u64,
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let node = self
-            .nodes
-            .get(&id)
-            .ok_or(nfsstat3::NFS3ERR_NOENT)?
-            .clone();
+        let node = self.nodes.get(&id).ok_or(nfsstat3::NFS3ERR_NOENT)?.clone();
 
         let data = self.fetch_file_bytes(&node).await?;
 

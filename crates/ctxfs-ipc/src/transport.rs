@@ -4,9 +4,7 @@ use tarpc::serde_transport::unix;
 use tokio_serde::formats::Json;
 
 /// Create a tarpc client connected to the daemon via UDS.
-pub async fn connect_client(
-    socket_path: &Path,
-) -> Result<crate::service::CtxfsServiceClient> {
+pub async fn connect_client(socket_path: &Path) -> Result<crate::service::CtxfsServiceClient> {
     let transport = unix::connect(socket_path, Json::default)
         .await
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
@@ -39,8 +37,9 @@ pub async fn listen(
     // Remove stale socket unconditionally (avoids TOCTOU with exists+remove)
     if let Err(e) = std::fs::remove_file(socket_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(e)
-                .with_context(|| format!("failed to remove stale socket {}", socket_path.display()));
+            return Err(e).with_context(|| {
+                format!("failed to remove stale socket {}", socket_path.display())
+            });
         }
     }
     if let Some(parent) = socket_path.parent() {

@@ -81,8 +81,7 @@ impl BlobCache {
                 .map_err(|e| CtxfsError::Cache(format!("mkdir failed: {e}")))?;
         }
 
-        fs::write(&path, data)
-            .map_err(|e| CtxfsError::Cache(format!("write failed: {e}")))?;
+        fs::write(&path, data).map_err(|e| CtxfsError::Cache(format!("write failed: {e}")))?;
 
         let size = data.len() as u64;
         let key = digest.hex.clone();
@@ -163,8 +162,8 @@ impl BlobCache {
         algo_path: &Path,
         entries: &mut Vec<(String, u64, std::time::SystemTime)>,
     ) -> Result<(), CtxfsError> {
-        let prefix_dirs = fs::read_dir(algo_path)
-            .map_err(|e| CtxfsError::Cache(format!("scan failed: {e}")))?;
+        let prefix_dirs =
+            fs::read_dir(algo_path).map_err(|e| CtxfsError::Cache(format!("scan failed: {e}")))?;
 
         for prefix_entry in prefix_dirs.flatten() {
             let prefix_path = prefix_entry.path();

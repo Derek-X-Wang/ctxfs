@@ -12,8 +12,14 @@ const SUDOERS_PATH: &str = "/etc/sudoers.d/ctxfs";
 pub fn generate_sudoers(username: &str) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let _ = writeln!(out, "# Created by `ctxfs setup` — allows passwordless NFS mount/umount");
-    let _ = writeln!(out, "# for user '{username}' so `ctxfs mount` doesn't prompt for a password.");
+    let _ = writeln!(
+        out,
+        "# Created by `ctxfs setup` — allows passwordless NFS mount/umount"
+    );
+    let _ = writeln!(
+        out,
+        "# for user '{username}' so `ctxfs mount` doesn't prompt for a password."
+    );
     let _ = writeln!(out, "# Remove with: sudo rm /etc/sudoers.d/ctxfs");
     let _ = writeln!(out);
 

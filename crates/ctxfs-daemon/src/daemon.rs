@@ -68,10 +68,7 @@ impl Daemon {
             .await
             .context("failed to create IPC listener")?;
 
-        info!(
-            "daemon listening on {}",
-            self.config.socket_path.display()
-        );
+        info!("daemon listening on {}", self.config.socket_path.display());
 
         let server = DaemonServer {
             cache: self.cache.clone(),
@@ -181,8 +178,8 @@ async fn wait_for_sigterm() {
 /// Reserve a loopback TCP port by binding and immediately dropping.
 /// Small TOCTOU window, acceptable for a local dev tool.
 fn pick_free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("failed to reserve port: {e}"))?;
+    let listener =
+        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("failed to reserve port: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("failed to read local addr: {e}"))?
@@ -196,8 +193,7 @@ impl DaemonServer {
     /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
     /// terminal instead of the daemon's log.
     fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
-        let source =
-            SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
+        let source = SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
 
         let provider = Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),
@@ -228,7 +224,10 @@ impl DaemonServer {
             .block_on(fs.spawn(&addr))
             .map_err(|e| format!("failed to start NFS server on {addr}: {e}"))?;
 
-        info!("NFS server listening on {} for {source_str}", nfs_handle.addr);
+        info!(
+            "NFS server listening on {} for {source_str}",
+            nfs_handle.addr
+        );
 
         let info = MountInfo {
             id: id.clone(),

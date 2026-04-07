@@ -118,7 +118,8 @@ impl InodeTable {
             }
         }
 
-        let _ = self.lookup_table
+        let _ = self
+            .lookup_table
             .write()
             .unwrap()
             .insert((parent, name), ino);

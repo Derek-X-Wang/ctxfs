@@ -32,8 +32,7 @@ pub struct GitHubProvider {
 
 impl std::fmt::Debug for GitHubProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GitHubProvider")
-            .finish_non_exhaustive()
+        f.debug_struct("GitHubProvider").finish_non_exhaustive()
     }
 }
 
@@ -75,10 +74,8 @@ impl GitHubProvider {
         let mut default_headers = HeaderMap::new();
         let _ = default_headers.insert(ACCEPT, "application/vnd.github.v3+json".parse().unwrap());
         if let Some(token) = token {
-            let _ = default_headers.insert(
-                AUTHORIZATION,
-                format!("Bearer {token}").parse().unwrap(),
-            );
+            let _ =
+                default_headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         }
 
         let client = reqwest::Client::builder()
@@ -167,15 +164,9 @@ impl GitHubProvider {
         source: &SourceSpec,
         sha: &str,
     ) -> Result<Vec<u8>, CtxfsError> {
-        let url = Self::api_url(
-            &source.owner,
-            &source.repo,
-            &format!("git/blobs/{sha}"),
-        );
+        let url = Self::api_url(&source.owner, &source.repo, &format!("git/blobs/{sha}"));
 
-        let blob: BlobResponse = self
-            .get_json(&url, &format!("fetch blob {sha}"))
-            .await?;
+        let blob: BlobResponse = self.get_json(&url, &format!("fetch blob {sha}")).await?;
 
         if blob.encoding != "base64" {
             return Err(CtxfsError::Provider(format!(
@@ -185,7 +176,11 @@ impl GitHubProvider {
         }
 
         // GitHub base64 content has newlines; strip them
-        let cleaned: String = blob.content.chars().filter(|c| !c.is_whitespace()).collect();
+        let cleaned: String = blob
+            .content
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let data = base64::engine::general_purpose::STANDARD
             .decode(&cleaned)
             .map_err(|e| CtxfsError::Provider(format!("base64 decode error: {e}")))?;
@@ -281,10 +276,7 @@ impl GitHubProvider {
                 }
             };
 
-            dir_children
-                .entry(parent_key)
-                .or_default()
-                .push(dir_entry);
+            dir_children.entry(parent_key).or_default().push(dir_entry);
         }
 
         // Build Directory objects with computed digests
@@ -394,16 +386,9 @@ impl Provider for GitHubProvider {
             return Ok(data);
         }
 
-        let source = self
-            .active_source
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| {
-                CtxfsError::Provider(
-                    "fetch_blob called before fetch_snapshot; no active source".into(),
-                )
-            })?;
+        let source = self.active_source.lock().unwrap().clone().ok_or_else(|| {
+            CtxfsError::Provider("fetch_blob called before fetch_snapshot; no active source".into())
+        })?;
 
         let data = self.fetch_blob_content(&source, &digest.hex).await?;
         self.cache.put(digest, &data)?;
@@ -447,10 +432,7 @@ mod tests {
 
     #[test]
     fn test_parent_path_deep() {
-        assert_eq!(
-            parent_path("a/b/c/d/e.txt"),
-            Some("a/b/c/d".to_string())
-        );
+        assert_eq!(parent_path("a/b/c/d/e.txt"), Some("a/b/c/d".to_string()));
     }
 
     #[test]

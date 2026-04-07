@@ -24,16 +24,10 @@ fn network_allowed() -> bool {
     std::env::var("CTXFS_E2E_SKIP_NETWORK").is_err()
 }
 
-async fn build_fs(
-    owner: &str,
-    repo: &str,
-    git_ref: &str,
-) -> (CtxfsNfs, tempfile::TempDir) {
+async fn build_fs(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 128 * 1024 * 1024).unwrap());
-    let token = std::env::var("GITHUB_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
     let provider = Arc::new(GitHubProvider::new(token.as_deref(), cache.clone()));
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
     let snap_bytes = provider.fetch_snapshot(&source).await.unwrap();
@@ -60,7 +54,11 @@ async fn nested_directory_traversal() {
         .collect();
 
     // bubbletea root should have at least: go.mod, README.md, tea.go, examples/
-    assert!(names.len() > 5, "expected >5 root entries, got {}", names.len());
+    assert!(
+        names.len() > 5,
+        "expected >5 root entries, got {}",
+        names.len()
+    );
     assert!(
         names.iter().any(|n| n == "go.mod" || n == "README.md"),
         "expected go.mod or README.md in root, got {names:?}"

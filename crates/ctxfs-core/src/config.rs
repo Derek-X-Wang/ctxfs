@@ -49,9 +49,7 @@ impl Config {
             config.log_level = v;
         }
         // Empty string is treated as "no token" to match common shell patterns.
-        config.github_token = std::env::var("GITHUB_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty());
+        config.github_token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
 
         config
     }

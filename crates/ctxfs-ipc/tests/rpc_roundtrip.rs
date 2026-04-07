@@ -104,11 +104,9 @@ async fn start_server(socket_path: &std::path::Path) -> tokio::task::JoinHandle<
             if let Ok(transport) = result {
                 let server = server.clone();
                 let channel = tarpc::server::BaseChannel::with_defaults(transport);
-                tokio::spawn(
-                    channel.execute(server.serve()).for_each(|resp| async {
-                        tokio::spawn(resp);
-                    }),
-                );
+                tokio::spawn(channel.execute(server.serve()).for_each(|resp| async {
+                    tokio::spawn(resp);
+                }));
             }
         }
     })

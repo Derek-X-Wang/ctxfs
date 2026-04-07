@@ -42,9 +42,9 @@ pub struct SourceSpec {
 impl SourceSpec {
     /// Parse a source string like `github:owner/repo@ref` or `github:owner/repo@ref:subpath`
     pub fn parse(s: &str) -> Result<Self, CtxfsError> {
-        let (provider_str, rest) = s
-            .split_once(':')
-            .ok_or_else(|| CtxfsError::InvalidSource(format!("missing provider prefix in '{s}'")))?;
+        let (provider_str, rest) = s.split_once(':').ok_or_else(|| {
+            CtxfsError::InvalidSource(format!("missing provider prefix in '{s}'"))
+        })?;
 
         let provider_type: ProviderType = provider_str.parse()?;
 
@@ -54,13 +54,13 @@ impl SourceSpec {
             None => (rest, None),
         };
 
-        let (owner_repo, git_ref) = repo_ref.split_once('@').ok_or_else(|| {
-            CtxfsError::InvalidSource(format!("missing @ref in '{s}'"))
-        })?;
+        let (owner_repo, git_ref) = repo_ref
+            .split_once('@')
+            .ok_or_else(|| CtxfsError::InvalidSource(format!("missing @ref in '{s}'")))?;
 
-        let (owner, repo) = owner_repo.split_once('/').ok_or_else(|| {
-            CtxfsError::InvalidSource(format!("missing owner/repo in '{s}'"))
-        })?;
+        let (owner, repo) = owner_repo
+            .split_once('/')
+            .ok_or_else(|| CtxfsError::InvalidSource(format!("missing owner/repo in '{s}'")))?;
 
         if owner.is_empty() || repo.is_empty() || git_ref.is_empty() {
             return Err(CtxfsError::InvalidSource(format!(

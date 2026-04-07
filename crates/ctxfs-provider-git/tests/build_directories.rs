@@ -77,11 +77,7 @@ fn nested_directory_resolution_through_cache() {
     let root_dir: Directory = serde_json::from_slice(&root_data).unwrap();
 
     // Find "src" directory entry
-    let src_entry = root_dir
-        .entries
-        .iter()
-        .find(|e| e.name() == "src")
-        .unwrap();
+    let src_entry = root_dir.entries.iter().find(|e| e.name() == "src").unwrap();
 
     let src_digest = match src_entry {
         DirEntry::Directory(d) => &d.digest,

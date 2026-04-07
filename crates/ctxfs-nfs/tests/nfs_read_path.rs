@@ -31,9 +31,7 @@ async fn build_fs_for(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, temp
     let tempdir = tempfile::tempdir().unwrap();
     let cache = Arc::new(BlobCache::new(tempdir.path().to_path_buf(), 64 * 1024 * 1024).unwrap());
 
-    let token = std::env::var("GITHUB_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
     let provider = Arc::new(GitHubProvider::new(token.as_deref(), cache.clone()));
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
 
@@ -82,7 +80,10 @@ async fn lookup_followed_by_read_returns_file_bytes() {
         .expect("README should be findable in root");
 
     // Read the first 1 KB of README.
-    let (bytes, _eof) = fs.read(readme_id, 0, 1024).await.expect("read should succeed");
+    let (bytes, _eof) = fs
+        .read(readme_id, 0, 1024)
+        .await
+        .expect("read should succeed");
 
     let text = String::from_utf8_lossy(&bytes);
     assert!(!bytes.is_empty(), "README should not be empty");
@@ -116,7 +117,10 @@ async fn read_honors_offset_and_count() {
     assert_eq!(sliced, &full[1..4]);
 
     // Offset past end: should return empty, eof=true.
-    let (empty, eof) = fs.read(readme_id, full.len() as u64 + 100, 10).await.unwrap();
+    let (empty, eof) = fs
+        .read(readme_id, full.len() as u64 + 100, 10)
+        .await
+        .unwrap();
     assert!(empty.is_empty());
     assert!(eof);
 }

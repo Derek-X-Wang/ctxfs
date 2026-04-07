@@ -83,7 +83,10 @@ impl CtxfsFilesystem {
         };
 
         // Fetch directory data via provider
-        let data = match self.rt_handle.block_on(self.provider.fetch_directory(&digest)) {
+        let data = match self
+            .rt_handle
+            .block_on(self.provider.fetch_directory(&digest))
+        {
             Ok(d) => d,
             Err(e) => {
                 error!("failed to fetch directory {}: {}", digest, e);
@@ -149,9 +152,7 @@ impl CtxfsFilesystem {
                 let perm = if *executable { 0o555 } else { 0o444 };
                 (FileType::RegularFile, perm, *size, 1)
             }
-            InodeKind::Symlink { target } => {
-                (FileType::Symlink, 0o777, target.len() as u64, 1)
-            }
+            InodeKind::Symlink { target } => (FileType::Symlink, 0o777, target.len() as u64, 1),
         };
 
         FileAttr {
