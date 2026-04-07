@@ -69,6 +69,16 @@ struct BlobResponse {
     sha: String,
 }
 
+/// Extract (owner, repo) from `SourceSpec.name`, which is `"owner/repo"` for GitHub sources.
+fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
+    source.name.split_once('/').ok_or_else(|| {
+        CtxfsError::InvalidSource(format!(
+            "expected owner/repo in name '{}', got no '/'",
+            source.name
+        ))
+    })
+}
+
 impl GitHubProvider {
     pub fn new(token: Option<&str>, cache: Arc<BlobCache>) -> Self {
         let mut default_headers = HeaderMap::new();
@@ -123,14 +133,15 @@ impl GitHubProvider {
     }
 
     async fn resolve_ref(&self, source: &SourceSpec) -> Result<String, CtxfsError> {
+        let (owner, repo) = owner_repo(source)?;
         let url = Self::api_url(
-            &source.owner,
-            &source.repo,
-            &format!("commits/{}", source.git_ref),
+            owner,
+            repo,
+            &format!("commits/{}", source.version),
         );
 
         let commit: CommitResponse = self
-            .get_json(&url, &format!("resolve ref '{}'", source.git_ref))
+            .get_json(&url, &format!("resolve ref '{}'", source.version))
             .await?;
 
         Ok(commit.sha)
@@ -141,9 +152,10 @@ impl GitHubProvider {
         source: &SourceSpec,
         tree_sha: &str,
     ) -> Result<TreeResponse, CtxfsError> {
+        let (owner, repo) = owner_repo(source)?;
         let url = Self::api_url(
-            &source.owner,
-            &source.repo,
+            owner,
+            repo,
             &format!("git/trees/{tree_sha}?recursive=1"),
         );
 
@@ -151,8 +163,8 @@ impl GitHubProvider {
 
         if tree.truncated {
             warn!(
-                "tree response was truncated for {}/{}; large repos may be incomplete",
-                source.owner, source.repo
+                "tree response was truncated for {}; large repos may be incomplete",
+                source.name
             );
         }
 
@@ -164,7 +176,8 @@ impl GitHubProvider {
         source: &SourceSpec,
         sha: &str,
     ) -> Result<Vec<u8>, CtxfsError> {
-        let url = Self::api_url(&source.owner, &source.repo, &format!("git/blobs/{sha}"));
+        let (owner, repo) = owner_repo(source)?;
+        let url = Self::api_url(owner, repo, &format!("git/blobs/{sha}"));
 
         let blob: BlobResponse = self.get_json(&url, &format!("fetch blob {sha}")).await?;
 
@@ -342,7 +355,7 @@ impl Provider for GitHubProvider {
         *self.active_source.lock().unwrap() = Some(source.clone());
 
         let commit_sha = self.resolve_ref(source).await?;
-        debug!("resolved ref {} -> {}", source.git_ref, commit_sha);
+        debug!("resolved ref {} -> {}", source.version, commit_sha);
 
         let tree = self.fetch_tree(source, &commit_sha).await?;
         debug!("fetched tree with {} entries", tree.tree.len());
