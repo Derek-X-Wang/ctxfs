@@ -32,7 +32,7 @@ async fn build_fs_for(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, temp
     let cache = Arc::new(BlobCache::new(tempdir.path().to_path_buf(), 64 * 1024 * 1024).unwrap());
 
     let token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
-    let provider = Arc::new(GitHubProvider::new(token.as_deref(), cache.clone()));
+    let provider = Arc::new(GitHubProvider::new(token.as_deref(), cache.clone(), None, None));
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
 
     let snapshot_bytes = provider.fetch_snapshot(&source).await.unwrap();

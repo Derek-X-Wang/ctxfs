@@ -260,6 +260,8 @@ impl DaemonServer {
         let provider = Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),
             self.cache.clone(),
+            None, // tree_cache — will be wired in Task 8
+            None, // shared_tree_cache — will be wired in Task 8
         ));
 
         let snapshot_data = self

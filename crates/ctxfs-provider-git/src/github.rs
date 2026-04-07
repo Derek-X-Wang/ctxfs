@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use base64::Engine;
-use ctxfs_cache::BlobCache;
+use ctxfs_cache::{BlobCache, SharedTreeCache, TreeCache};
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::source::SourceSpec;
@@ -23,6 +23,8 @@ const MODE_EXECUTABLE: &str = "100755";
 pub struct GitHubProvider {
     client: reqwest::Client,
     cache: Arc<BlobCache>,
+    tree_cache: Option<Arc<TreeCache>>,
+    shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
     /// The most-recently-fetched source. `fetch_snapshot` records it so that
     /// subsequent `fetch_blob` calls (which only receive a `Digest`) can locate
     /// the right repo for the GitHub blob API. A provider instance is scoped
@@ -80,7 +82,12 @@ fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
 }
 
 impl GitHubProvider {
-    pub fn new(token: Option<&str>, cache: Arc<BlobCache>) -> Self {
+    pub fn new(
+        token: Option<&str>,
+        cache: Arc<BlobCache>,
+        tree_cache: Option<Arc<TreeCache>>,
+        shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
+    ) -> Self {
         let mut default_headers = HeaderMap::new();
         let _ = default_headers.insert(ACCEPT, "application/vnd.github.v3+json".parse().unwrap());
         if let Some(token) = token {
@@ -97,6 +104,8 @@ impl GitHubProvider {
         Self {
             client,
             cache,
+            tree_cache,
+            shared_tree_cache,
             active_source: std::sync::Mutex::new(None),
         }
     }
@@ -349,6 +358,28 @@ impl Provider for GitHubProvider {
         let commit_sha = self.resolve_ref(source).await?;
         debug!("resolved ref {} -> {}", source.version, commit_sha);
 
+        let (owner, repo) = owner_repo(source)?;
+
+        // Tier 2a: local tree cache
+        if let Some(ref tc) = self.tree_cache {
+            if let Some(data) = tc.get(owner, repo, &commit_sha) {
+                debug!("tree cache HIT for {owner}/{repo}@{commit_sha}");
+                return Ok(data);
+            }
+        }
+
+        // Tier 2b: shared (Redis) tree cache
+        if let Some(ref stc) = self.shared_tree_cache {
+            if let Some(data) = stc.get_tree(owner, repo, &commit_sha).await {
+                debug!("shared tree cache HIT for {owner}/{repo}@{commit_sha}");
+                // Populate local cache
+                if let Some(ref tc) = self.tree_cache {
+                    let _ = tc.put(owner, repo, &commit_sha, &data);
+                }
+                return Ok(data);
+            }
+        }
+
         let tree = self.fetch_tree(source, &commit_sha).await?;
         debug!("fetched tree with {} entries", tree.tree.len());
 
@@ -371,6 +402,14 @@ impl Provider for GitHubProvider {
 
         let json = serde_json::to_vec(&snapshot)
             .map_err(|e| CtxfsError::Manifest(format!("serialize snapshot: {e}")))?;
+
+        // Store in tree caches for future lookups.
+        if let Some(ref tc) = self.tree_cache {
+            let _ = tc.put(owner, repo, &snapshot.commit_sha, &json);
+        }
+        if let Some(ref stc) = self.shared_tree_cache {
+            stc.put_tree(owner, repo, &snapshot.commit_sha, &json).await;
+        }
 
         Ok(json)
     }
