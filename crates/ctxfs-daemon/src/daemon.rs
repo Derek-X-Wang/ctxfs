@@ -2,11 +2,12 @@ use anyhow::{bail, Context, Result};
 use ctxfs_cache::BlobCache;
 use ctxfs_core::config::Config;
 use ctxfs_core::provider::Provider;
-use ctxfs_core::source::SourceSpec;
+use ctxfs_core::source::{ProviderType, SourceSpec};
 use ctxfs_ipc::service::{CacheStats, CtxfsService, MountInfo, MountStatus};
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
+use ctxfs_provider_common::resolver::RegistryResolver;
 use ctxfs_provider_git::GitHubProvider;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -190,11 +191,64 @@ fn pick_free_port() -> Result<u16, String> {
 }
 
 impl DaemonServer {
+    /// Build the appropriate registry resolver for a non-GitHub source.
+    fn make_resolver(source: &SourceSpec) -> Result<Box<dyn RegistryResolver>, String> {
+        match source.provider_type {
+            ProviderType::Npm => Ok(Box::new(ctxfs_provider_npm::NpmResolver::new())),
+            ProviderType::PyPI => Ok(Box::new(ctxfs_provider_pypi::PyPIResolver::new())),
+            ProviderType::Crate => Ok(Box::new(ctxfs_provider_crate::CrateResolver::new())),
+            ProviderType::GitHub => Err("GitHub sources don't use a registry resolver".into()),
+        }
+    }
+
     /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
     /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
     /// terminal instead of the daemon's log.
     fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
-        let source = SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
+        let mut source =
+            SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
+
+        // Step 1: Resolve "latest" to an exact version for registry sources.
+        if source.version == "latest" {
+            let resolver = Self::make_resolver(&source)?;
+            source.version = self
+                .rt_handle
+                .block_on(resolver.resolve_latest(&source.name))
+                .map_err(|e| format!("failed to resolve latest: {e}"))?;
+        }
+
+        // Step 2: Resolve to GitHub coordinates.
+        let (owner, repo, git_ref, subpath) = match source.provider_type {
+            ProviderType::GitHub => {
+                let (o, r) = source
+                    .name
+                    .split_once('/')
+                    .ok_or_else(|| format!("invalid github source: {}", source.name))?;
+                (
+                    o.to_string(),
+                    r.to_string(),
+                    source.version.clone(),
+                    source.subpath.clone(),
+                )
+            }
+            ProviderType::Npm | ProviderType::PyPI | ProviderType::Crate => {
+                let reg = Self::make_resolver(&source)?;
+                let src = self
+                    .rt_handle
+                    .block_on(reg.resolve(&source.name, &source.version))
+                    .map_err(|e| format!("{e}"))?;
+                let sp = source.subpath.clone().or(src.subpath);
+                (src.owner, src.repo, src.git_ref, sp)
+            }
+        };
+
+        // Build a GitHub-shaped SourceSpec for the provider.
+        let github_source = SourceSpec {
+            provider_type: ProviderType::GitHub,
+            name: format!("{owner}/{repo}"),
+            version: git_ref,
+            subpath: subpath.clone(),
+        };
 
         let provider = Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),
@@ -203,7 +257,7 @@ impl DaemonServer {
 
         let snapshot_data = self
             .rt_handle
-            .block_on(provider.fetch_snapshot(&source))
+            .block_on(provider.fetch_snapshot(&github_source))
             .map_err(|e| format!("failed to fetch snapshot: {e}"))?;
 
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
@@ -219,7 +273,14 @@ impl DaemonServer {
         let port = pick_free_port()?;
         let addr = format!("127.0.0.1:{port}");
 
-        let fs = CtxfsNfs::new(provider, source, self.cache.clone(), snapshot);
+        // Use new_with_subpath to support monorepo mounts.
+        let fs = CtxfsNfs::new_with_subpath(
+            provider,
+            github_source,
+            self.cache.clone(),
+            snapshot,
+            subpath,
+        );
         let nfs_handle = self
             .rt_handle
             .block_on(fs.spawn(&addr))

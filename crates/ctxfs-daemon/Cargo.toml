@@ -10,6 +10,10 @@ ctxfs-manifest = { workspace = true }
 ctxfs-cache = { workspace = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-provider-git = { workspace = true }
+ctxfs-provider-common = { workspace = true }
+ctxfs-provider-npm = { workspace = true }
+ctxfs-provider-pypi = { workspace = true }
+ctxfs-provider-crate = { workspace = true }
 ctxfs-nfs = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
