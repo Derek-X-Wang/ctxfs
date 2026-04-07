@@ -4,6 +4,9 @@ pub use resolution::{CachedResolution, ResolutionCache};
 mod tree;
 pub use tree::TreeCache;
 
+mod shared;
+pub use shared::SharedTreeCache;
+
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;
