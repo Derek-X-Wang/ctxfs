@@ -29,12 +29,16 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 
 ## Architecture
 
-7-crate workspace. Dependency graph:
+11-crate workspace. Dependency graph:
 - ctxfs-core: Digest, SourceSpec, Provider trait, Config, Error
 - ctxfs-manifest: Snapshot, Directory, InodeTable (depends on core)
 - ctxfs-cache: Content-addressable blob cache with LRU (depends on core, manifest)
 - ctxfs-ipc: tarpc service trait + UDS transport (depends on core)
+- ctxfs-provider-common: ResolvedSource, RegistryResolver trait, repo URL parsing (depends on core)
 - ctxfs-provider-git: GitHub REST API provider (depends on core, manifest, cache)
+- ctxfs-provider-npm: npm registry resolver (depends on core, provider-common)
+- ctxfs-provider-pypi: PyPI registry resolver (depends on core, provider-common)
+- ctxfs-provider-crate: crates.io registry resolver (depends on core, provider-common)
 - ctxfs-nfs: NFSv3 loopback server (depends on core, manifest, cache)
 - ctxfs-daemon: Background service (depends on all above)
 - ctxfs-cli: clap CLI binary (depends on core, ipc, daemon)

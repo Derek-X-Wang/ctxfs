@@ -8,6 +8,11 @@ ctxfs mount github:rust-lang/rust@master /mnt/rust
 cat /mnt/rust/README.md     # fetched on demand, cached locally
 grep -r "fn main" /mnt/rust/src/  # works with any Unix tool
 ctxfs unmount /mnt/rust
+
+# Mount any npm/PyPI/crate package source — resolves to GitHub automatically
+ctxfs mount npm:lodash@4.17.21 /mnt/lodash
+ctxfs mount pypi:requests@2.31.0 /mnt/requests
+ctxfs mount crate:serde@1.0.0 /mnt/serde
 ```
 
 **No macFUSE. No kernel extensions. No reboots.** Uses a local NFSv3 loopback server that macOS and Linux mount natively.
@@ -58,9 +63,13 @@ ctxfs daemon stop
 ```
 github:<owner>/<repo>@<ref>
 github:<owner>/<repo>@<ref>:<subpath>
+npm:<package>@<version>
+npm:@<scope>/<package>@<version>
+pypi:<package>@<version>
+crate:<package>@<version>
 ```
 
-`<ref>` can be a branch name, tag, or commit SHA.
+`<ref>` can be a branch name, tag, or commit SHA. `@latest` is also supported for registry packages — resolves to the current version at mount time.
 
 ### Server-only mode (no sudo)
 
@@ -102,6 +111,20 @@ sudo mount_nfs -o nolocks,vers=3,tcp,port=PORT,mountport=PORT 127.0.0.1:/ /mnt/r
 6. The daemon fetches file content lazily from GitHub and caches it on disk
 
 Files are cached in a content-addressable store with LRU eviction (default 512MB). Subsequent reads of the same file are served from disk.
+
+## Package Registry Support
+
+Mount source code from npm, PyPI, or crates.io — ctxfs resolves the package to its GitHub source repository and mounts it lazily:
+
+1. `ctxfs mount npm:react@19.1.0 /mnt/react` hits the npm registry
+2. Reads the `repository` field → `github.com/facebook/react`
+3. Uses the existing GitHub provider to mount lazily (no clone)
+
+If a package doesn't link to a GitHub repo, ctxfs tells you:
+```
+Error: no source repository found for npm:some-pkg@1.0.0
+  Try: ctxfs mount github:owner/repo@ref /mnt/pkg
+```
 
 ## Configuration
 

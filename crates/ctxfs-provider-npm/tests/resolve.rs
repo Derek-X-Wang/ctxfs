@@ -39,5 +39,8 @@ fn resolve_latest_lodash() {
     let version = rt.block_on(resolver.resolve_latest("lodash")).unwrap();
     assert!(!version.is_empty());
     // Should be a semver-like string
-    assert!(version.contains('.'), "version should contain dots: {version}");
+    assert!(
+        version.contains('.'),
+        "version should contain dots: {version}"
+    );
 }

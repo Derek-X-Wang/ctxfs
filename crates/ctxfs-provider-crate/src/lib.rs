@@ -44,9 +44,7 @@ impl CrateResolver {
             });
         }
         if !status.is_success() {
-            return Err(CtxfsError::Provider(format!(
-                "crates.io returned {status}"
-            )));
+            return Err(CtxfsError::Provider(format!("crates.io returned {status}")));
         }
 
         resp.json::<Value>()
@@ -66,11 +64,10 @@ impl RegistryResolver for CrateResolver {
     async fn resolve(&self, name: &str, version: &str) -> Result<ResolvedSource, CtxfsError> {
         let json = self.fetch_crate_metadata(name).await?;
 
-        let (owner, repo) =
-            extract_repo_url(&json).ok_or_else(|| CtxfsError::NoSourceRepo {
-                package: format!("{name}@{version}"),
-                registry: "crates.io".into(),
-            })?;
+        let (owner, repo) = extract_repo_url(&json).ok_or_else(|| CtxfsError::NoSourceRepo {
+            package: format!("{name}@{version}"),
+            registry: "crates.io".into(),
+        })?;
 
         Ok(ResolvedSource {
             owner,
@@ -184,10 +181,7 @@ mod tests {
                 "max_version": "0.1.0-beta.1"
             }
         });
-        assert_eq!(
-            extract_latest_version(&json),
-            Some("0.1.0-beta.1".into())
-        );
+        assert_eq!(extract_latest_version(&json), Some("0.1.0-beta.1".into()));
     }
 
     #[test]
@@ -198,9 +192,6 @@ mod tests {
                 "max_version": "0.1.0-beta.1"
             }
         });
-        assert_eq!(
-            extract_latest_version(&json),
-            Some("0.1.0-beta.1".into())
-        );
+        assert_eq!(extract_latest_version(&json), Some("0.1.0-beta.1".into()));
     }
 }

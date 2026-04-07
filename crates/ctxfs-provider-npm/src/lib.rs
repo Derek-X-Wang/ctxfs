@@ -22,11 +22,7 @@ impl NpmResolver {
         }
     }
 
-    async fn fetch_version_metadata(
-        &self,
-        name: &str,
-        version: &str,
-    ) -> Result<Value, CtxfsError> {
+    async fn fetch_version_metadata(&self, name: &str, version: &str) -> Result<Value, CtxfsError> {
         let encoded = encode_package_name(name);
         let url = format!("https://registry.npmjs.org/{encoded}/{version}");
 
@@ -90,14 +86,11 @@ impl RegistryResolver for NpmResolver {
     async fn resolve_latest(&self, name: &str) -> Result<String, CtxfsError> {
         let json = self.fetch_version_metadata(name, "latest").await?;
 
-        json["version"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| {
-                CtxfsError::Provider(format!(
-                    "npm registry response for {name}/latest missing 'version' field"
-                ))
-            })
+        json["version"].as_str().map(String::from).ok_or_else(|| {
+            CtxfsError::Provider(format!(
+                "npm registry response for {name}/latest missing 'version' field"
+            ))
+        })
     }
 }
 
@@ -126,10 +119,7 @@ fn extract_repo_info(json: &Value) -> Option<(String, String, Option<String>)> {
 
 /// Extract `dist.gitHead` from npm version metadata.
 fn extract_git_head(json: &Value) -> Option<String> {
-    json.get("dist")?
-        .get("gitHead")?
-        .as_str()
-        .map(String::from)
+    json.get("dist")?.get("gitHead")?.as_str().map(String::from)
 }
 
 /// Encode a package name for use in npm registry URLs.

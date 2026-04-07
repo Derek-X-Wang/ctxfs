@@ -80,11 +80,10 @@ impl RegistryResolver for PyPIResolver {
     async fn resolve(&self, name: &str, version: &str) -> Result<ResolvedSource, CtxfsError> {
         let json = self.fetch_metadata(name, Some(version)).await?;
 
-        let (owner, repo) =
-            extract_repo_url(&json).ok_or_else(|| CtxfsError::NoSourceRepo {
-                package: format!("{name}@{version}"),
-                registry: "pypi".into(),
-            })?;
+        let (owner, repo) = extract_repo_url(&json).ok_or_else(|| CtxfsError::NoSourceRepo {
+            package: format!("{name}@{version}"),
+            registry: "pypi".into(),
+        })?;
 
         Ok(ResolvedSource {
             owner,

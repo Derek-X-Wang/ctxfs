@@ -203,9 +203,9 @@ impl CtxfsNfs {
     /// the server starts — the NFS mount will expose only the subtree.
     pub async fn spawn(self, addr: &str) -> std::io::Result<NfsServerHandle> {
         // Resolve subpath (re-roots the filesystem) before binding.
-        self.resolve_subpath().await.map_err(|e| {
-            std::io::Error::other(format!("subpath resolution failed: {e}"))
-        })?;
+        self.resolve_subpath()
+            .await
+            .map_err(|e| std::io::Error::other(format!("subpath resolution failed: {e}")))?;
 
         let listener = NFSTcpListener::bind(addr, self)
             .await

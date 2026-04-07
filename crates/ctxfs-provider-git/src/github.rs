@@ -134,11 +134,7 @@ impl GitHubProvider {
 
     async fn resolve_ref(&self, source: &SourceSpec) -> Result<String, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
-        let url = Self::api_url(
-            owner,
-            repo,
-            &format!("commits/{}", source.version),
-        );
+        let url = Self::api_url(owner, repo, &format!("commits/{}", source.version));
 
         let commit: CommitResponse = self
             .get_json(&url, &format!("resolve ref '{}'", source.version))
@@ -153,11 +149,7 @@ impl GitHubProvider {
         tree_sha: &str,
     ) -> Result<TreeResponse, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
-        let url = Self::api_url(
-            owner,
-            repo,
-            &format!("git/trees/{tree_sha}?recursive=1"),
-        );
+        let url = Self::api_url(owner, repo, &format!("git/trees/{tree_sha}?recursive=1"));
 
         let tree: TreeResponse = self.get_json(&url, "fetch tree").await?;
 
