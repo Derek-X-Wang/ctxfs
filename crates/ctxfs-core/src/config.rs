@@ -9,6 +9,9 @@ pub struct Config {
     pub cache_max_bytes: u64,
     pub log_level: String,
     pub github_token: Option<String>,
+    pub redis_url: Option<String>,
+    pub latest_ttl_secs: u64,
+    pub tree_cache_max_bytes: u64,
 }
 
 impl Default for Config {
@@ -23,6 +26,9 @@ impl Default for Config {
             cache_max_bytes: 512 * 1024 * 1024, // 512 MB
             log_level: "info".to_string(),
             github_token: None,
+            redis_url: None,
+            latest_ttl_secs: 3600,
+            tree_cache_max_bytes: 500 * 1024 * 1024, // 500 MB
         }
     }
 }
@@ -50,6 +56,18 @@ impl Config {
         }
         // Empty string is treated as "no token" to match common shell patterns.
         config.github_token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
+        // Empty string is treated as "no URL" to match the same shell pattern.
+        config.redis_url = std::env::var("CTXFS_REDIS_URL").ok().filter(|s| !s.is_empty());
+        if let Ok(v) = std::env::var("CTXFS_LATEST_TTL_SECS") {
+            if let Ok(n) = v.parse() {
+                config.latest_ttl_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("CTXFS_TREE_CACHE_MAX_BYTES") {
+            if let Ok(n) = v.parse() {
+                config.tree_cache_max_bytes = n;
+            }
+        }
 
         config
     }
@@ -104,5 +122,27 @@ mod tests {
         assert_eq!(config.log_level, config2.log_level);
         assert_eq!(config.cache_max_bytes, config2.cache_max_bytes);
         assert_eq!(config.socket_path, config2.socket_path);
+    }
+
+    #[test]
+    fn default_config_has_cache_tier_fields() {
+        let config = Config::default();
+        assert_eq!(config.latest_ttl_secs, 3600);
+        assert_eq!(config.tree_cache_max_bytes, 500 * 1024 * 1024);
+        assert!(config.redis_url.is_none());
+    }
+
+    #[test]
+    fn config_serde_roundtrip_with_redis() {
+        let config = Config {
+            redis_url: Some("redis://localhost:6379".into()),
+            latest_ttl_secs: 7200,
+            tree_cache_max_bytes: 1024 * 1024 * 1024,
+            ..Config::default()
+        };
+        let config2 = config.serde_roundtrip().unwrap();
+        assert_eq!(config.redis_url, config2.redis_url);
+        assert_eq!(config.latest_ttl_secs, config2.latest_ttl_secs);
+        assert_eq!(config.tree_cache_max_bytes, config2.tree_cache_max_bytes);
     }
 }
