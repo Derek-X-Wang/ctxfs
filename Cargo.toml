@@ -10,6 +10,7 @@ members = [
     "crates/ctxfs-cli",
     "crates/ctxfs-provider-common",
     "crates/ctxfs-provider-npm",
+    "crates/ctxfs-provider-pypi",
 ]
 resolver = "2"
 
@@ -42,6 +43,7 @@ ctxfs-provider-git = { path = "crates/ctxfs-provider-git", version = "0.0.0" }
 ctxfs-nfs = { path = "crates/ctxfs-nfs", version = "0.0.0" }
 ctxfs-provider-common = { path = "crates/ctxfs-provider-common", version = "0.0.0" }
 ctxfs-provider-npm = { path = "crates/ctxfs-provider-npm", version = "0.0.0" }
+ctxfs-provider-pypi = { path = "crates/ctxfs-provider-pypi", version = "0.0.0" }
 ctxfs-daemon = { path = "crates/ctxfs-daemon", version = "0.0.0" }
 
 # Async runtime
