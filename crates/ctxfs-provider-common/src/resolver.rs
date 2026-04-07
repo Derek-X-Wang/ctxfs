@@ -12,7 +12,7 @@ pub struct ResolvedSource {
     pub subpath: Option<String>,
 }
 
-/// Trait implemented by each registry resolver (npm, PyPI, crates.io).
+/// Trait implemented by each registry resolver (npm, `PyPI`, crates.io).
 #[async_trait]
 pub trait RegistryResolver: Send + Sync {
     /// Resolve a package name + version to a GitHub source repo.
