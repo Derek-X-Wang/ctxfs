@@ -25,6 +25,9 @@ pub enum CtxfsError {
 
     #[error("rate limited: retry after {retry_after_secs}s")]
     RateLimited { retry_after_secs: u64 },
+
+    #[error("no source repository found for {registry}:{package}. Try: ctxfs mount github:owner/repo@ref")]
+    NoSourceRepo { package: String, registry: String },
 }
 
 #[cfg(test)]
