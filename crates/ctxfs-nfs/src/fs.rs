@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use ctxfs_cache::BlobCache;
+use ctxfs_core::error::CtxfsError;
 use ctxfs_core::provider::SharedProvider;
 use ctxfs_core::source::SourceSpec;
 use ctxfs_core::Digest;
@@ -54,6 +55,9 @@ pub struct CtxfsNfs {
     cache: Arc<BlobCache>,
     #[allow(dead_code)]
     snapshot: Snapshot,
+    /// Optional subpath to scope the mount to a subdirectory (e.g. `"packages/react-dom"`).
+    #[allow(dead_code)]
+    subpath: Option<String>,
 
     /// Monotonic inode id allocator; root is id 1.
     next_id: AtomicU64,
@@ -89,11 +93,28 @@ impl CtxfsNfs {
         cache: Arc<BlobCache>,
         snapshot: Snapshot,
     ) -> Self {
+        Self::new_with_subpath(provider, source, cache, snapshot, None)
+    }
+
+    /// Create a new `CtxfsNfs` with an optional subpath.
+    ///
+    /// When `subpath` is `Some`, [`resolve_subpath`](Self::resolve_subpath) must
+    /// be called before [`spawn`](Self::spawn) to walk the directory tree and
+    /// re-root the filesystem at the named subdirectory.
+    #[must_use]
+    pub fn new_with_subpath(
+        provider: SharedProvider,
+        source: SourceSpec,
+        cache: Arc<BlobCache>,
+        snapshot: Snapshot,
+        subpath: Option<String>,
+    ) -> Self {
         let fs = Self {
             provider,
             source,
             cache,
             snapshot: snapshot.clone(),
+            subpath,
             next_id: AtomicU64::new(2),
             nodes: DashMap::new(),
             dir_cache: DashMap::new(),
@@ -117,9 +138,75 @@ impl CtxfsNfs {
         fs
     }
 
+    /// Walk the directory tree to resolve the stored subpath and re-root the
+    /// filesystem at the target subdirectory. Must be called after construction
+    /// if a subpath was provided, and before [`spawn`](Self::spawn).
+    ///
+    /// Each path component is resolved by fetching the corresponding directory
+    /// manifest from the provider, finding the named child directory entry, and
+    /// descending into it. The final directory's digest replaces the root
+    /// inode's digest so the NFS server exposes only the subtree.
+    pub async fn resolve_subpath(&self) -> Result<(), CtxfsError> {
+        let subpath = match &self.subpath {
+            Some(sp) => sp.clone(),
+            None => return Ok(()),
+        };
+
+        let mut current_digest = self.snapshot.root_directory.clone();
+
+        for component in subpath.split('/').filter(|s| !s.is_empty()) {
+            let data = self
+                .provider
+                .fetch_directory(&current_digest)
+                .await
+                .map_err(|e| {
+                    CtxfsError::Provider(format!(
+                        "fetching directory {current_digest} for subpath resolution: {e}"
+                    ))
+                })?;
+
+            let directory: Directory = serde_json::from_slice(&data).map_err(|e| {
+                CtxfsError::Manifest(format!("parsing directory {current_digest}: {e}"))
+            })?;
+
+            let child_dir = directory
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    DirEntry::Directory(d) if d.name == component => Some(d.digest.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    CtxfsError::NotFound(format!(
+                        "subpath component '{component}' not found in directory {current_digest}"
+                    ))
+                })?;
+
+            current_digest = child_dir;
+        }
+
+        // Re-root: replace the ROOT_ID node's digest with the resolved one.
+        if let Some(mut root_node) = self.nodes.get_mut(&ROOT_ID) {
+            root_node.kind = NodeKind::Directory {
+                digest: current_digest,
+                populated: false,
+            };
+        }
+
+        Ok(())
+    }
+
     /// Bind an `NFSv3` listener on the given `addr` and spawn the server loop.
     /// Returns once the listener is bound and ready to accept clients.
+    ///
+    /// If a subpath was provided at construction time, it is resolved before
+    /// the server starts — the NFS mount will expose only the subtree.
     pub async fn spawn(self, addr: &str) -> std::io::Result<NfsServerHandle> {
+        // Resolve subpath (re-roots the filesystem) before binding.
+        self.resolve_subpath().await.map_err(|e| {
+            std::io::Error::other(format!("subpath resolution failed: {e}"))
+        })?;
+
         let listener = NFSTcpListener::bind(addr, self)
             .await
             .map_err(|e| std::io::Error::other(format!("bind failed: {e}")))?;
