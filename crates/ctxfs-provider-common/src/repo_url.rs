@@ -128,4 +128,27 @@ mod tests {
     fn not_a_url_returns_none() {
         assert_eq!(parse_github_url("just some text"), None);
     }
+
+    #[test]
+    fn url_with_trailing_slash() {
+        assert_eq!(
+            parse_github_url("https://github.com/owner/repo/"),
+            Some(("owner".into(), "repo".into()))
+        );
+    }
+
+    #[test]
+    fn ssh_shorthand_no_scheme() {
+        // Pure SSH shorthand without ssh:// scheme — common in git configs
+        // This format may not be supported; None is acceptable
+        let result = parse_github_url("git@github.com:owner/repo.git");
+        // Document the behavior — if None, that's fine, it's an unusual format
+        assert!(result.is_none() || result == Some(("owner".into(), "repo".into())));
+    }
+
+    #[test]
+    fn scp_without_git_plus_prefix() {
+        let result = parse_github_url("ssh://git@github.com:owner/repo.git");
+        assert_eq!(result, Some(("owner".into(), "repo".into())));
+    }
 }

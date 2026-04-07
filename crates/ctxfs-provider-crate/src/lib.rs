@@ -176,4 +176,20 @@ mod tests {
         });
         assert_eq!(extract_latest_version(&json), Some("0.1.0-beta.1".into()));
     }
+
+    #[test]
+    fn extract_repo_null_repository() {
+        let json = serde_json::json!({
+            "crate": { "repository": null }
+        });
+        assert_eq!(extract_repo_url(&json), None);
+    }
+
+    #[test]
+    fn extract_latest_both_missing() {
+        let json = serde_json::json!({
+            "crate": { "name": "foo" }
+        });
+        assert_eq!(extract_latest_version(&json), None);
+    }
 }

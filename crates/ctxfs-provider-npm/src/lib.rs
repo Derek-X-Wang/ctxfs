@@ -193,4 +193,47 @@ mod tests {
     fn encode_unscoped_package() {
         assert_eq!(encode_package_name("lodash"), "lodash");
     }
+
+    #[test]
+    fn extract_repo_null_repository() {
+        let json = serde_json::json!({ "repository": null });
+        assert_eq!(extract_repo_info(&json), None);
+    }
+
+    #[test]
+    fn extract_repo_empty_string() {
+        let json = serde_json::json!({ "repository": "" });
+        assert_eq!(extract_repo_info(&json), None);
+    }
+
+    #[test]
+    fn extract_repo_object_missing_url() {
+        let json = serde_json::json!({
+            "repository": { "type": "git" }
+        });
+        assert_eq!(extract_repo_info(&json), None);
+    }
+
+    #[test]
+    fn extract_repo_git_plus_ssh() {
+        let json = serde_json::json!({
+            "repository": "git+ssh://git@github.com/owner/repo.git"
+        });
+        let result = extract_repo_info(&json);
+        assert_eq!(result, Some(("owner".into(), "repo".into(), None)));
+    }
+
+    #[test]
+    fn extract_repo_object_empty_directory() {
+        let json = serde_json::json!({
+            "repository": {
+                "type": "git",
+                "url": "https://github.com/owner/repo.git",
+                "directory": ""
+            }
+        });
+        let result = extract_repo_info(&json);
+        // Empty directory should still be Some("") — the resolver passes it through
+        assert_eq!(result, Some(("owner".into(), "repo".into(), Some(String::new()))));
+    }
 }

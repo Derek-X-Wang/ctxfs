@@ -344,6 +344,12 @@ mod tests {
         assert_eq!(s.id(), "npm__at_babel_core_7.24.0");
     }
 
+    #[test]
+    fn parse_github_trailing_colon_no_subpath() {
+        let s = SourceSpec::parse("github:owner/repo@main:").unwrap();
+        assert_eq!(s.subpath, None, "empty subpath should be treated as None");
+    }
+
     // --- NoSourceRepo error test ---
 
     #[test]

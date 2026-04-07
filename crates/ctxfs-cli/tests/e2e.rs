@@ -182,3 +182,47 @@ fn daemon_lifecycle_start_ping_stop() {
         "pid file should be removed after daemon stop"
     );
 }
+
+#[test]
+fn mount_npm_server_only_resolves_and_starts_nfs() {
+    if std::env::var("CTXFS_E2E_SKIP_NETWORK").is_ok() {
+        eprintln!("skipping network test");
+        return;
+    }
+
+    let env = TestEnv::new();
+    let _daemon = env.start_daemon();
+
+    let mount_point = env.tempdir_path().join("mnt");
+    std::fs::create_dir_all(&mount_point).unwrap();
+
+    let output = env
+        .ctxfs(&[
+            "mount",
+            "--server-only",
+            "npm:lodash@4.17.21",
+            mount_point.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ctxfs mount --server-only npm:lodash@4.17.21 failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let port: u16 = stdout
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("NFS port:"))
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("could not parse NFS port from stdout:\n{stdout}"));
+
+    assert!(port > 1024, "NFS port should be unprivileged, got {port}");
+
+    // Verify the daemon is listening
+    let addr = format!("127.0.0.1:{port}");
+    std::net::TcpStream::connect(&addr)
+        .unwrap_or_else(|e| panic!("daemon is not listening on {addr}: {e}"));
+}

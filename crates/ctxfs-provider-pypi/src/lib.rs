@@ -196,4 +196,30 @@ mod tests {
         });
         assert_eq!(extract_repo_url(&json), None);
     }
+
+    #[test]
+    fn extract_prefers_source_over_homepage() {
+        // "Source" has higher priority than "Homepage" in PROJECT_URL_KEYS
+        let json = serde_json::json!({
+            "info": {
+                "project_urls": {
+                    "Homepage": "https://github.com/wrong/repo",
+                    "Source": "https://github.com/correct/repo"
+                }
+            }
+        });
+        let result = extract_repo_url(&json);
+        assert_eq!(result, Some(("correct".into(), "repo".into())));
+    }
+
+    #[test]
+    fn extract_project_urls_empty_object() {
+        let json = serde_json::json!({
+            "info": {
+                "project_urls": {},
+                "home_page": "https://github.com/owner/repo"
+            }
+        });
+        assert_eq!(extract_repo_url(&json), Some(("owner".into(), "repo".into())));
+    }
 }
