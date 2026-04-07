@@ -10,7 +10,6 @@ ctxfs-manifest = { workspace = true }
 ctxfs-cache = { workspace = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-provider-git = { workspace = true }
-ctxfs-fuse = { workspace = true }
 ctxfs-nfs = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
@@ -23,7 +22,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
-fuser = { workspace = true }
 libc = { workspace = true }
 
 [lints]
