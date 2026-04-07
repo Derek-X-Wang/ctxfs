@@ -37,6 +37,9 @@ pub struct CacheStats {
     pub total_bytes: u64,
     pub entry_count: usize,
     pub freed_bytes: u64,
+    pub tree_count: usize,
+    pub tree_bytes: u64,
+    pub resolution_count: usize,
 }
 
 /// tarpc service definition.
@@ -114,6 +117,9 @@ mod tests {
             total_bytes: 1024,
             entry_count: 10,
             freed_bytes: 512,
+            tree_count: 5,
+            tree_bytes: 2048,
+            resolution_count: 3,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let stats2: CacheStats = serde_json::from_str(&json).unwrap();

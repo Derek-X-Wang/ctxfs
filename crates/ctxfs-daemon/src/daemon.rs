@@ -385,6 +385,9 @@ impl CtxfsService for DaemonServer {
             total_bytes,
             entry_count,
             freed_bytes: 0,
+            tree_count: 0,
+            tree_bytes: 0,
+            resolution_count: 0,
         })
     }
 
@@ -404,6 +407,9 @@ impl CtxfsService for DaemonServer {
             total_bytes,
             entry_count,
             freed_bytes: freed,
+            tree_count: 0,
+            tree_bytes: 0,
+            resolution_count: 0,
         })
     }
 
