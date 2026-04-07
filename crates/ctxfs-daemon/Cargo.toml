@@ -4,10 +4,15 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+default = []
+redis = ["ctxfs-cache-redis"]
+
 [dependencies]
 ctxfs-core = { workspace = true }
 ctxfs-manifest = { workspace = true }
 ctxfs-cache = { workspace = true }
+ctxfs-cache-redis = { workspace = true, optional = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-provider-git = { workspace = true }
 ctxfs-provider-common = { workspace = true }

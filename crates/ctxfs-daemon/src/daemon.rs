@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use ctxfs_cache::BlobCache;
+use ctxfs_cache::{BlobCache, ResolutionCache, SharedTreeCache, TreeCache};
 use ctxfs_core::config::Config;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::source::{ProviderType, SourceSpec};
@@ -12,11 +12,11 @@ use ctxfs_provider_git::GitHubProvider;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tarpc::server::Channel;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 struct MountHandle {
     info: MountInfo,
@@ -27,6 +27,8 @@ struct MountHandle {
 pub struct Daemon {
     config: Config,
     cache: Arc<BlobCache>,
+    tree_cache: Arc<TreeCache>,
+    resolution_cache: Arc<Mutex<ResolutionCache>>,
     mounts: Arc<RwLock<HashMap<String, MountHandle>>>,
     cancel: CancellationToken,
 }
@@ -42,6 +44,9 @@ impl std::fmt::Debug for Daemon {
 #[derive(Clone)]
 struct DaemonServer {
     cache: Arc<BlobCache>,
+    tree_cache: Arc<TreeCache>,
+    resolution_cache: Arc<Mutex<ResolutionCache>>,
+    shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
     mounts: Arc<RwLock<HashMap<String, MountHandle>>>,
     config: Config,
     rt_handle: tokio::runtime::Handle,
@@ -54,9 +59,21 @@ impl Daemon {
                 .context("failed to initialize cache")?,
         );
 
+        let tree_cache = Arc::new(TreeCache::new(
+            config.cache_dir.join("trees"),
+            config.tree_cache_max_bytes,
+        ));
+
+        let resolution_cache = ResolutionCache::load(
+            config.cache_dir.join("resolutions.json"),
+            config.latest_ttl_secs,
+        );
+
         Ok(Self {
             config,
             cache,
+            tree_cache,
+            resolution_cache: Arc::new(Mutex::new(resolution_cache)),
             mounts: Arc::new(RwLock::new(HashMap::new())),
             cancel: CancellationToken::new(),
         })
@@ -64,6 +81,9 @@ impl Daemon {
 
     pub async fn run(&self) -> Result<()> {
         self.write_pid_file()?;
+
+        // Attempt to connect to Redis if configured.
+        let shared_tree_cache = self.try_connect_redis().await;
 
         let mut incoming = transport::listen(&self.config.socket_path)
             .await
@@ -73,6 +93,9 @@ impl Daemon {
 
         let server = DaemonServer {
             cache: self.cache.clone(),
+            tree_cache: self.tree_cache.clone(),
+            resolution_cache: self.resolution_cache.clone(),
+            shared_tree_cache,
             mounts: self.mounts.clone(),
             config: self.config.clone(),
             rt_handle: tokio::runtime::Handle::current(),
@@ -114,6 +137,38 @@ impl Daemon {
 
         self.cleanup().await;
         Ok(())
+    }
+
+    /// Try to connect to Redis for the shared tree cache.
+    #[allow(clippy::unused_async)]
+    async fn try_connect_redis(&self) -> Option<Arc<dyn SharedTreeCache>> {
+        let url = self.config.redis_url.as_deref()?;
+
+        #[cfg(feature = "redis")]
+        {
+            info!("connecting to Redis at {url}...");
+            match ctxfs_cache_redis::RedisTreeCache::connect(url).await {
+                Some(cache) => {
+                    info!("Redis shared tree cache connected");
+                    Some(Arc::new(cache) as Arc<dyn SharedTreeCache>)
+                }
+                None => {
+                    warn!("failed to connect to Redis — proceeding without shared tree cache");
+                    None
+                }
+            }
+        }
+
+        #[cfg(not(feature = "redis"))]
+        {
+            warn!(
+                "CTXFS_REDIS_URL is set but Redis support is not compiled in; \
+                 rebuild with `--features redis` to enable"
+            );
+            // Suppress unused variable warning.
+            let _ = url;
+            None
+        }
     }
 
     fn write_pid_file(&self) -> Result<()> {
@@ -204,30 +259,23 @@ impl DaemonServer {
     /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
     /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
     /// terminal instead of the daemon's log.
+    #[allow(clippy::too_many_lines)]
     fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
         let mut source =
             SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
 
-        // For registry sources, create a resolver once and reuse for both
-        // latest resolution and source repo resolution.
-        let resolver: Option<Box<dyn RegistryResolver>> = match source.provider_type {
-            ProviderType::GitHub => None,
-            _ => Some(Self::make_resolver(&source)?),
+        let is_latest = source.version == "latest";
+
+        // ── Resolution cache check ──────────────────────────────────────────
+        // For registry sources, see if we already have cached GitHub coordinates.
+        let cached_resolution = if source.provider_type == ProviderType::GitHub {
+            None
+        } else {
+            let guard = self.resolution_cache.lock().unwrap();
+            guard.get(source_str).cloned()
         };
 
-        // Step 1: Resolve "latest" to an exact version.
-        if source.version == "latest" {
-            let res = resolver.as_ref().ok_or_else(|| {
-                "GitHub sources do not support '@latest'; specify a branch, tag, or commit SHA"
-                    .to_string()
-            })?;
-            source.version = self
-                .rt_handle
-                .block_on(res.resolve_latest(&source.name))
-                .map_err(|e| format!("failed to resolve latest: {e}"))?;
-        }
-
-        // Step 2: Resolve to GitHub coordinates.
+        // ── Resolve to GitHub coordinates ───────────────────────────────────
         let (owner, repo, git_ref, subpath) = if source.provider_type == ProviderType::GitHub {
             let (o, r) = source
                 .name
@@ -239,13 +287,44 @@ impl DaemonServer {
                 source.version.clone(),
                 source.subpath.clone(),
             )
+        } else if let Some(resolved) = cached_resolution {
+            // Cache hit — skip registry resolution entirely.
+            info!("resolution cache hit for {source_str}");
+            let sp = source.subpath.clone().or(resolved.subpath.clone());
+            (
+                resolved.owner.clone(),
+                resolved.repo.clone(),
+                resolved.git_ref.clone(),
+                sp,
+            )
         } else {
-            let res = resolver.as_ref().expect("resolver required for registry");
+            // Cache miss — resolve from the registry.
+            let resolver = Self::make_resolver(&source)?;
+
+            // Step 1: Resolve "latest" to an exact version.
+            if is_latest {
+                source.version = self
+                    .rt_handle
+                    .block_on(resolver.resolve_latest(&source.name))
+                    .map_err(|e| format!("failed to resolve latest: {e}"))?;
+            }
+
+            // Step 2: Resolve to GitHub coordinates.
             let src = self
                 .rt_handle
-                .block_on(res.resolve(&source.name, &source.version))
+                .block_on(resolver.resolve(&source.name, &source.version))
                 .map_err(|e| format!("{e}"))?;
-            let sp = source.subpath.clone().or(src.subpath);
+
+            let sp = source.subpath.clone().or(src.subpath.clone());
+
+            // Cache the resolution for future mounts.
+            {
+                let mut guard = self.resolution_cache.lock().unwrap();
+                if let Err(e) = guard.put(source_str.to_string(), src.clone(), is_latest) {
+                    warn!("failed to persist resolution cache: {e}");
+                }
+            }
+
             (src.owner, src.repo, src.git_ref, sp)
         };
 
@@ -260,8 +339,8 @@ impl DaemonServer {
         let provider = Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),
             self.cache.clone(),
-            None, // tree_cache — will be wired in Task 8
-            None, // shared_tree_cache — will be wired in Task 8
+            Some(self.tree_cache.clone()),
+            self.shared_tree_cache.clone(),
         ));
 
         let snapshot_data = self
@@ -381,13 +460,15 @@ impl CtxfsService for DaemonServer {
 
     async fn cache_stats(self, _: tarpc::context::Context) -> Result<CacheStats, String> {
         let (total_bytes, entry_count) = self.cache.stats();
+        let (tree_count, tree_bytes) = self.tree_cache.stats();
+        let resolution_count = self.resolution_cache.lock().unwrap().entry_count();
         Ok(CacheStats {
             total_bytes,
             entry_count,
             freed_bytes: 0,
-            tree_count: 0,
-            tree_bytes: 0,
-            resolution_count: 0,
+            tree_count,
+            tree_bytes,
+            resolution_count,
         })
     }
 
@@ -401,15 +482,21 @@ impl CtxfsService for DaemonServer {
             .prune(max_bytes)
             .map_err(|e| format!("prune failed: {e}"))?;
 
+        self.tree_cache
+            .prune_all()
+            .map_err(|e| format!("tree cache prune failed: {e}"))?;
+
         let (total_bytes, entry_count) = self.cache.stats();
+        let (tree_count, tree_bytes) = self.tree_cache.stats();
+        let resolution_count = self.resolution_cache.lock().unwrap().entry_count();
 
         Ok(CacheStats {
             total_bytes,
             entry_count,
             freed_bytes: freed,
-            tree_count: 0,
-            tree_bytes: 0,
-            resolution_count: 0,
+            tree_count,
+            tree_bytes,
+            resolution_count,
         })
     }
 

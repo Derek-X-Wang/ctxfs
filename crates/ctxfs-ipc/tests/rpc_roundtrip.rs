@@ -71,6 +71,9 @@ impl CtxfsService for MockServer {
             total_bytes: 1024,
             entry_count: 5,
             freed_bytes: 0,
+            tree_count: 0,
+            tree_bytes: 0,
+            resolution_count: 0,
         })
     }
 
@@ -83,6 +86,9 @@ impl CtxfsService for MockServer {
             total_bytes: 512,
             entry_count: 3,
             freed_bytes: 512,
+            tree_count: 0,
+            tree_bytes: 0,
+            resolution_count: 0,
         })
     }
 
