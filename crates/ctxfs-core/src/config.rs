@@ -76,6 +76,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn from_env_respects_pid_file_override() {
         // Save and clear any existing value so the test is hermetic.
         let prev = std::env::var("CTXFS_PID_FILE").ok();

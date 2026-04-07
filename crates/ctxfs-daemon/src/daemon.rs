@@ -124,6 +124,7 @@ impl Daemon {
         if self.config.pid_file.exists() {
             if let Ok(pid_str) = std::fs::read_to_string(&self.config.pid_file) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    #[allow(unsafe_code)]
                     if unsafe { libc::kill(pid, 0) } == 0 {
                         bail!("daemon already running with PID {pid}");
                     }

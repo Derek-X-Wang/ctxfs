@@ -247,6 +247,7 @@ async fn main() -> Result<()> {
                     if let Ok(pid_str) = std::fs::read_to_string(&config.pid_file) {
                         if let Ok(pid) = pid_str.trim().parse::<i32>() {
                             // SAFETY: sending SIGTERM to a known PID
+                            #[allow(unsafe_code)]
                             let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
                             println!("Sent SIGTERM to daemon (PID {pid})");
                             return Ok(());
