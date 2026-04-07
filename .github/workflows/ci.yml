@@ -26,21 +26,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y nfs-common
 
-      # Clippy and test all crates except ctxfs-fuse (requires macFUSE/libfuse3).
-      # ctxfs-fuse is a legacy crate kept for reference; the NFS backend is primary.
       - name: Clippy
-        run: >-
-          cargo clippy --tests
-          -p ctxfs-core -p ctxfs-manifest -p ctxfs-cache -p ctxfs-ipc
-          -p ctxfs-provider-git -p ctxfs-nfs -p ctxfs-daemon -p ctxfs
+        run: cargo clippy --all-targets --tests
 
       - name: Test
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          cargo test
-          -p ctxfs-core -p ctxfs-manifest -p ctxfs-cache -p ctxfs-ipc
-          -p ctxfs-provider-git -p ctxfs-nfs -p ctxfs-daemon -p ctxfs
+        run: cargo test
 
   fmt:
     name: Format

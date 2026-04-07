@@ -5,15 +5,8 @@ AI-native, read-only, mountable filesystem. Mount Git repos as local directories
 ## Build & Test
 
 ```sh
-# Non-FUSE crates (no system deps needed):
-cargo clippy -p ctxfs-core -p ctxfs-manifest -p ctxfs-cache -p ctxfs-ipc -p ctxfs-provider-git --tests
-cargo test -p ctxfs-core -p ctxfs-manifest -p ctxfs-cache -p ctxfs-ipc -p ctxfs-provider-git
-
-# Full build requires macFUSE (macOS) or libfuse3 (Linux):
-# macOS: brew install macfuse
-# Linux: apt install libfuse3-dev
 cargo build --release
-cargo clippy --all-targets
+cargo clippy --all-targets --tests
 cargo test
 ```
 
@@ -36,13 +29,13 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 
 ## Architecture
 
-8-crate workspace. Dependency graph:
+7-crate workspace. Dependency graph:
 - ctxfs-core: Digest, SourceSpec, Provider trait, Config, Error
 - ctxfs-manifest: Snapshot, Directory, InodeTable (depends on core)
 - ctxfs-cache: Content-addressable blob cache with LRU (depends on core, manifest)
 - ctxfs-ipc: tarpc service trait + UDS transport (depends on core)
 - ctxfs-provider-git: GitHub REST API provider (depends on core, manifest, cache)
-- ctxfs-fuse: fuser::Filesystem implementation (depends on core, manifest, cache)
+- ctxfs-nfs: NFSv3 loopback server (depends on core, manifest, cache)
 - ctxfs-daemon: Background service (depends on all above)
 - ctxfs-cli: clap CLI binary (depends on core, ipc, daemon)
 
