@@ -280,8 +280,14 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!(e))?;
 
                 println!("Cache statistics:");
-                println!("  Blobs:        {} entries, {} bytes", stats.entry_count, stats.total_bytes);
-                println!("  Trees:        {} entries, {} bytes", stats.tree_count, stats.tree_bytes);
+                println!(
+                    "  Blobs:        {} entries, {} bytes",
+                    stats.entry_count, stats.total_bytes
+                );
+                println!(
+                    "  Trees:        {} entries, {} bytes",
+                    stats.tree_count, stats.tree_bytes
+                );
                 println!("  Resolutions:  {} entries", stats.resolution_count);
             }
             CacheAction::Prune {
@@ -297,8 +303,14 @@ async fn main() -> Result<()> {
 
                 println!("Cache pruned:");
                 println!("  Freed:       {} bytes", stats.freed_bytes);
-                println!("  Blobs:       {} entries, {} bytes", stats.entry_count, stats.total_bytes);
-                println!("  Trees:       {} entries, {} bytes", stats.tree_count, stats.tree_bytes);
+                println!(
+                    "  Blobs:       {} entries, {} bytes",
+                    stats.entry_count, stats.total_bytes
+                );
+                println!(
+                    "  Trees:       {} entries, {} bytes",
+                    stats.tree_count, stats.tree_bytes
+                );
                 println!("  Resolutions: {} entries", stats.resolution_count);
             }
         },

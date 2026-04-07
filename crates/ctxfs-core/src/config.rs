@@ -57,7 +57,9 @@ impl Config {
         // Empty string is treated as "no token" to match common shell patterns.
         config.github_token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
         // Empty string is treated as "no URL" to match the same shell pattern.
-        config.redis_url = std::env::var("CTXFS_REDIS_URL").ok().filter(|s| !s.is_empty());
+        config.redis_url = std::env::var("CTXFS_REDIS_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
         if let Ok(v) = std::env::var("CTXFS_LATEST_TTL_SECS") {
             if let Ok(n) = v.parse() {
                 config.latest_ttl_secs = n;

@@ -140,9 +140,7 @@ fn walk_dir_recursive(dir: &Path, out: &mut Vec<(PathBuf, u64, SystemTime)>) {
             walk_dir_recursive(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
             if let Ok(meta) = path.metadata() {
-                let mtime = meta
-                    .modified()
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 out.push((path, meta.len(), mtime));
             }
         }

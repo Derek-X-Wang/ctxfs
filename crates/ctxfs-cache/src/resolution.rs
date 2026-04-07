@@ -49,8 +49,7 @@ fn persist(file_path: &PathBuf, entries: &HashMap<String, CachedResolution>) -> 
         fs::create_dir_all(parent)?;
     }
 
-    let json = serde_json::to_vec_pretty(entries)
-        .map_err(io::Error::other)?;
+    let json = serde_json::to_vec_pretty(entries).map_err(io::Error::other)?;
 
     // Atomic write: write to .tmp then rename.
     let tmp_path = file_path.with_extension("tmp");
@@ -76,7 +75,9 @@ impl ResolutionCache {
     pub fn load(file_path: PathBuf, latest_ttl_secs: u64) -> Self {
         let entries = fs::read(&file_path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<HashMap<String, CachedResolution>>(&bytes).ok())
+            .and_then(|bytes| {
+                serde_json::from_slice::<HashMap<String, CachedResolution>>(&bytes).ok()
+            })
             .unwrap_or_default();
 
         Self {
@@ -151,7 +152,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut cache = ResolutionCache::new(dir.path().join("res.json"), 3600);
         let src = sample_source();
-        cache.put("npm:react@19.1.0".to_string(), src.clone(), false).unwrap();
+        cache
+            .put("npm:react@19.1.0".to_string(), src.clone(), false)
+            .unwrap();
         let got = cache.get("npm:react@19.1.0").expect("should be present");
         assert_eq!(*got, src);
     }
@@ -161,10 +164,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut cache = ResolutionCache::new(dir.path().join("res.json"), 0);
         let src = sample_source();
-        cache.put("npm:react@19.1.0".to_string(), src.clone(), false).unwrap();
+        cache
+            .put("npm:react@19.1.0".to_string(), src.clone(), false)
+            .unwrap();
 
         // Manually backdate the entry so it would expire if it were a "latest" entry.
-        cache.entries.get_mut("npm:react@19.1.0").unwrap().resolved_at = 0;
+        cache
+            .entries
+            .get_mut("npm:react@19.1.0")
+            .unwrap()
+            .resolved_at = 0;
 
         let got = cache.get("npm:react@19.1.0");
         assert!(got.is_some(), "pinned entries must never expire");
@@ -175,10 +184,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut cache = ResolutionCache::new(dir.path().join("res.json"), 1);
         let src = sample_source();
-        cache.put("npm:react@latest".to_string(), src, true).unwrap();
+        cache
+            .put("npm:react@latest".to_string(), src, true)
+            .unwrap();
 
         // Backdate so the entry is older than the TTL.
-        cache.entries.get_mut("npm:react@latest").unwrap().resolved_at = 0;
+        cache
+            .entries
+            .get_mut("npm:react@latest")
+            .unwrap()
+            .resolved_at = 0;
 
         let got = cache.get("npm:react@latest");
         assert!(got.is_none(), "expired latest entries must return None");
@@ -199,12 +214,16 @@ mod tests {
 
         {
             let mut cache = ResolutionCache::new(path.clone(), 3600);
-            cache.put("npm:react@19.1.0".to_string(), src.clone(), false).unwrap();
+            cache
+                .put("npm:react@19.1.0".to_string(), src.clone(), false)
+                .unwrap();
         }
 
         // Simulate restart by loading from the same file path.
         let cache = ResolutionCache::load(path, 3600);
-        let got = cache.get("npm:react@19.1.0").expect("should survive restart");
+        let got = cache
+            .get("npm:react@19.1.0")
+            .expect("should survive restart");
         assert_eq!(*got, src);
     }
 
@@ -214,7 +233,9 @@ mod tests {
         let mut cache = ResolutionCache::new(dir.path().join("res.json"), 3600);
         assert_eq!(cache.entry_count(), 0);
 
-        cache.put("npm:react@19.1.0".to_string(), sample_source(), false).unwrap();
+        cache
+            .put("npm:react@19.1.0".to_string(), sample_source(), false)
+            .unwrap();
         assert_eq!(cache.entry_count(), 1);
 
         let src2 = ResolvedSource {
@@ -223,7 +244,9 @@ mod tests {
             git_ref: "v18.3.0".to_string(),
             subpath: None,
         };
-        cache.put("npm:react@18.3.0".to_string(), src2, false).unwrap();
+        cache
+            .put("npm:react@18.3.0".to_string(), src2, false)
+            .unwrap();
         assert_eq!(cache.entry_count(), 2);
     }
 
@@ -233,8 +256,12 @@ mod tests {
         let path = dir.path().join("res.json");
         let mut cache = ResolutionCache::new(path.clone(), 3600);
 
-        cache.put("npm:react@19.1.0".to_string(), sample_source(), false).unwrap();
-        cache.put("npm:react@latest".to_string(), sample_source(), true).unwrap();
+        cache
+            .put("npm:react@19.1.0".to_string(), sample_source(), false)
+            .unwrap();
+        cache
+            .put("npm:react@latest".to_string(), sample_source(), true)
+            .unwrap();
         assert_eq!(cache.entry_count(), 2);
 
         cache.clear().unwrap();
