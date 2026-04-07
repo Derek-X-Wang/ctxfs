@@ -208,38 +208,42 @@ impl DaemonServer {
         let mut source =
             SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
 
-        // Step 1: Resolve "latest" to an exact version for registry sources.
+        // For registry sources, create a resolver once and reuse for both
+        // latest resolution and source repo resolution.
+        let resolver: Option<Box<dyn RegistryResolver>> = match source.provider_type {
+            ProviderType::GitHub => None,
+            _ => Some(Self::make_resolver(&source)?),
+        };
+
+        // Step 1: Resolve "latest" to an exact version.
         if source.version == "latest" {
-            let resolver = Self::make_resolver(&source)?;
+            let res = resolver.as_ref().expect("resolver required for latest");
             source.version = self
                 .rt_handle
-                .block_on(resolver.resolve_latest(&source.name))
+                .block_on(res.resolve_latest(&source.name))
                 .map_err(|e| format!("failed to resolve latest: {e}"))?;
         }
 
         // Step 2: Resolve to GitHub coordinates.
-        let (owner, repo, git_ref, subpath) = match source.provider_type {
-            ProviderType::GitHub => {
-                let (o, r) = source
-                    .name
-                    .split_once('/')
-                    .ok_or_else(|| format!("invalid github source: {}", source.name))?;
-                (
-                    o.to_string(),
-                    r.to_string(),
-                    source.version.clone(),
-                    source.subpath.clone(),
-                )
-            }
-            ProviderType::Npm | ProviderType::PyPI | ProviderType::Crate => {
-                let reg = Self::make_resolver(&source)?;
-                let src = self
-                    .rt_handle
-                    .block_on(reg.resolve(&source.name, &source.version))
-                    .map_err(|e| format!("{e}"))?;
-                let sp = source.subpath.clone().or(src.subpath);
-                (src.owner, src.repo, src.git_ref, sp)
-            }
+        let (owner, repo, git_ref, subpath) = if source.provider_type == ProviderType::GitHub {
+            let (o, r) = source
+                .name
+                .split_once('/')
+                .ok_or_else(|| format!("invalid github source: {}", source.name))?;
+            (
+                o.to_string(),
+                r.to_string(),
+                source.version.clone(),
+                source.subpath.clone(),
+            )
+        } else {
+            let res = resolver.as_ref().expect("resolver required for registry");
+            let src = self
+                .rt_handle
+                .block_on(res.resolve(&source.name, &source.version))
+                .map_err(|e| format!("{e}"))?;
+            let sp = source.subpath.clone().or(src.subpath);
+            (src.owner, src.repo, src.git_ref, sp)
         };
 
         // Build a GitHub-shaped SourceSpec for the provider.

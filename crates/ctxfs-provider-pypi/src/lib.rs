@@ -37,35 +37,12 @@ impl PyPIResolver {
             Some(v) => format!("https://pypi.org/pypi/{name}/{v}/json"),
             None => format!("https://pypi.org/pypi/{name}/json"),
         };
-
+        let label = match version {
+            Some(v) => format!("pypi:{name}@{v}"),
+            None => format!("pypi:{name}"),
+        };
         tracing::debug!(name, version, %url, "fetching PyPI registry metadata");
-
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CtxfsError::Provider(format!("PyPI registry request failed: {e}")))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            let label = version.map_or_else(|| name.to_string(), |v| format!("{name}@{v}"));
-            return Err(CtxfsError::NotFound(format!("pypi:{label}")));
-        }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(CtxfsError::RateLimited {
-                retry_after_secs: 60,
-            });
-        }
-        if !status.is_success() {
-            return Err(CtxfsError::Provider(format!(
-                "PyPI registry returned {status}"
-            )));
-        }
-
-        resp.json::<Value>()
-            .await
-            .map_err(|e| CtxfsError::Provider(format!("failed to parse PyPI response: {e}")))
+        ctxfs_provider_common::http::fetch_registry_json(&self.client, &url, "PyPI", &label).await
     }
 }
 
@@ -112,16 +89,17 @@ impl RegistryResolver for PyPIResolver {
 pub fn extract_repo_url(json: &Value) -> Option<(String, String)> {
     let info = json.get("info")?;
 
-    // Search project_urls with case-insensitive key matching in priority order.
+    // Build a lowercase key map once, then check priority keys in order.
     if let Some(project_urls) = info.get("project_urls").and_then(Value::as_object) {
+        let lower_map: std::collections::HashMap<String, &str> = project_urls
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|url| (k.to_lowercase(), url)))
+            .collect();
+
         for &key in PROJECT_URL_KEYS {
-            for (k, v) in project_urls {
-                if k.to_lowercase() == key {
-                    if let Some(url) = v.as_str() {
-                        if let Some(result) = parse_github_url(url) {
-                            return Some(result);
-                        }
-                    }
+            if let Some(&url) = lower_map.get(key) {
+                if let Some(result) = parse_github_url(url) {
+                    return Some(result);
                 }
             }
         }

@@ -25,34 +25,14 @@ impl NpmResolver {
     async fn fetch_version_metadata(&self, name: &str, version: &str) -> Result<Value, CtxfsError> {
         let encoded = encode_package_name(name);
         let url = format!("https://registry.npmjs.org/{encoded}/{version}");
-
         tracing::debug!(name, version, %url, "fetching npm registry metadata");
-
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CtxfsError::Provider(format!("npm registry request failed: {e}")))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(CtxfsError::NotFound(format!("npm:{name}@{version}")));
-        }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(CtxfsError::RateLimited {
-                retry_after_secs: 60,
-            });
-        }
-        if !status.is_success() {
-            return Err(CtxfsError::Provider(format!(
-                "npm registry returned {status}"
-            )));
-        }
-
-        resp.json::<Value>()
-            .await
-            .map_err(|e| CtxfsError::Provider(format!("failed to parse npm response: {e}")))
+        ctxfs_provider_common::http::fetch_registry_json(
+            &self.client,
+            &url,
+            "npm registry",
+            &format!("npm:{name}@{version}"),
+        )
+        .await
     }
 }
 

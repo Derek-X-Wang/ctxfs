@@ -24,32 +24,14 @@ impl CrateResolver {
 
     async fn fetch_crate_metadata(&self, name: &str) -> Result<Value, CtxfsError> {
         let url = format!("https://crates.io/api/v1/crates/{name}");
-
         tracing::debug!(name, %url, "fetching crates.io metadata");
-
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| CtxfsError::Provider(format!("crates.io request failed: {e}")))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(CtxfsError::NotFound(format!("crate:{name}")));
-        }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(CtxfsError::RateLimited {
-                retry_after_secs: 60,
-            });
-        }
-        if !status.is_success() {
-            return Err(CtxfsError::Provider(format!("crates.io returned {status}")));
-        }
-
-        resp.json::<Value>()
-            .await
-            .map_err(|e| CtxfsError::Provider(format!("failed to parse crates.io response: {e}")))
+        ctxfs_provider_common::http::fetch_registry_json(
+            &self.client,
+            &url,
+            "crates.io",
+            &format!("crate:{name}"),
+        )
+        .await
     }
 }
 
