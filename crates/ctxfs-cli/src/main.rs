@@ -518,8 +518,7 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else if filtered.is_empty() {
-                eprintln!("No dependencies detected in {}", project_dir.display());
-                std::process::exit(1);
+                anyhow::bail!("no dependencies detected in {}", project_dir.display());
             } else {
                 // Group by ecosystem.
                 let mut by_eco: HashMap<String, Vec<&deps::DetectedDep>> = HashMap::new();
@@ -557,8 +556,7 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
             };
 
             if filtered.is_empty() {
-                eprintln!("No dependencies detected in {}", project_dir.display());
-                std::process::exit(1);
+                anyhow::bail!("no dependencies detected in {}", project_dir.display());
             }
 
             let selected = if all {

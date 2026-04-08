@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use ctxfs_ipc::service::CtxfsServiceClient;
+use futures::StreamExt;
 
 /// Result of a single mount operation within a batch.
 #[derive(Debug)]
@@ -85,11 +86,12 @@ pub async fn batch_mount(
         })
         .collect();
 
-    let daemon_results = futures::future::join_all(daemon_futs).await;
+    let daemon_results: Vec<_> = futures::stream::iter(daemon_futs)
+        .buffer_unordered(16)
+        .collect()
+        .await;
 
     // Phase 2: kernel mount (sequential — requires sudo prompts).
-    let mut results = Vec::with_capacity(daemon_results.len());
-
     for (source, mp_str, daemon_res) in daemon_results {
         match daemon_res {
             Ok(info) => {
@@ -157,10 +159,17 @@ pub async fn batch_unmount_dir(
         }
     };
 
-    let prefix = mount_dir.to_string_lossy().to_string();
+    let exact = mount_dir.to_string_lossy().to_string();
+    let prefix = {
+        let mut p = exact.clone();
+        if !p.ends_with('/') {
+            p.push('/');
+        }
+        p
+    };
     let targets: Vec<String> = mounts
         .into_iter()
-        .filter(|m| m.mount_point.starts_with(&prefix))
+        .filter(|m| m.mount_point == exact || m.mount_point.starts_with(&prefix))
         .map(|m| m.mount_point)
         .collect();
 

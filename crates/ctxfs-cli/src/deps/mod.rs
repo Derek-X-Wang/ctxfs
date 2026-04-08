@@ -64,29 +64,33 @@ pub fn detect_all(project_dir: &Path) -> Vec<DetectedDep> {
 
     let pkg_json = project_dir.join("package.json");
     if pkg_json.is_file() {
-        if let Ok(mut d) = npm::parse_package_json(&pkg_json) {
-            deps.append(&mut d);
+        match npm::parse_package_json(&pkg_json) {
+            Ok(mut d) => deps.append(&mut d),
+            Err(e) => tracing::warn!("failed to parse {}: {e}", pkg_json.display()),
         }
     }
 
     let cargo_toml = project_dir.join("Cargo.toml");
     if cargo_toml.is_file() {
-        if let Ok(mut d) = cargo_deps::parse_cargo_toml(&cargo_toml) {
-            deps.append(&mut d);
+        match cargo_deps::parse_cargo_toml(&cargo_toml) {
+            Ok(mut d) => deps.append(&mut d),
+            Err(e) => tracing::warn!("failed to parse {}: {e}", cargo_toml.display()),
         }
     }
 
     let requirements_txt = project_dir.join("requirements.txt");
     if requirements_txt.is_file() {
-        if let Ok(mut d) = python::parse_requirements_txt(&requirements_txt) {
-            deps.append(&mut d);
+        match python::parse_requirements_txt(&requirements_txt) {
+            Ok(mut d) => deps.append(&mut d),
+            Err(e) => tracing::warn!("failed to parse {}: {e}", requirements_txt.display()),
         }
     }
 
     let pyproject_toml = project_dir.join("pyproject.toml");
     if pyproject_toml.is_file() {
-        if let Ok(mut d) = python::parse_pyproject_toml(&pyproject_toml) {
-            deps.append(&mut d);
+        match python::parse_pyproject_toml(&pyproject_toml) {
+            Ok(mut d) => deps.append(&mut d),
+            Err(e) => tracing::warn!("failed to parse {}: {e}", pyproject_toml.display()),
         }
     }
 
