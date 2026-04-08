@@ -41,13 +41,14 @@ pub async fn batch_mount(
     entries.sort_by_key(|(src, _)| src.to_owned());
 
     // Query active mounts so we can skip already-mounted targets.
-    let active_mount_points: std::collections::HashSet<String> = client
-        .list(tarpc::context::current())
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|m| m.mount_point)
-        .collect();
+    let active_mount_points: std::collections::HashSet<String> =
+        match client.list(tarpc::context::current()).await {
+            Ok(mounts) => mounts.into_iter().map(|m| m.mount_point).collect(),
+            Err(e) => {
+                tracing::warn!("failed to query active mounts: {e}");
+                std::collections::HashSet::new()
+            }
+        };
 
     // Separate already-mounted entries from new ones.
     let mut results = Vec::with_capacity(entries.len());

@@ -126,9 +126,10 @@ impl SourceSpec {
             )));
         }
 
-        // Split version from optional subpath
+        // Split version from optional subpath; treat empty subpath as None
         let (version, subpath) = match version_and_subpath.split_once(':') {
-            Some((v, sp)) => (v, Some(sp.to_string())),
+            Some((v, sp)) if !sp.is_empty() => (v, Some(sp.to_string())),
+            Some((v, _)) => (v, None),
             None => (version_and_subpath, None),
         };
 

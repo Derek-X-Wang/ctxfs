@@ -61,6 +61,7 @@ impl DetectedDep {
 }
 
 /// Result of scanning a project directory for manifest files.
+#[derive(Debug)]
 pub struct DetectResult {
     /// Which manifest files were found.
     pub manifests: Vec<String>,
