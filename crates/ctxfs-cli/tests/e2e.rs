@@ -114,6 +114,7 @@ fn mount_server_only_starts_nfs_and_reports_port() {
             "mount",
             "--server-only",
             "github:octocat/Hello-World@master",
+            "-p",
             mount_point.to_str().unwrap(),
         ])
         .output()
@@ -202,6 +203,7 @@ fn mount_npm_server_only_resolves_and_starts_nfs() {
             "mount",
             "--server-only",
             "npm:lodash@4.17.21",
+            "-p",
             mount_point.to_str().unwrap(),
         ])
         .output()

@@ -1,12 +1,15 @@
 mod deps;
 mod setup;
 
+use std::collections::HashMap;
+use std::io::IsTerminal;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ctxfs_core::config::Config;
 use ctxfs_ipc::service::CtxfsServiceClient;
 use ctxfs_ipc::transport;
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -22,10 +25,15 @@ struct Cli {
 enum Commands {
     /// Mount a remote source as a local directory
     Mount {
-        /// Source spec (e.g., github:owner/repo@ref)
-        source: String,
-        /// Local mount point
-        mount_point: PathBuf,
+        /// Source spec(s) (e.g., github:owner/repo@ref)
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// Local mount point (single source only; mutually exclusive with --mount-dir)
+        #[arg(long, short = 'p')]
+        mount_point: Option<PathBuf>,
+        /// Base directory for auto-derived mount points
+        #[arg(long, short = 'd')]
+        mount_dir: Option<PathBuf>,
         /// Start the daemon's NFS server for this source but skip the kernel
         /// mount step. Useful for debugging or when you want to run
         /// `mount_nfs` yourself with custom flags.
@@ -34,8 +42,11 @@ enum Commands {
     },
     /// Unmount a mounted filesystem
     Unmount {
-        /// Mount point or mount ID
-        target: String,
+        /// Mount point or mount ID (required unless --all)
+        target: Option<String>,
+        /// Unmount all active mounts
+        #[arg(long)]
+        all: bool,
     },
     /// List active mounts
     List {
@@ -62,6 +73,11 @@ enum Commands {
     Setup {
         #[command(subcommand)]
         action: SetupAction,
+    },
+    /// Dependency detection and batch mounting
+    Deps {
+        #[command(subcommand)]
+        action: DepsAction,
     },
 }
 
@@ -103,6 +119,49 @@ enum CacheAction {
     },
 }
 
+#[derive(Subcommand)]
+enum DepsAction {
+    /// List detected dependencies
+    List {
+        /// Project directory to scan
+        #[arg(default_value = ".")]
+        project_dir: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include dev dependencies
+        #[arg(long)]
+        include_dev: bool,
+    },
+    /// Mount detected dependencies
+    Mount {
+        /// Project directory to scan
+        #[arg(default_value = ".")]
+        project_dir: PathBuf,
+        /// Mount all detected dependencies (non-interactive)
+        #[arg(long)]
+        all: bool,
+        /// Select specific dependencies by name (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        select: Option<Vec<String>>,
+        /// Include dev dependencies
+        #[arg(long)]
+        include_dev: bool,
+        /// Base directory for auto-derived mount points
+        #[arg(long, short = 'd', default_value = "./ctxfs-deps")]
+        mount_dir: PathBuf,
+        /// Start NFS servers but skip kernel mounts
+        #[arg(long)]
+        server_only: bool,
+    },
+    /// Unmount deps from mount directory
+    Unmount {
+        /// Base directory where deps were mounted
+        #[arg(long, short = 'd', default_value = "./ctxfs-deps")]
+        mount_dir: PathBuf,
+    },
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)] // CLI dispatch is naturally long
 async fn main() -> Result<()> {
@@ -118,80 +177,16 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Mount {
-            source,
+            sources,
             mount_point,
+            mount_dir,
             server_only,
         } => {
-            let client = connect(&config).await?;
-            let mount_point_str = mount_point
-                .to_str()
-                .context("invalid mount point path")?
-                .to_string();
-
-            std::fs::create_dir_all(&mount_point)
-                .context("failed to create mount point directory")?;
-
-            // Step 1: ask the daemon to spawn an NFS server for this source.
-            let info = client
-                .mount(long_context(), source.clone(), mount_point_str.clone())
-                .await?
-                .map_err(|e| anyhow::anyhow!(e))?;
-
-            if server_only {
-                println!("NFS server ready:");
-                println!("  Source:   {}", info.source);
-                println!("  Commit:   {}", info.commit_sha);
-                println!("  ID:       {}", info.id);
-                println!("  NFS port: {}", info.nfs_port);
-                println!();
-                println!("To mount manually, run:");
-                #[cfg(target_os = "macos")]
-                println!(
-                    "  sudo mount_nfs -o nolocks,vers=3,tcp,port={p},mountport={p},soft \\",
-                    p = info.nfs_port
-                );
-                #[cfg(target_os = "linux")]
-                println!(
-                    "  sudo mount -t nfs -o nolock,vers=3,tcp,port={p},mountport={p},soft \\",
-                    p = info.nfs_port
-                );
-                println!("    127.0.0.1:/ {}", info.mount_point);
-                return Ok(());
-            }
-
-            // Step 2: run the OS mount command (needs sudo on macOS).
-            println!(
-                "NFS server listening on 127.0.0.1:{} — mounting kernel side (may prompt for sudo)",
-                info.nfs_port
-            );
-            if let Err(e) = run_mount_nfs(info.nfs_port, &mount_point_str) {
-                // If the kernel mount fails, ask the daemon to stop the NFS server.
-                let _ = client
-                    .unmount(tarpc::context::current(), mount_point_str.clone())
-                    .await;
-                return Err(anyhow::anyhow!("kernel mount failed: {e}"));
-            }
-
-            println!("Mounted {} at {}", info.source, info.mount_point);
-            println!("  Commit:   {}", info.commit_sha);
-            println!("  ID:       {}", info.id);
-            println!("  NFS port: {}", info.nfs_port);
+            handle_mount(&config, sources, mount_point, mount_dir, server_only).await?;
         }
 
-        Commands::Unmount { target } => {
-            // Step 1: unmount the kernel mount first (may prompt for sudo).
-            if let Err(e) = run_umount(&target) {
-                eprintln!("warning: kernel umount failed: {e}");
-            }
-
-            // Step 2: ask the daemon to stop the NFS server for this mount.
-            let client = connect(&config).await?;
-            client
-                .unmount(tarpc::context::current(), target.clone())
-                .await?
-                .map_err(|e| anyhow::anyhow!(e))?;
-
-            println!("Unmounted {target}");
+        Commands::Unmount { target, all } => {
+            handle_unmount(&config, target, all).await?;
         }
 
         Commands::List { json } => {
@@ -333,10 +328,304 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::Deps { action } => {
+            handle_deps(&config, action).await?;
+        }
     }
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Mount handler
+// ---------------------------------------------------------------------------
+
+async fn handle_mount(
+    config: &Config,
+    sources: Vec<String>,
+    mount_point: Option<PathBuf>,
+    mount_dir: Option<PathBuf>,
+    server_only: bool,
+) -> Result<()> {
+    // Validation: mount_point and mount_dir are mutually exclusive.
+    if mount_point.is_some() && mount_dir.is_some() {
+        anyhow::bail!("--mount-point and --mount-dir are mutually exclusive");
+    }
+
+    // mount_point requires exactly one source.
+    if mount_point.is_some() && sources.len() > 1 {
+        anyhow::bail!("--mount-point can only be used with a single source");
+    }
+
+    // At least one of the two is required.
+    if mount_point.is_none() && mount_dir.is_none() {
+        anyhow::bail!("either --mount-point or --mount-dir is required");
+    }
+
+    let client = connect(config).await?;
+
+    if let Some(mp) = mount_point {
+        // Single-source mount (original behaviour).
+        let source = &sources[0];
+        let mp_str = mp.to_str().context("invalid mount point path")?.to_string();
+
+        std::fs::create_dir_all(&mp).context("failed to create mount point directory")?;
+
+        let info = client
+            .mount(long_context(), source.clone(), mp_str.clone())
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        if server_only {
+            print_server_only_info(&info);
+            return Ok(());
+        }
+
+        println!(
+            "NFS server listening on 127.0.0.1:{} — mounting kernel side (may prompt for sudo)",
+            info.nfs_port
+        );
+        if let Err(e) = run_mount_nfs(info.nfs_port, &mp_str) {
+            let _ = client
+                .unmount(tarpc::context::current(), mp_str.clone())
+                .await;
+            return Err(anyhow::anyhow!("kernel mount failed: {e}"));
+        }
+
+        println!("Mounted {} at {}", info.source, info.mount_point);
+        println!("  Commit:   {}", info.commit_sha);
+        println!("  ID:       {}", info.id);
+        println!("  NFS port: {}", info.nfs_port);
+    } else if let Some(base_dir) = mount_dir {
+        // Multi-source mount with slug-derived paths.
+        let mounts: HashMap<String, PathBuf> = sources
+            .iter()
+            .map(|src| {
+                let slug = deps::source_to_slug(src);
+                (src.clone(), base_dir.join(slug))
+            })
+            .collect();
+
+        let results = deps::mount::batch_mount(&client, &mounts, server_only).await;
+        deps::mount::print_mount_summary(&results);
+
+        let failures = results.iter().filter(|r| !r.success).count();
+        if failures > 0 {
+            anyhow::bail!("{failures} mount(s) failed");
+        }
+    }
+
+    Ok(())
+}
+
+fn print_server_only_info(info: &ctxfs_ipc::service::MountInfo) {
+    println!("NFS server ready:");
+    println!("  Source:   {}", info.source);
+    println!("  Commit:   {}", info.commit_sha);
+    println!("  ID:       {}", info.id);
+    println!("  NFS port: {}", info.nfs_port);
+    println!();
+    println!("To mount manually, run:");
+    #[cfg(target_os = "macos")]
+    println!(
+        "  sudo mount_nfs -o nolocks,vers=3,tcp,port={p},mountport={p},soft \\",
+        p = info.nfs_port
+    );
+    #[cfg(target_os = "linux")]
+    println!(
+        "  sudo mount -t nfs -o nolock,vers=3,tcp,port={p},mountport={p},soft \\",
+        p = info.nfs_port
+    );
+    println!("    127.0.0.1:/ {}", info.mount_point);
+}
+
+// ---------------------------------------------------------------------------
+// Unmount handler
+// ---------------------------------------------------------------------------
+
+async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> Result<()> {
+    if all {
+        let client = connect(config).await?;
+        let results = deps::mount::batch_unmount_all(&client).await;
+        if results.is_empty() {
+            println!("No active mounts to unmount");
+        } else {
+            deps::mount::print_unmount_summary(&results);
+        }
+        return Ok(());
+    }
+
+    let target = target.context("target is required unless --all is specified")?;
+
+    // Step 1: unmount the kernel mount first (may prompt for sudo).
+    if let Err(e) = run_umount(&target) {
+        eprintln!("warning: kernel umount failed: {e}");
+    }
+
+    // Step 2: ask the daemon to stop the NFS server for this mount.
+    let client = connect(config).await?;
+    client
+        .unmount(tarpc::context::current(), target.clone())
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    println!("Unmounted {target}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deps handler
+// ---------------------------------------------------------------------------
+
+async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
+    match action {
+        DepsAction::List {
+            project_dir,
+            json,
+            include_dev,
+        } => {
+            let all_deps = deps::detect_all(&project_dir);
+            let filtered: Vec<_> = if include_dev {
+                all_deps
+            } else {
+                all_deps.into_iter().filter(|d| !d.is_dev).collect()
+            };
+
+            if json {
+                #[derive(serde::Serialize)]
+                struct JsonOutput {
+                    dependencies: Vec<deps::DetectedDep>,
+                }
+                let output = JsonOutput {
+                    dependencies: filtered,
+                };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else if filtered.is_empty() {
+                println!("No dependencies detected in {}", project_dir.display());
+            } else {
+                // Group by ecosystem.
+                let mut by_eco: HashMap<String, Vec<&deps::DetectedDep>> = HashMap::new();
+                for dep in &filtered {
+                    by_eco
+                        .entry(dep.ecosystem.to_string())
+                        .or_default()
+                        .push(dep);
+                }
+                for (eco, eco_deps) in &by_eco {
+                    println!("[{eco}]");
+                    for dep in eco_deps {
+                        let dev_tag = if dep.is_dev { " [dev]" } else { "" };
+                        println!("  {} @{}{}", dep.name, dep.version, dev_tag);
+                    }
+                }
+                println!();
+                println!("{} dependencies detected", filtered.len());
+            }
+        }
+
+        DepsAction::Mount {
+            project_dir,
+            all,
+            select,
+            include_dev,
+            mount_dir,
+            server_only,
+        } => {
+            let all_deps = deps::detect_all(&project_dir);
+            let filtered: Vec<deps::DetectedDep> = if include_dev {
+                all_deps
+            } else {
+                all_deps.into_iter().filter(|d| !d.is_dev).collect()
+            };
+
+            if filtered.is_empty() {
+                println!("No dependencies detected in {}", project_dir.display());
+                return Ok(());
+            }
+
+            let selected = if all {
+                filtered
+            } else if let Some(names) = select {
+                select_by_name(&filtered, &names)?
+            } else {
+                interactive_select(&filtered)?
+            };
+
+            if selected.is_empty() {
+                println!("No dependencies selected");
+                return Ok(());
+            }
+
+            let mounts = deps::compute_mount_paths(&selected, &mount_dir);
+            let client = connect(config).await?;
+            let results = deps::mount::batch_mount(&client, &mounts, server_only).await;
+            deps::mount::print_mount_summary(&results);
+
+            let failures = results.iter().filter(|r| !r.success).count();
+            if failures > 0 {
+                anyhow::bail!("{failures} mount(s) failed");
+            }
+        }
+
+        DepsAction::Unmount { mount_dir } => {
+            let client = connect(config).await?;
+            let results = deps::mount::batch_unmount_dir(&client, &mount_dir).await;
+            if results.is_empty() {
+                println!("No active mounts under {} to unmount", mount_dir.display());
+            } else {
+                deps::mount::print_unmount_summary(&results);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Select dependencies by name from --select flag.
+fn select_by_name(deps: &[deps::DetectedDep], names: &[String]) -> Result<Vec<deps::DetectedDep>> {
+    let mut selected = Vec::new();
+    for name in names {
+        let matches: Vec<_> = deps.iter().filter(|d| d.name == *name).collect();
+        match matches.len() {
+            0 => anyhow::bail!("no dependency named '{name}' found"),
+            1 => selected.push(matches[0].clone()),
+            _ => {
+                // Ambiguous — list the ecosystems that match.
+                let ecosystems: Vec<_> = matches.iter().map(|d| d.ecosystem.to_string()).collect();
+                anyhow::bail!(
+                    "ambiguous name '{name}' — found in: {}. Use the full source spec instead.",
+                    ecosystems.join(", ")
+                );
+            }
+        }
+    }
+    Ok(selected)
+}
+
+/// Interactive multi-select picker using dialoguer.
+fn interactive_select(deps: &[deps::DetectedDep]) -> Result<Vec<deps::DetectedDep>> {
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("non-interactive terminal — use --all or --select to choose dependencies");
+    }
+
+    let labels: Vec<String> = deps.iter().map(deps::DetectedDep::picker_label).collect();
+    // Pre-select production (non-dev) dependencies.
+    let defaults: Vec<bool> = deps.iter().map(|d| !d.is_dev).collect();
+
+    let selections = dialoguer::MultiSelect::new()
+        .with_prompt("Select dependencies to mount")
+        .items(&labels)
+        .defaults(&defaults)
+        .interact()
+        .context("interactive selection cancelled")?;
+
+    Ok(selections.into_iter().map(|i| deps[i].clone()).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 async fn connect(config: &Config) -> Result<CtxfsServiceClient> {
     transport::connect_client(&config.socket_path)
@@ -348,7 +637,7 @@ async fn connect(config: &Config) -> Result<CtxfsServiceClient> {
 }
 
 /// Context with a longer deadline for operations that call external APIs.
-fn long_context() -> tarpc::context::Context {
+pub(crate) fn long_context() -> tarpc::context::Context {
     let mut ctx = tarpc::context::current();
     ctx.deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     ctx
@@ -356,7 +645,7 @@ fn long_context() -> tarpc::context::Context {
 
 /// Invoke the OS-native NFS mount command against the daemon's loopback NFS
 /// server. Requires sudo on macOS and Linux (kernel restriction).
-fn run_mount_nfs(port: u16, mount_point: &str) -> Result<()> {
+pub(crate) fn run_mount_nfs(port: u16, mount_point: &str) -> Result<()> {
     let opts = format!(
         "nolocks,vers=3,tcp,port={port},mountport={port},soft,actimeo=120,rsize=131072,wsize=131072"
     );
@@ -391,7 +680,7 @@ fn run_mount_nfs(port: u16, mount_point: &str) -> Result<()> {
 }
 
 /// Invoke the OS-native `umount` against a mount point. Requires sudo.
-fn run_umount(mount_point: &str) -> Result<()> {
+pub(crate) fn run_umount(mount_point: &str) -> Result<()> {
     let status = std::process::Command::new("sudo")
         .args(["umount", mount_point])
         .status()
