@@ -1,7 +1,7 @@
 mod cargo_deps;
+pub mod mount;
 mod npm;
 mod python;
-pub mod mount;
 mod slug;
 pub use slug::{compute_mount_paths, source_to_slug};
 
@@ -51,7 +51,10 @@ impl DetectedDep {
     /// Display label for the interactive picker.
     pub fn picker_label(&self) -> String {
         let dev_tag = if self.is_dev { " [dev]" } else { "" };
-        format!("{} {} @{}{}", self.ecosystem, self.name, self.version, dev_tag)
+        format!(
+            "{} {} @{}{}",
+            self.ecosystem, self.name, self.version, dev_tag
+        )
     }
 }
 

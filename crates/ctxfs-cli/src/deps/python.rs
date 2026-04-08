@@ -69,8 +69,8 @@ fn strip_extras(name: &str) -> &str {
 /// Lines that are blank, start with `#`, or are flags (`-r`, `-e`, `--index-url`, etc.)
 /// are ignored. All dependencies are treated as production (`is_dev = false`).
 pub fn parse_requirements_txt(path: &Path) -> Result<Vec<DetectedDep>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
 
     let mut deps = Vec::new();
 
@@ -110,8 +110,8 @@ pub fn parse_requirements_txt(path: &Path) -> Result<Vec<DetectedDep>> {
 /// `[project.optional-dependencies]` as optional deps, marking extras named
 /// `dev`, `test`, or `testing` as `is_dev = true`.
 pub fn parse_pyproject_toml(path: &Path) -> Result<Vec<DetectedDep>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
 
     let doc: toml::Value = content
         .parse()
@@ -151,12 +151,7 @@ pub fn parse_pyproject_toml(path: &Path) -> Result<Vec<DetectedDep>> {
                     if let Some(spec) = item.as_str() {
                         let (name, version) = parse_pep508(spec);
                         if !name.is_empty() {
-                            deps.push(DetectedDep::new(
-                                name,
-                                version,
-                                Ecosystem::PyPI,
-                                is_dev,
-                            ));
+                            deps.push(DetectedDep::new(name, version, Ecosystem::PyPI, is_dev));
                         }
                     }
                 }

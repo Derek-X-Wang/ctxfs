@@ -23,7 +23,7 @@ pub fn strip_version_range(version: &str) -> String {
     }
 
     // Strip leading range operators: >=, <=, ~, ^, >, <
-    let stripped = v.trim_start_matches(|c: char| matches!(c, '^' | '~' | '>' | '<' | '='));
+    let stripped = v.trim_start_matches(['^', '~', '>', '<', '=']);
     stripped.to_string()
 }
 
@@ -168,6 +168,4 @@ mod tests {
         let deps = parse_package_json(f.path()).unwrap();
         assert!(deps.is_empty());
     }
-
-
 }

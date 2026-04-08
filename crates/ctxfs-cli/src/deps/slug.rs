@@ -19,14 +19,11 @@ pub fn source_to_slug(source_spec: &str) -> String {
         None => source_spec,
     };
 
-    let provider = source_spec
-        .split_once(':')
-        .map(|(p, _)| p)
-        .unwrap_or("");
+    let provider = source_spec.split_once(':').map_or("", |(p, _)| p);
 
     if provider == "github" {
         // rest = "owner/repo@ref" or "owner/repo"
-        let repo_and_ref = rest.split_once('/').map(|(_, r)| r).unwrap_or(rest);
+        let repo_and_ref = rest.split_once('/').map_or(rest, |(_, r)| r);
         return match repo_and_ref.split_once('@') {
             Some((repo, git_ref)) => format!("{repo}-{git_ref}"),
             None => repo_and_ref.to_owned(),
