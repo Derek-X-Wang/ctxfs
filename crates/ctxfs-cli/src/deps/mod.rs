@@ -128,4 +128,64 @@ mod tests {
         let deps = detect_all(dir.path());
         assert!(deps.is_empty());
     }
+
+    #[test]
+    fn detect_all_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies": {"react": "^19.1.0"}, "devDependencies": {"jest": "~29.0.0"}}"#,
+        )
+        .unwrap();
+        let deps = detect_all(dir.path());
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.name == "react" && !d.is_dev));
+        assert!(deps.iter().any(|d| d.name == "jest" && d.is_dev));
+    }
+
+    #[test]
+    fn detect_all_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        let deps = detect_all(dir.path());
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "serde");
+        assert_eq!(deps[0].ecosystem, Ecosystem::Crate);
+    }
+
+    #[test]
+    fn detect_all_requirements_txt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("requirements.txt"),
+            "requests==2.31.0\nflask==3.0.0\n",
+        )
+        .unwrap();
+        let deps = detect_all(dir.path());
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().all(|d| d.ecosystem == Ecosystem::PyPI));
+    }
+
+    #[test]
+    fn detect_all_multiple_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies": {"react": "^19.1.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        let deps = detect_all(dir.path());
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.ecosystem == Ecosystem::Npm));
+        assert!(deps.iter().any(|d| d.ecosystem == Ecosystem::Crate));
+    }
 }
