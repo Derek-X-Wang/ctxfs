@@ -2,6 +2,8 @@ mod cargo_deps;
 mod npm;
 mod python;
 pub mod mount;
+mod slug;
+pub use slug::{compute_mount_paths, source_to_slug};
 
 use serde::Serialize;
 use std::fmt;
