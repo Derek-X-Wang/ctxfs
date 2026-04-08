@@ -20,12 +20,34 @@ New multi-mount form:
 ctxfs mount <source1> [source2 ...] --mount-dir <dir>
 ```
 
-- `--mount-dir` (or `-d`) specifies the base directory for all mounts.
-- Mount points are derived automatically: `<mount-dir>/<package-name>/`.
-  - Scoped npm packages: `@types/node` becomes `types-node`.
-  - GitHub sources: `github:owner/repo@ref` uses `repo` as directory name.
-- Daemon RPC calls (`mount`) are issued **concurrently**. Kernel mounts (`mount_nfs`) run sequentially (each needs sudo).
-- Partial success is allowed: mounts that succeed stay up. Failures are reported in a summary. Exit code 0 if all succeed, 1 if any fail.
+### Argument Disambiguation
+
+The presence of `--mount-dir` (or `-d`) switches the parser into multi-mount mode:
+
+- **Without `--mount-dir`**: exactly two positionals required — `<source>` and `<mount_point>`. This is the existing behavior.
+- **With `--mount-dir`**: all positionals are treated as sources. `<mount_point>` is not accepted. Mount points are derived automatically.
+
+In clap terms, `source` is `Vec<String>` (min 1) and `mount_point` is `Option<PathBuf>`. A validation step enforces:
+- If `mount_point` is `None` and `mount_dir` is `None` → error: "provide either a mount point or --mount-dir".
+- If `mount_point` is `Some` and `mount_dir` is `Some` → error: "cannot use both a mount point and --mount-dir".
+- If `mount_point` is `Some` and sources has more than one entry → error: "use --mount-dir for multiple sources".
+
+### Mount Directory Naming
+
+Mount points are derived as `<mount-dir>/<slug>/` where the slug is:
+
+- **npm packages**: `react` → `react`, `@types/node` → `types-node`
+- **GitHub sources**: `github:owner/repo@ref` → `repo-ref` (e.g., `lodash-main`). If no ref, just `repo`.
+- **crate/pypi packages**: package name as-is (e.g., `serde`, `requests`)
+
+Collision handling: if two sources produce the same slug, append the ecosystem prefix (`npm-react`, `crate-react`). If still colliding (same ecosystem, different refs), the ref suffix already differentiates them.
+
+### Concurrency
+
+- Daemon RPC calls (`mount`) are issued **concurrently** via `tokio::join!` / `FuturesUnordered`.
+- Kernel mounts (`mount_nfs`) run **sequentially** (each needs sudo).
+- Partial success is allowed: mounts that succeed stay up. Failures are reported in a summary.
+- Exit code 0 if all succeed, 1 if any fail.
 
 ---
 
@@ -38,7 +60,25 @@ Scans for manifest files and prints detected dependencies.
 - Groups by ecosystem (JS, Python, Rust).
 - Labels each dep as `[dep]` or `[dev]`.
 - `--json` flag for machine-readable output.
+- `--include-dev` flag to include dev dependencies (excluded by default in non-interactive output).
 - No mounting.
+
+**JSON schema** (when `--json` is passed):
+
+```json
+{
+  "manifests": ["package.json", "Cargo.toml"],
+  "dependencies": [
+    {
+      "name": "react",
+      "version": "19.1.0",
+      "ecosystem": "npm",
+      "is_dev": false,
+      "source_spec": "npm:react@19.1.0"
+    }
+  ]
+}
+```
 
 ### `ctxfs deps mount <project-dir>`
 
@@ -49,21 +89,25 @@ Detects dependencies and mounts selected ones.
 - All deps shown, grouped by ecosystem, dev deps labeled `[dev]`.
 - Dev deps shown but not pre-selected.
 
-**Non-interactive flags**:
+**Non-interactive mode** (non-TTY or when flags are provided):
 - `--all` — mount all production deps.
 - `--all --include-dev` — mount everything including dev deps.
 - `--select react,lodash,serde` — mount specific packages by name.
 - `--select` with `--include-dev` — select from both production and dev pools.
+- **If non-TTY and no `--all`/`--select` flag**: error with "use --all or --select in non-interactive mode".
+
+**`--select` name resolution**: Names are matched as bare names when unambiguous. If the same name exists in multiple ecosystems, the user must qualify with the ecosystem prefix (e.g., `npm:react`, `pypi:requests`, `crate:requests`). Ambiguous bare names produce an error listing the options.
 
 **Mount directory**:
 - `--mount-dir <dir>` specifies where to mount. Defaults to `./ctxfs-deps/` if omitted.
 - Reuses the multi-mount flow from Section 1.
 
-### `ctxfs deps unmount <project-dir>`
+### `ctxfs deps unmount`
 
-- Scans the mount dir (default `./ctxfs-deps/`) for active ctxfs mounts.
-- Unmounts all in batch (kernel umount + daemon cleanup).
-- Supports `--mount-dir <dir>` for custom directories.
+- No positional argument required.
+- `--mount-dir <dir>` specifies which directory to scan. Defaults to `./ctxfs-deps/`.
+- Queries the daemon via `list()` RPC to find active mounts whose mount points are under the target directory.
+- Unmounts all matching mounts in batch (kernel umount + daemon cleanup).
 - Summary output with per-mount status.
 
 ### `ctxfs unmount --all`
@@ -80,8 +124,12 @@ Separate addition to the existing `unmount` command. Unmounts every active mount
 |------|-----------|-------------|-----------------|
 | `package.json` | npm | `dependencies` | `devDependencies` |
 | `Cargo.toml` | crate | `[dependencies]` | `[dev-dependencies]` |
-| `requirements.txt` | pypi | all lines | (none, all treated as production) |
-| `pyproject.toml` | pypi | `[project.dependencies]` | `[project.optional-dependencies]` |
+| `requirements.txt` | pypi | all lines (treated as production) | (none) |
+| `pyproject.toml` | pypi | `[project.dependencies]` | `[project.optional-dependencies]` (see note) |
+
+**`pyproject.toml` optional-dependencies note**: Only extras named `dev`, `test`, or `testing` are classified as dev dependencies. All other optional-dependency groups are treated as production dependencies. This is a heuristic — not all projects follow this convention. The limitation is documented in `--help` output.
+
+**`requirements.txt` note**: All entries are treated as production dependencies. There is no dev/prod distinction. `--include-dev` has no effect on requirements.txt entries.
 
 Multiple manifest files can coexist in one project. All are detected and results merged.
 
@@ -102,8 +150,8 @@ struct DetectedDep {
 ### Version Handling
 
 - **package.json**: Strip range operators (`^`, `~`, `>=`, etc.), take base version. `*` or complex ranges become `latest`.
-- **Cargo.toml**: Handle both string (`"1.0"`) and table (`{ version = "1.0" }`) forms. Skip `path = "..."` and `git = "..."` deps.
-- **requirements.txt**: Parse `package==version`. Unpinned deps use `latest`.
+- **Cargo.toml**: Handle both string (`"1.0"`) and table (`{ version = "1.0" }`) forms. Skip `path = "..."` and `git = "..."` deps (local/custom sources, not on crates.io).
+- **requirements.txt**: Parse `package==version`. Unpinned deps use `latest`. Skip lines starting with `-` (flags) or `#` (comments).
 - **pyproject.toml**: Parse PEP 508 specifiers, take pinned version or `latest`.
 
 ---
@@ -124,11 +172,13 @@ Mounted 3/5 dependencies:
 
 **Empty dependency list**: After filtering, print "No matching dependencies found" and exit 0.
 
+**Non-TTY without flags**: Error with "use --all or --select in non-interactive mode" and exit 1.
+
 **Packages without GitHub repos**: Surfaced as error in summary, dep is skipped.
 
 **Duplicate names across ecosystems**: Mount dirs include ecosystem prefix only on collision: `./deps/requests/` if unique, `./deps/pypi-requests/` and `./deps/crate-requests/` if not.
 
-**Already mounted**: If a mount point already has an active mount, skip and note in output.
+**Already mounted**: Detected via daemon `list()` RPC by checking if any active mount's `mount_point` matches the derived path. If already mounted, skip and note "already mounted" in output summary.
 
 ---
 
