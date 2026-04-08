@@ -1,3 +1,4 @@
+mod deps;
 mod setup;
 
 use anyhow::{Context, Result};
