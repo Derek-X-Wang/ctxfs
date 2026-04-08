@@ -11,6 +11,7 @@ pub struct MountResult {
     pub mount_point: PathBuf,
     pub success: bool,
     pub error: Option<String>,
+    pub note: Option<String>,
 }
 
 /// Result of a single unmount operation within a batch.
@@ -35,8 +36,35 @@ pub async fn batch_mount(
     let mut entries: Vec<(&String, &PathBuf)> = mounts.iter().collect();
     entries.sort_by_key(|(src, _)| src.to_owned());
 
+    // Query active mounts so we can skip already-mounted targets.
+    let active_mount_points: std::collections::HashSet<String> = client
+        .list(tarpc::context::current())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| m.mount_point)
+        .collect();
+
+    // Separate already-mounted entries from new ones.
+    let mut results = Vec::with_capacity(entries.len());
+    let mut to_mount = Vec::new();
+    for (source, mount_path) in &entries {
+        let mp_str = mount_path.to_string_lossy().to_string();
+        if active_mount_points.contains(&mp_str) {
+            results.push(MountResult {
+                source: (*source).clone(),
+                mount_point: (*mount_path).clone(),
+                success: true,
+                error: None,
+                note: Some("already mounted".to_string()),
+            });
+        } else {
+            to_mount.push((*source, *mount_path));
+        }
+    }
+
     // Phase 1: issue all daemon mount RPCs concurrently.
-    let daemon_futs: Vec<_> = entries
+    let daemon_futs: Vec<_> = to_mount
         .iter()
         .map(|(source, mount_path)| {
             let mp_str = mount_path.to_string_lossy().to_string();
@@ -71,6 +99,7 @@ pub async fn batch_mount(
                         mount_point: PathBuf::from(&mp_str),
                         success: true,
                         error: None,
+                        note: None,
                     });
                     continue;
                 }
@@ -85,6 +114,7 @@ pub async fn batch_mount(
                         mount_point: PathBuf::from(&mp_str),
                         success: false,
                         error: Some(format!("kernel mount: {e}")),
+                        note: None,
                     });
                 } else {
                     results.push(MountResult {
@@ -92,6 +122,7 @@ pub async fn batch_mount(
                         mount_point: PathBuf::from(&mp_str),
                         success: true,
                         error: None,
+                        note: None,
                     });
                 }
             }
@@ -101,6 +132,7 @@ pub async fn batch_mount(
                     mount_point: PathBuf::from(&mp_str),
                     success: false,
                     error: Some(e),
+                    note: None,
                 });
             }
         }
@@ -198,6 +230,9 @@ pub fn print_mount_summary(results: &[MountResult]) {
         print!("  [{status}] {} -> {}", r.source, r.mount_point.display());
         if let Some(ref e) = r.error {
             print!("  ({e})");
+        }
+        if let Some(ref n) = r.note {
+            print!("  [{n}]");
         }
         println!();
     }

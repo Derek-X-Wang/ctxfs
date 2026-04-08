@@ -478,6 +478,7 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
 // Deps handler
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
     match action {
         DepsAction::List {
@@ -495,14 +496,30 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
             if json {
                 #[derive(serde::Serialize)]
                 struct JsonOutput {
+                    manifests: Vec<String>,
                     dependencies: Vec<deps::DetectedDep>,
                 }
+
+                let mut manifests = Vec::new();
+                for name in &[
+                    "package.json",
+                    "Cargo.toml",
+                    "requirements.txt",
+                    "pyproject.toml",
+                ] {
+                    if project_dir.join(name).is_file() {
+                        manifests.push((*name).to_string());
+                    }
+                }
+
                 let output = JsonOutput {
+                    manifests,
                     dependencies: filtered,
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else if filtered.is_empty() {
-                println!("No dependencies detected in {}", project_dir.display());
+                eprintln!("No dependencies detected in {}", project_dir.display());
+                std::process::exit(1);
             } else {
                 // Group by ecosystem.
                 let mut by_eco: HashMap<String, Vec<&deps::DetectedDep>> = HashMap::new();
@@ -540,8 +557,8 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
             };
 
             if filtered.is_empty() {
-                println!("No dependencies detected in {}", project_dir.display());
-                return Ok(());
+                eprintln!("No dependencies detected in {}", project_dir.display());
+                std::process::exit(1);
             }
 
             let selected = if all {
@@ -583,20 +600,43 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
 }
 
 /// Select dependencies by name from --select flag.
+///
+/// Accepts bare names ("react") or qualified names ("npm:react") to resolve
+/// ambiguity when the same package name appears in multiple ecosystems.
 fn select_by_name(deps: &[deps::DetectedDep], names: &[String]) -> Result<Vec<deps::DetectedDep>> {
     let mut selected = Vec::new();
     for name in names {
-        let matches: Vec<_> = deps.iter().filter(|d| d.name == *name).collect();
-        match matches.len() {
-            0 => anyhow::bail!("no dependency named '{name}' found"),
-            1 => selected.push(matches[0].clone()),
-            _ => {
-                // Ambiguous — list the ecosystems that match.
-                let ecosystems: Vec<_> = matches.iter().map(|d| d.ecosystem.to_string()).collect();
-                anyhow::bail!(
-                    "ambiguous name '{name}' — found in: {}. Use the full source spec instead.",
-                    ecosystems.join(", ")
-                );
+        if let Some((eco_prefix, bare_name)) = name.split_once(':') {
+            // Qualified name: match both ecosystem and dep name.
+            let matches: Vec<_> = deps
+                .iter()
+                .filter(|d| {
+                    d.ecosystem.to_string().eq_ignore_ascii_case(eco_prefix) && d.name == bare_name
+                })
+                .collect();
+            match matches.len() {
+                0 => anyhow::bail!("no dependency matching '{name}' found"),
+                1 => selected.push(matches[0].clone()),
+                _ => {
+                    // Shouldn't happen with qualified names, but handle gracefully.
+                    anyhow::bail!("multiple dependencies matching '{name}' — this is unexpected");
+                }
+            }
+        } else {
+            // Bare name: match by dep name only.
+            let matches: Vec<_> = deps.iter().filter(|d| d.name == *name).collect();
+            match matches.len() {
+                0 => anyhow::bail!("no dependency named '{name}' found"),
+                1 => selected.push(matches[0].clone()),
+                _ => {
+                    let ecosystems: Vec<_> =
+                        matches.iter().map(|d| d.ecosystem.to_string()).collect();
+                    anyhow::bail!(
+                        "ambiguous name '{name}' — found in: {}. Qualify with ecosystem prefix (e.g., {}:{name}).",
+                        ecosystems.join(", "),
+                        ecosystems[0]
+                    );
+                }
             }
         }
     }
