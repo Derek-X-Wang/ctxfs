@@ -9,6 +9,8 @@ use serde::Serialize;
 use std::fmt;
 use std::path::Path;
 
+type ManifestParser = fn(&Path) -> anyhow::Result<Vec<DetectedDep>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Ecosystem {
@@ -58,43 +60,38 @@ impl DetectedDep {
     }
 }
 
+/// Result of scanning a project directory for manifest files.
+pub struct DetectResult {
+    /// Which manifest files were found.
+    pub manifests: Vec<String>,
+    /// All detected dependencies (production + dev).
+    pub deps: Vec<DetectedDep>,
+}
+
 /// Detect all dependencies from manifest files in the given directory.
-pub fn detect_all(project_dir: &Path) -> Vec<DetectedDep> {
+pub fn detect_all(project_dir: &Path) -> DetectResult {
     let mut deps = Vec::new();
+    let mut manifests = Vec::new();
 
-    let pkg_json = project_dir.join("package.json");
-    if pkg_json.is_file() {
-        match npm::parse_package_json(&pkg_json) {
-            Ok(mut d) => deps.append(&mut d),
-            Err(e) => tracing::warn!("failed to parse {}: {e}", pkg_json.display()),
+    let manifest_parsers: &[(&str, ManifestParser)] = &[
+        ("package.json", npm::parse_package_json),
+        ("Cargo.toml", cargo_deps::parse_cargo_toml),
+        ("requirements.txt", python::parse_requirements_txt),
+        ("pyproject.toml", python::parse_pyproject_toml),
+    ];
+
+    for (name, parser) in manifest_parsers {
+        let path = project_dir.join(name);
+        if path.is_file() {
+            manifests.push((*name).to_string());
+            match parser(&path) {
+                Ok(mut d) => deps.append(&mut d),
+                Err(e) => tracing::warn!("failed to parse {}: {e}", path.display()),
+            }
         }
     }
 
-    let cargo_toml = project_dir.join("Cargo.toml");
-    if cargo_toml.is_file() {
-        match cargo_deps::parse_cargo_toml(&cargo_toml) {
-            Ok(mut d) => deps.append(&mut d),
-            Err(e) => tracing::warn!("failed to parse {}: {e}", cargo_toml.display()),
-        }
-    }
-
-    let requirements_txt = project_dir.join("requirements.txt");
-    if requirements_txt.is_file() {
-        match python::parse_requirements_txt(&requirements_txt) {
-            Ok(mut d) => deps.append(&mut d),
-            Err(e) => tracing::warn!("failed to parse {}: {e}", requirements_txt.display()),
-        }
-    }
-
-    let pyproject_toml = project_dir.join("pyproject.toml");
-    if pyproject_toml.is_file() {
-        match python::parse_pyproject_toml(&pyproject_toml) {
-            Ok(mut d) => deps.append(&mut d),
-            Err(e) => tracing::warn!("failed to parse {}: {e}", pyproject_toml.display()),
-        }
-    }
-
-    deps
+    DetectResult { manifests, deps }
 }
 
 #[cfg(test)]
@@ -129,8 +126,9 @@ mod tests {
     #[test]
     fn detect_all_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let deps = detect_all(dir.path());
-        assert!(deps.is_empty());
+        let result = detect_all(dir.path());
+        assert!(result.deps.is_empty());
+        assert!(result.manifests.is_empty());
     }
 
     #[test]
@@ -141,10 +139,11 @@ mod tests {
             r#"{"dependencies": {"react": "^19.1.0"}, "devDependencies": {"jest": "~29.0.0"}}"#,
         )
         .unwrap();
-        let deps = detect_all(dir.path());
-        assert_eq!(deps.len(), 2);
-        assert!(deps.iter().any(|d| d.name == "react" && !d.is_dev));
-        assert!(deps.iter().any(|d| d.name == "jest" && d.is_dev));
+        let result = detect_all(dir.path());
+        assert_eq!(result.deps.len(), 2);
+        assert_eq!(result.manifests, vec!["package.json"]);
+        assert!(result.deps.iter().any(|d| d.name == "react" && !d.is_dev));
+        assert!(result.deps.iter().any(|d| d.name == "jest" && d.is_dev));
     }
 
     #[test]
@@ -155,10 +154,10 @@ mod tests {
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
         )
         .unwrap();
-        let deps = detect_all(dir.path());
-        assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].name, "serde");
-        assert_eq!(deps[0].ecosystem, Ecosystem::Crate);
+        let result = detect_all(dir.path());
+        assert_eq!(result.deps.len(), 1);
+        assert_eq!(result.deps[0].name, "serde");
+        assert_eq!(result.deps[0].ecosystem, Ecosystem::Crate);
     }
 
     #[test]
@@ -169,9 +168,9 @@ mod tests {
             "requests==2.31.0\nflask==3.0.0\n",
         )
         .unwrap();
-        let deps = detect_all(dir.path());
-        assert_eq!(deps.len(), 2);
-        assert!(deps.iter().all(|d| d.ecosystem == Ecosystem::PyPI));
+        let result = detect_all(dir.path());
+        assert_eq!(result.deps.len(), 2);
+        assert!(result.deps.iter().all(|d| d.ecosystem == Ecosystem::PyPI));
     }
 
     #[test]
@@ -187,9 +186,10 @@ mod tests {
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
         )
         .unwrap();
-        let deps = detect_all(dir.path());
-        assert_eq!(deps.len(), 2);
-        assert!(deps.iter().any(|d| d.ecosystem == Ecosystem::Npm));
-        assert!(deps.iter().any(|d| d.ecosystem == Ecosystem::Crate));
+        let result = detect_all(dir.path());
+        assert_eq!(result.deps.len(), 2);
+        assert_eq!(result.manifests.len(), 2);
+        assert!(result.deps.iter().any(|d| d.ecosystem == Ecosystem::Npm));
+        assert!(result.deps.iter().any(|d| d.ecosystem == Ecosystem::Crate));
     }
 }

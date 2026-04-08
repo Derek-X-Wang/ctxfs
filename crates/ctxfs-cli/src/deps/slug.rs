@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ctxfs_core::source::{ProviderType, SourceSpec};
+
 use super::DetectedDep;
 
 /// Derive a short, filesystem-safe slug from a source spec string.
@@ -9,44 +11,26 @@ use super::DetectedDep;
 /// - `"npm:react@19.1.0"` → `"react"`
 /// - `"npm:@types/node@20.0.0"` → `"types-node"`
 /// - `"github:owner/repo@main"` → `"repo-main"`
-/// - `"github:owner/repo"` → `"repo"`
 /// - `"crate:serde@1.0"` → `"serde"`
 /// - `"pypi:requests@2.31.0"` → `"requests"`
 pub fn source_to_slug(source_spec: &str) -> String {
-    // Strip provider prefix (everything up to and including the first ':').
-    let rest = match source_spec.split_once(':') {
-        Some((_, r)) => r,
-        None => source_spec,
+    let Ok(spec) = SourceSpec::parse(source_spec) else {
+        // Fallback for unparseable specs: sanitize the whole string.
+        return source_spec.replace([':', '/', '@'], "-");
     };
 
-    let provider = source_spec.split_once(':').map_or("", |(p, _)| p);
-
-    if provider == "github" {
-        // rest = "owner/repo@ref" or "owner/repo"
-        let repo_and_ref = rest.split_once('/').map_or(rest, |(_, r)| r);
-        return match repo_and_ref.split_once('@') {
-            Some((repo, git_ref)) => format!("{repo}-{git_ref}"),
-            None => repo_and_ref.to_owned(),
-        };
-    }
-
-    // Registry sources: rest = "name@version" or "@scope/name@version"
-    let name = match rest.split_once('@') {
-        // Scoped npm packages start with '@', so splitting on '@' gives ("", "scope/name@version").
-        // Handle that by checking if the part before '@' is empty.
-        Some(("", scoped)) => {
-            // scoped = "scope/name@version" or "scope/name"
-            match scoped.split_once('@') {
-                Some((scoped_name, _)) => scoped_name,
-                None => scoped,
-            }
+    match spec.provider_type {
+        ProviderType::GitHub => {
+            let repo = spec
+                .name
+                .split_once('/')
+                .map_or(spec.name.as_str(), |(_, r)| r);
+            format!("{repo}-{}", spec.version)
         }
-        Some((n, _)) => n,
-        None => rest,
-    };
-
-    // Sanitize: trim leading '@', replace '/' with '-'.
-    name.trim_start_matches('@').replace('/', "-")
+        ProviderType::Npm | ProviderType::PyPI | ProviderType::Crate => {
+            spec.name.trim_start_matches('@').replace('/', "-")
+        }
+    }
 }
 
 /// Compute mount paths for a list of detected dependencies.

@@ -486,12 +486,8 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
             json,
             include_dev,
         } => {
-            let all_deps = deps::detect_all(&project_dir);
-            let filtered: Vec<_> = if include_dev {
-                all_deps
-            } else {
-                all_deps.into_iter().filter(|d| !d.is_dev).collect()
-            };
+            let result = deps::detect_all(&project_dir);
+            let filtered = filter_dev(result.deps, include_dev);
 
             if json {
                 #[derive(serde::Serialize)]
@@ -500,20 +496,8 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
                     dependencies: Vec<deps::DetectedDep>,
                 }
 
-                let mut manifests = Vec::new();
-                for name in &[
-                    "package.json",
-                    "Cargo.toml",
-                    "requirements.txt",
-                    "pyproject.toml",
-                ] {
-                    if project_dir.join(name).is_file() {
-                        manifests.push((*name).to_string());
-                    }
-                }
-
                 let output = JsonOutput {
-                    manifests,
+                    manifests: result.manifests,
                     dependencies: filtered,
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);
@@ -548,12 +532,8 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
             mount_dir,
             server_only,
         } => {
-            let all_deps = deps::detect_all(&project_dir);
-            let filtered: Vec<deps::DetectedDep> = if include_dev {
-                all_deps
-            } else {
-                all_deps.into_iter().filter(|d| !d.is_dev).collect()
-            };
+            let result = deps::detect_all(&project_dir);
+            let filtered = filter_dev(result.deps, include_dev);
 
             if filtered.is_empty() {
                 anyhow::bail!("no dependencies detected in {}", project_dir.display());
@@ -595,6 +575,15 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Filter out dev dependencies unless `include_dev` is set.
+fn filter_dev(deps: Vec<deps::DetectedDep>, include_dev: bool) -> Vec<deps::DetectedDep> {
+    if include_dev {
+        deps
+    } else {
+        deps.into_iter().filter(|d| !d.is_dev).collect()
+    }
 }
 
 /// Select dependencies by name from --select flag.

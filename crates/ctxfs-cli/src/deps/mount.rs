@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use ctxfs_ipc::service::CtxfsServiceClient;
 use futures::StreamExt;
 
+/// Max concurrent daemon mount RPCs to avoid overwhelming the daemon.
+const MAX_CONCURRENT_MOUNTS: usize = 16;
+
 /// Result of a single mount operation within a batch.
 #[derive(Debug)]
 pub struct MountResult {
@@ -87,7 +90,7 @@ pub async fn batch_mount(
         .collect();
 
     let daemon_results: Vec<_> = futures::stream::iter(daemon_futs)
-        .buffer_unordered(16)
+        .buffer_unordered(MAX_CONCURRENT_MOUNTS)
         .collect()
         .await;
 
@@ -193,7 +196,6 @@ pub async fn batch_unmount_all(client: &CtxfsServiceClient) -> Vec<UnmountResult
     unmount_targets(client, &targets).await
 }
 
-/// Shared logic: unmount a list of mount point strings.
 async fn unmount_targets(client: &CtxfsServiceClient, targets: &[String]) -> Vec<UnmountResult> {
     let mut results = Vec::with_capacity(targets.len());
 
