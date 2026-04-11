@@ -62,7 +62,15 @@ ctxfs setup check
 
 > **Fallback for "Not configured"**: Tell the user: "ctxfs needs passwordless sudo to run NFS kernel mounts non-interactively. Please run `ctxfs setup install` **from your own terminal** (not through me — the install itself prompts for a sudo password and needs a real TTY). Alternatively, I can print the exact `sudo mount_nfs` command for you to run manually one time. Which do you prefer?" Wait for the answer. Do NOT try to run `ctxfs setup install` or `ctxfs mount` yourself — both will hang.
 
-### Check 0d: Is GITHUB_TOKEN set?
+### Check 0d: Can you actually read files from an NFS mount?
+
+Some sandboxed environments (notably Claude Code on macOS) block access to NFS volumes even when Bash and Read tools work fine on regular files. A mount will succeed, but every `Read`, `Grep`, or `ls` against the mount point returns `EPERM / Operation not permitted`.
+
+The cheapest way to detect this is empirical: after the first mount, immediately attempt to read a known file (like `README.md` at the mount root). If the read fails with `EPERM` despite the mount being live and world-readable (`mount | grep ctxfs` shows the loopback NFS mount), you're sandboxed.
+
+> **Fallback for sandbox NFS block**: Tell the user: "I can mount the source successfully, but this session's sandbox blocks reading NFS volumes. On macOS, you can grant Claude Code 'Full Disk Access' in System Settings → Privacy & Security, which usually fixes this. Alternatively, I'll fall back to training knowledge for this question." Then answer from training knowledge. Note: NFS mounts created during a blocked session may also be un-unmountable from within the session — the user may need to `sudo umount` them from their own terminal.
+
+### Check 0e: Is GITHUB_TOKEN set?
 
 ```bash
 echo "${GITHUB_TOKEN:+set}"
@@ -181,6 +189,10 @@ If you can't do a kernel mount, the right path is to stop and ask the user to he
 **"already mounted"** — The mount point is in use. Either use a different `-p` path, read from the existing mount, or unmount first.
 
 **"mount command exited with status: exit status: 1"** — Usually a sudo failure. See Step 0c.
+
+**`ctxfs setup check` says "Not configured" but sudoers is actually installed** — Known issue: `setup check` can report false negatives. Verify directly: `ls /etc/sudoers.d/ctxfs` (should exist) and `sudo -n mount_nfs` (should return usage without prompting for a password). If both pass, setup is actually configured and you can proceed.
+
+**"Operation not permitted" when reading a mounted file** — Sandbox NFS block. See Step 0d. This is NOT a file-permission issue; the mount is world-readable but the runtime isn't allowed to touch NFS volumes. Fall back to training knowledge.
 
 **"sudo: a password is required"** — Passwordless sudo is not configured. See Step 0c fallback.
 
