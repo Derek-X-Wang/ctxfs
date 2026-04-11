@@ -1,0 +1,23 @@
+{
+  "skill_name": "ctxfs-dev",
+  "evals": [
+    {
+      "id": "new-cli-cmd",
+      "prompt": "I need to add a new CLI subcommand `ctxfs inspect <source>` that fetches the tree manifest for a source from the daemon and pretty-prints it to stdout without mounting anything. List the files I need to modify, in the right order, and briefly explain what goes in each file. I want a concrete step-by-step plan I can follow.",
+      "expected_output": "Agent lists (at minimum): ctxfs-ipc/src/service.rs to add an RPC, ctxfs-daemon/src/daemon.rs to implement it, ctxfs-cli/src/main.rs to add the Commands variant and handler. Explains TDD order (test first) and mentions tests. Bonus: mentions clippy/fmt checks.",
+      "files": []
+    },
+    {
+      "id": "gh-test",
+      "prompt": "I'm writing a new integration test that needs to make a real call to the GitHub API (not a mock). Where should this test file live in the repo, and how should I handle the fact that CI may be rate-limited? I don't want to break the build.",
+      "expected_output": "Agent points to crates/*/tests/*.rs, recommends #[ignore = \"reason\"] or GITHUB_TOKEN gating, and cites the existing rate-limited ignored tests as examples. Mentions the two currently-ignored tests if possible.",
+      "files": []
+    },
+    {
+      "id": "new-provider",
+      "prompt": "I want to add support for a new package registry: RubyGems. Walk me through what I need to create: the new crate structure, what traits to implement, and how to wire it into the daemon. Don't write the implementation yet — I just want the plan.",
+      "expected_output": "Agent describes creating a new crate crates/ctxfs-provider-rubygems/, implementing RegistryResolver from ctxfs-provider-common, using parse_github_url helper, adding to workspace Cargo.toml, and wiring into the daemon's resolver dispatch. Mentions existing providers (npm/pypi/crate) as patterns.",
+      "files": []
+    }
+  ]
+}
