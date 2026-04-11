@@ -1,0 +1,23 @@
+{
+  "skill_name": "ctxfs",
+  "evals": [
+    {
+      "id": "tokio-spawn",
+      "prompt": "I'm trying to understand how tokio's `spawn` function actually creates tasks. I'm using tokio 1.40 in my project. Can you look at the tokio source and explain the key steps from the `tokio::spawn(future)` call to when the task starts running? I want to see the real code, not just a high-level description.",
+      "expected_output": "Agent mounts tokio via ctxfs, greps for the spawn function definition, reads the relevant files, and explains the chain with file references.",
+      "files": []
+    },
+    {
+      "id": "serde-derive",
+      "prompt": "I'm getting this Rust compile error: `error[E0277]: the trait bound 'Foo: serde::Serialize' is not satisfied` even though I have `#[derive(Serialize)]` on Foo. I'm on serde 1.0.219. Can you check the serde source to understand what trait bound is actually being checked and why my derive might not be producing it?",
+      "expected_output": "Agent mounts serde (or serde_derive) via ctxfs, reads the derive macro expansion and the Serialize trait, and explains the bound.",
+      "files": []
+    },
+    {
+      "id": "axios-retry",
+      "prompt": "Does axios have a built-in retry mechanism for failed requests? I'm using axios 1.7.x in a Node project. I need to know if I should add axios-retry or if there's something native I can use. Check the actual source, don't just guess.",
+      "expected_output": "Agent mounts axios via ctxfs, greps for retry/interceptor logic, and reports whether native retry exists with file references.",
+      "files": []
+    }
+  ]
+}
