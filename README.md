@@ -4,15 +4,15 @@ Mount Git repositories as read-only local directories without cloning. Files are
 
 ```sh
 ctxfs daemon start &
-ctxfs mount github:rust-lang/rust@master /mnt/rust
-cat /mnt/rust/README.md     # fetched on demand, cached locally
-grep -r "fn main" /mnt/rust/src/  # works with any Unix tool
-ctxfs unmount /mnt/rust
+ctxfs mount github:rust-lang/rust@master -p ./mnt/rust
+cat ./mnt/rust/README.md     # fetched on demand, cached locally
+grep -r "fn main" ./mnt/rust/src/  # works with any Unix tool
+ctxfs unmount ./mnt/rust
 
 # Mount any npm/PyPI/crate package source — resolves to GitHub automatically
-ctxfs mount npm:lodash@4.17.21 /mnt/lodash
-ctxfs mount pypi:requests@2.31.0 /mnt/requests
-ctxfs mount crate:serde@1.0.0 /mnt/serde
+ctxfs mount npm:lodash@4.17.21 -p ./mnt/lodash
+ctxfs mount pypi:requests@2.31.0 -p ./mnt/requests
+ctxfs mount crate:serde@1.0.0 -p ./mnt/serde
 ```
 
 **No macFUSE. No kernel extensions. No reboots.** Uses a local NFSv3 loopback server that macOS and Linux mount natively.
@@ -30,9 +30,25 @@ cargo build --release
 
 ### Requirements
 
-- **macOS**: No extra dependencies. Uses the built-in `mount_nfs`.
-- **Linux**: `nfs-common` package (`sudo apt install nfs-common` on Debian/Ubuntu).
+- **macOS**: No extra dependencies. Uses the built-in `mount_nfs`. One-time setup needed (see below).
+- **Linux**: `nfs-common` package (`sudo apt install nfs-common` on Debian/Ubuntu). One-time setup needed (see below).
 - **GitHub token** (optional but recommended): Set `GITHUB_TOKEN` for 5000 req/hr instead of 60.
+
+### First-time setup
+
+```sh
+# 1. Configure passwordless sudo for mount/umount (prompts for password once)
+ctxfs setup install
+```
+
+On **macOS**, there's one more step: your terminal app needs **Full Disk Access** to read NFS-mounted files. Without it, mounts succeed but reads fail with "Operation not permitted" — this is macOS treating NFS volumes as network volumes that require explicit permission ([macfuse#690](https://github.com/macfuse/macfuse/issues/690)).
+
+```sh
+# Opens the Full Disk Access settings pane directly
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+```
+
+Add your terminal app (Terminal, iTerm2, cmux, Ghostty, etc.), then **restart the terminal**. This is the same requirement that affects macFUSE, s3fs-fuse, and HuggingFace's [hf-mount](https://github.com/huggingface/hf-mount).
 
 ## Usage
 
@@ -40,19 +56,23 @@ cargo build --release
 # Start the background daemon
 ctxfs daemon start &
 
-# Mount a repo (will prompt for sudo password once for mount_nfs)
-ctxfs mount github:owner/repo@branch /path/to/mountpoint
+# Mount a repo
+ctxfs mount github:owner/repo@branch -p /path/to/mountpoint
 
 # Browse like a local directory
 ls /path/to/mountpoint/
 cat /path/to/mountpoint/README.md
 find /path/to/mountpoint -name "*.rs"
 
+# Mount multiple sources at once (auto-derived mount points)
+ctxfs mount npm:react@19.1.0 crate:serde@1.0.219 -d ./deps
+
 # List active mounts
 ctxfs list
 
 # Unmount
 ctxfs unmount /path/to/mountpoint
+ctxfs unmount --all    # unmount everything
 
 # Stop daemon
 ctxfs daemon stop
@@ -76,7 +96,7 @@ crate:<package>@<version>
 Start the NFS server without the kernel mount — useful for debugging or custom mount options:
 
 ```sh
-ctxfs mount --server-only github:owner/repo@main /mnt/repo
+ctxfs mount --server-only github:owner/repo@main -p /mnt/repo
 # Prints the NFS port; mount manually:
 sudo mount_nfs -o nolocks,vers=3,tcp,port=PORT,mountport=PORT 127.0.0.1:/ /mnt/repo
 ```
