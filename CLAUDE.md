@@ -29,7 +29,7 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 
 ## Architecture
 
-12-crate workspace. Dependency graph:
+15-crate workspace. Dependency graph:
 - ctxfs-core: Digest, SourceSpec, Provider trait, Config, Error
 - ctxfs-manifest: Snapshot, Directory, InodeTable (depends on core)
 - ctxfs-cache: Content-addressable blob cache with LRU (depends on core, manifest)
@@ -41,6 +41,8 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 - ctxfs-provider-crate: crates.io registry resolver (depends on core, provider-common)
 - ctxfs-cache-redis: Optional Redis shared tree cache (depends on cache)
 - ctxfs-nfs: NFSv3 loopback server (depends on core, manifest, cache)
+- ctxfs-vfs: Virtual filesystem abstraction layer (depends on core, manifest, cache)
+- ctxfs-fskit: FSKit backend for macOS 26+ (depends on core, vfs); no sudo, no FDA required
 - ctxfs-daemon: Background service (depends on all above)
 - ctxfs-cli: clap CLI binary (depends on core, ipc, daemon)
 
@@ -54,3 +56,4 @@ TDD workflow: write tests first, then implement. Run `cargo test` after every ch
 - `CTXFS_REDIS_URL`: Optional Redis URL for shared tree caching
 - `CTXFS_LATEST_TTL_SECS`: TTL for @latest resolution cache (default: 3600)
 - `CTXFS_TREE_CACHE_MAX_BYTES`: Max local tree cache size (default: 500MB)
+- `CTXFS_BACKEND`: Force backend selection (`nfs` or `fskit`; default: auto-detect)
