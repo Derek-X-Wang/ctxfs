@@ -386,7 +386,10 @@ impl DaemonServer {
             commit_sha,
             status: MountStatus::Ready,
             mounted_at: chrono::Utc::now().to_rfc3339(),
-            nfs_port: port,
+            nfs_port: Some(port),
+            backend: ctxfs_core::backend::Backend::Nfs,
+            volume_path: None,
+            symlink_paths: vec![],
         };
 
         let handle = MountHandle {

@@ -395,11 +395,13 @@ async fn handle_mount(
             return Ok(());
         }
 
+        let port = info
+            .nfs_port
+            .ok_or_else(|| anyhow::anyhow!("mount did not return an NFS port"))?;
         println!(
-            "NFS server listening on 127.0.0.1:{} — mounting kernel side (may prompt for sudo)",
-            info.nfs_port
+            "NFS server listening on 127.0.0.1:{port} — mounting kernel side (may prompt for sudo)"
         );
-        if let Err(e) = run_mount_nfs(info.nfs_port, &mp_str) {
+        if let Err(e) = run_mount_nfs(port, &mp_str) {
             let _ = client
                 .unmount(tarpc::context::current(), mp_str.clone())
                 .await;
@@ -409,7 +411,7 @@ async fn handle_mount(
         println!("Mounted {} at {}", info.source, info.mount_point);
         println!("  Commit:   {}", info.commit_sha);
         println!("  ID:       {}", info.id);
-        println!("  NFS port: {}", info.nfs_port);
+        println!("  NFS port: {port}");
     } else if let Some(base_dir) = mount_dir {
         // Multi-source mount with slug-derived paths.
         let mounts: HashMap<String, PathBuf> = sources
@@ -437,18 +439,18 @@ fn print_server_only_info(info: &ctxfs_ipc::service::MountInfo) {
     println!("  Source:   {}", info.source);
     println!("  Commit:   {}", info.commit_sha);
     println!("  ID:       {}", info.id);
-    println!("  NFS port: {}", info.nfs_port);
+    println!("  NFS port: {}", info.nfs_port.unwrap_or(0));
     println!();
     println!("To mount manually, run:");
     #[cfg(target_os = "macos")]
     println!(
         "  sudo mount_nfs -o nolocks,vers=3,tcp,port={p},mountport={p},soft \\",
-        p = info.nfs_port
+        p = info.nfs_port.unwrap_or(0)
     );
     #[cfg(target_os = "linux")]
     println!(
         "  sudo mount -t nfs -o nolock,vers=3,tcp,port={p},mountport={p},soft \\",
-        p = info.nfs_port
+        p = info.nfs_port.unwrap_or(0)
     );
     println!("    127.0.0.1:/ {}", info.mount_point);
 }
