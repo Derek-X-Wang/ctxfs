@@ -155,12 +155,30 @@ pub struct NodeAttr {
 }
 ```
 
-### Backend Adapters
+### API Boundary: What Stays in the Adapters
 
-Each backend is a thin translation layer:
+The VFS layer is deliberately protocol-agnostic. Protocol-specific concerns stay in each adapter:
 
-- `ctxfs-nfs`: wraps `VfsState`, implements `nfsserve::NFSFileSystem`, translates `NodeAttr` → `fattr3`
-- `ctxfs-fskit`: wraps `VfsState`, implements `fskit_rs::Filesystem`, translates `NodeAttr` → FSKit attributes
+**NFS adapter (`ctxfs-nfs`) retains:**
+- NFS cookie/cookieverf handling for paginated `readdir` (large directories)
+- NFS3 file handle generation and mapping
+- `fattr3` construction with NFS-specific UID/GID (0/0 for read-only)
+- NFS3 error code translation (`NFS3ERR_ROFS`, `NFS3ERR_NOENT`, etc.)
+
+**FSKit adapter (`ctxfs-fskit`) retains:**
+- `FSItemAttributes` construction with FSKit-specific fields
+- Volume metadata (display name, icon, read-only flags)
+- FSKit-specific offset-based `readdir` pagination
+- EROFS error translation for write operations
+
+**Shared VFS provides:**
+- Complete directory listing (adapters handle pagination/cookies)
+- Inode allocation with stable IDs (both protocols need monotonic IDs, neither needs cross-mount stability)
+- Lazy directory population with `DashMap` concurrency
+- Blob fetching through cache → provider chain
+- `NodeAttr` with protocol-agnostic fields (size, kind, executable)
+
+This split means the "~80% shared" estimate is accurate for read-only semantics. The remaining ~20% is genuinely protocol-specific and belongs in the adapters.
 
 ---
 
@@ -204,6 +222,30 @@ FSKitBridge uses Protobuf over TCP with length-delimited framing:
 
 The `fskit-rs` crate on the Rust side handles serialization/deserialization and maps Protobuf messages to `Filesystem` trait calls.
 
+### Bridge Security
+
+The TCP listener on localhost is authenticated with a **per-mount shared secret**. On mount, the daemon generates a random 256-bit token and passes it to the appex via the FSKit mount options. The appex includes this token in every TCP connection handshake. The daemon rejects connections with invalid or missing tokens. This prevents other local processes from reading mounted source code through the bridge.
+
+### Bridge Lifecycle
+
+**Mount handshake:**
+1. Daemon starts fskit-rs TCP listener on a random loopback port
+2. Daemon generates a per-mount auth token
+3. Daemon signals fskitd to mount the volume, passing `(tcp_port, auth_token)` via FSKit mount options
+4. Appex connects to `127.0.0.1:<tcp_port>`, sends the auth token in the handshake frame
+5. Daemon validates the token, begins serving VFS calls
+
+**Finder eject / external unmount:**
+1. User clicks "Eject" in Finder → FSKit sends unmount to appex
+2. Appex sends a `shutdown` message to daemon over the TCP channel
+3. Daemon receives shutdown → tears down `MountHandle` (stops TCP listener, removes symlink, removes `mounts.json` entry)
+4. Daemon updates its mount table atomically
+
+**Appex crash / daemon restart:**
+- If the appex crashes, fskitd restarts it. The appex reconnects to the daemon's TCP listener (same port, same token).
+- If the daemon restarts, the TCP listener is gone. The appex's reads will fail with connection errors. FSKit surfaces these as I/O errors to userland. The stale volume must be unmounted and re-mounted. Startup cleanup handles dangling symlinks.
+- The appex implements exponential backoff on TCP reconnection (up to 5 retries, then gives up and lets FSKit report errors).
+
 ---
 
 ## Mount Location and Symlinks
@@ -225,17 +267,38 @@ The `/Volumes/ctxfs/` directory is created during `ctxfs setup install` (or `ins
 
 ### Symlink Strategy
 
-When the user specifies `-p` or `-d`, the CLI creates a symlink from the user-specified path to the `/Volumes/ctxfs/` mount:
+When the user specifies `-p` or `-d`, the CLI creates a symlink from the user-specified path to the `/Volumes/ctxfs/` mount. **All `-p` paths are canonicalized to absolute paths** before creating the symlink and storing in `MountHandle`, so symlinks work correctly regardless of the caller's working directory.
 
 ```sh
 ctxfs mount npm:react@19.1.0 -p ./deps/react
-# Creates: ./deps/react → /Volumes/ctxfs/react-19.1.0
+# Canonicalizes ./deps/react → /Users/derek/project/deps/react
+# Creates: /Users/derek/project/deps/react → /Volumes/ctxfs/react-19.1.0
 # Prints:  Mounted at /Volumes/ctxfs/react-19.1.0 (linked from ./deps/react)
 ```
 
 When no `-p` or `-d` is specified, no symlink is created — the user uses the `/Volumes/ctxfs/` path directly.
 
 NFS mounts do not use symlinks — they mount directly at the `-p` path (unchanged behavior).
+
+### Shared Volumes Across Projects
+
+FSKit volumes live at a global path (`/Volumes/ctxfs/<slug>`), so they are inherently shared. If two projects mount the same source (e.g., `npm:react@19.1.0`), the daemon **reuses the existing volume** and creates an additional symlink:
+
+```sh
+# Project A
+cd ~/project-a && ctxfs mount npm:react@19.1.0 -p ./deps/react
+# Creates: /Volumes/ctxfs/react-19.1.0 (new volume)
+# Creates: ~/project-a/deps/react → /Volumes/ctxfs/react-19.1.0
+
+# Project B
+cd ~/project-b && ctxfs mount npm:react@19.1.0 -p ./deps/react
+# Reuses: /Volumes/ctxfs/react-19.1.0 (already mounted, same source+version)
+# Creates: ~/project-b/deps/react → /Volumes/ctxfs/react-19.1.0
+```
+
+The daemon tracks **multiple symlinks per volume** in `MountHandle.symlink_paths: Vec<PathBuf>`. Unmounting via a symlink path removes only that symlink. The volume itself is only torn down when the last symlink is removed or the user unmounts via the `/Volumes/ctxfs/` path directly (or `--all`).
+
+This is a UX improvement over NFS, where each project needed its own mount even for the same source.
 
 ### Symlink Lifecycle
 
@@ -245,13 +308,17 @@ The daemon tracks symlink paths in `MountHandle`:
 pub struct MountHandle {
     pub info: MountInfo,
     pub backend: Backend,
-    pub symlink_path: Option<PathBuf>,
+    pub symlink_paths: Vec<PathBuf>,   // multiple projects can share one volume
     pub nfs_handle: Option<NfsServerHandle>,
     pub fskit_handle: Option<FsKitHandle>,
 }
 ```
 
-**Unmount (any path)**: The daemon resolves the target whether the user passes the symlink path, the `/Volumes/` path, or uses `--all`. Both the FSKit volume and the symlink are cleaned up.
+**Unmount by symlink path**: Removes the symlink. If other symlinks still reference the volume, the volume stays alive. If it was the last reference, the volume is torn down.
+
+**Unmount by `/Volumes/ctxfs/` path or `--all`**: Tears down the volume and removes all associated symlinks.
+
+**Symlink safety on unmount**: Before removing a symlink, the daemon verifies it still points into `/Volumes/ctxfs/`. If the user has repointed or replaced it, the daemon leaves it alone and logs a warning.
 
 **Crash recovery**: Mount state (including symlink paths) is persisted to `~/.ctxfs/mounts.json`. On daemon startup, stale symlinks pointing to non-existent `/Volumes/ctxfs/*` paths are removed.
 
@@ -304,7 +371,7 @@ default_backend = "fskit"
 
 ### Coexistence
 
-Both backends can run simultaneously. Switching the default only affects new mounts. Existing mounts stay on their original backend. The same source cannot be mounted twice — the daemon rejects duplicates regardless of backend.
+Both backends can run simultaneously. Switching the default only affects new mounts. Existing mounts stay on their original backend. The same source mounted via FSKit can be shared across projects (multiple symlinks to one volume). The same source cannot be mounted via both backends simultaneously — the daemon rejects this to avoid confusion.
 
 ### `--server-only` with FSKit
 
@@ -360,28 +427,40 @@ async fn do_mount(&self, source: &str, mount_point: &str, backend: Backend) -> R
 
 ### Mount State Persistence
 
-For crash recovery, the daemon persists active mount metadata to `~/.ctxfs/mounts.json`:
+For crash recovery, the daemon persists active mount metadata to `~/.ctxfs/mounts.json`. Writes use **atomic temp-file + rename** to prevent corruption from mid-write crashes, and an **advisory file lock** (`flock`) serializes concurrent mount/unmount operations.
 
 ```json
 [
   {
     "source": "npm:react@19.1.0",
     "volume_path": "/Volumes/ctxfs/react-19.1.0",
-    "symlink_path": "/Users/derek/project/deps/react",
-    "backend": "fskit"
+    "symlink_paths": [
+      "/Users/derek/project-a/deps/react",
+      "/Users/derek/project-b/deps/react"
+    ],
+    "backend": "fskit",
+    "tcp_port": 54321,
+    "auth_token": "hex..."
   }
 ]
 ```
 
-Written on mount, entry removed on unmount. On daemon startup, used for cleanup only — mounts are not restored, but dangling symlinks and stale volume directories are removed.
+Written on every mount/unmount via: write to `mounts.json.tmp` → `fsync` → `rename` to `mounts.json`. On daemon startup, used for cleanup only — mounts are not restored, but dangling symlinks and stale volume directories are removed.
+
+The file also stores enough metadata (port, token) to detect and reconcile FSKit volumes that may still exist in the kernel after a daemon crash — if a `/Volumes/ctxfs/*` directory exists but isn't tracked by the daemon, startup cleanup attempts to unmount it.
 
 ### Startup Cleanup
 
 ```rust
 fn cleanup_stale_fskit_state(&self) {
-    // 1. Read ~/.ctxfs/mounts.json (if it exists)
-    // 2. For each entry: if volume_path no longer exists, remove symlink_path if dangling
-    // 3. Clear mounts.json (daemon is starting fresh)
+    // 1. Read ~/.ctxfs/mounts.json (if it exists, may be absent or empty)
+    // 2. Scan /Volumes/ctxfs/ for existing mount directories
+    // 3. For each mounts.json entry:
+    //    a. If volume_path no longer exists, remove dangling symlinks
+    //    b. If volume_path exists but daemon didn't create it, attempt unmount
+    // 4. For each /Volumes/ctxfs/* not in mounts.json:
+    //    Attempt unmount (orphaned volume from a crashed daemon)
+    // 5. Clear mounts.json (daemon is starting fresh)
 }
 ```
 
@@ -453,9 +532,10 @@ The signed `CtxfsFS.app` ships alongside the `ctxfs` binary:
 - **GitHub Releases**: release archive contains both `ctxfs` binary and `CtxfsFS.app`
 - **Homebrew**: formula installs CLI, cask installs the `.app` bundle
 - `ctxfs setup install-fskit` looks for `CtxfsFS.app` at:
-  1. Next to the `ctxfs` binary (release archive)
+  1. Already installed at `~/Applications/CtxfsFS.app` or `/Applications/CtxfsFS.app`
   2. `CTXFS_FSKIT_APP_PATH` env var
-  3. Already installed at `~/Applications/CtxfsFS.app`
+  3. Next to the `ctxfs` binary (release archive layout)
+- If FSKit is auto-detected but the appex is missing or not enabled, the CLI prints an actionable message: `"FSKit is supported on this macOS but CtxfsFS.app is not installed. Run 'ctxfs setup install-fskit' or install via Homebrew: 'brew install --cask ctxfs'. Falling back to NFS."`
 
 ---
 
@@ -487,7 +567,48 @@ crate:serde@1.0.219             ./deps/serde         nfs      ready
 
 ---
 
-## Finder Polish
+## Implementation Phases
+
+The work is split into three phases to de-risk the FSKit dependency before investing in UX polish.
+
+### Phase 0: Proof of Concept (do first, before any Rust code)
+
+**Goal**: Prove that fskit-rs + FSKitBridge can mount a non-local volume on macOS 26 and serve reads.
+
+1. Clone FSKitBridge, build and sign the appex with developer account
+2. Write a minimal Rust binary implementing `fskit_rs::Filesystem` with hardcoded files
+3. Mount it, `ls` and `cat` files from Finder and terminal
+4. Measure read latency (single file, `grep` across 100 files)
+
+**Gate**: If this doesn't work, or latency is unacceptable (>10x NFS), revisit the bridge strategy (direct FFI) or defer FSKit until the ecosystem matures. Do not proceed to Phase 1.
+
+### Phase 1: Core Backend
+
+Ship the FSKit backend with minimal CLI surface:
+
+- `ctxfs-vfs` extraction from `ctxfs-nfs`
+- `ctxfs-fskit` crate implementing `fskit_rs::Filesystem`
+- Vendored + customized FSKitBridge appex in `swift/CtxfsFS/`
+- Daemon backend dispatch (`do_mount` with `Backend::FsKit` path)
+- Bridge security (per-mount auth token)
+- `--backend nfs|fskit` flag, `CTXFS_BACKEND` env, auto-detection
+- Symlink management (creation, absolute paths, shared volumes, safe removal)
+- Mount state persistence (`mounts.json` with atomic writes)
+- `ctxfs setup install-fskit` and `setup check` FSKit status
+- `ctxfs setup install` FSKit prompt on macOS 26+
+
+### Phase 2: Polish (after Phase 1 is proven reliable)
+
+- Finder integration: volume display name, custom icon, read-only badge
+- Finder eject → daemon unmount notification path
+- `ctxfs setup default-backend` persistent preference
+- `ctxfs setup uninstall-fskit`
+- Swift unit tests for the appex
+- Performance benchmarking and optimization
+
+---
+
+## Finder Polish (Phase 2)
 
 ### Volume Display Name
 
@@ -509,7 +630,7 @@ Volume reports `FSVolumeFlags.readOnly`. Finder shows a lock badge and prevents 
 
 ### Finder Eject
 
-Clicking "Eject" in Finder triggers an FSKit unmount. The appex forwards this to the daemon via TCP, which performs full cleanup: stop TCP listener, remove symlink, drop mount handle.
+Clicking "Eject" in Finder triggers an FSKit unmount. The appex sends a `shutdown` message to the daemon over TCP (see Bridge Lifecycle). The daemon performs full cleanup: stop TCP listener, remove all associated symlinks, drop mount handle, update `mounts.json`.
 
 ### Not in Scope
 
@@ -526,8 +647,8 @@ Clicking "Eject" in Finder triggers an FSKit unmount. The appex forwards this to
 | Crate | Tests |
 |---|---|
 | `ctxfs-vfs` | Inode allocation, lazy population, blob fetch, readdir ordering, symlink resolution, subpath re-rooting (migrated from `ctxfs-nfs`) |
-| `ctxfs-fskit` | Attribute translation (NodeAttr → FSKit attrs), volume naming/slug, read-only enforcement |
-| `ctxfs-cli` | Backend detection (mock OS version + extension state), symlink creation/removal, unmount path resolution |
+| `ctxfs-fskit` | Attribute translation (NodeAttr → FSKit attrs), volume naming/slug, read-only enforcement, auth token validation |
+| `ctxfs-cli` | Backend detection (mock OS version + extension state), symlink creation/removal (absolute path enforcement), unmount path resolution, shared volume symlink lifecycle |
 | `ctxfs-core` | `Backend` enum serialization, config file parsing with `default_backend` |
 
 ### Integration Tests
@@ -536,7 +657,8 @@ Clicking "Eject" in Finder triggers an FSKit unmount. The appex forwards this to
 |---|---|---|
 | `ctxfs-vfs/tests/` | VfsState with mock Provider — full read flow | None |
 | `ctxfs-nfs/tests/` | NFS-specific translation, existing tests (refactored) | None |
-| `ctxfs-fskit/tests/tcp_roundtrip.rs` | fskit-rs TCP listener + mock client, exercise lookup/read/readdir | None |
+| `ctxfs-fskit/tests/tcp_roundtrip.rs` | fskit-rs TCP listener + mock client, auth token handshake, exercise lookup/read/readdir | None |
+| `ctxfs-daemon/tests/mounts_json.rs` | Atomic write + recovery: truncated file, concurrent writes, startup cleanup | None |
 
 ### E2E Tests
 
@@ -551,6 +673,12 @@ fn backend_flag_selects_fskit() { /* --server-only --backend fskit → TCP port 
 fn symlink_created_and_cleaned_on_unmount() { /* mock volume path */ }
 
 #[test]
+fn shared_volume_multiple_symlinks() { /* same source, two -p paths, unmount one */ }
+
+#[test]
+fn symlink_repointed_by_user_not_deleted() { /* safety check */ }
+
+#[test]
 fn setup_check_reports_fskit_status() { /* macOS 26+ section in output */ }
 ```
 
@@ -562,16 +690,24 @@ fn setup_check_reports_fskit_status() { /* macOS 26+ section in output */ }
 fn fskit_full_mount_and_read() {
     // Real FSKit mount → read file → unmount → verify symlink cleanup
 }
+
+#[test]
+#[ignore = "requires signed CtxfsFS.appex installed and enabled"]
+fn fskit_shared_volume_two_projects() {
+    // Mount same source with two different -p paths → one volume, two symlinks
+}
 ```
 
 ### TDD Order
 
-1. `ctxfs-vfs` extraction + migrated tests
-2. `ctxfs-fskit` unit tests (Filesystem trait)
-3. CLI backend detection tests
-4. Integration tests (TCP roundtrip)
-5. E2E tests (server-only paths)
-6. Manual FSKit smoke test
+1. **Phase 0**: Proof of concept (manual, no TDD — just get a mount working)
+2. `ctxfs-vfs` extraction + migrated tests
+3. `ctxfs-fskit` unit tests (Filesystem trait, auth token)
+4. CLI backend detection + symlink management tests
+5. Integration tests (TCP roundtrip with auth, mounts.json atomicity)
+6. E2E tests (server-only paths, shared volumes)
+7. Manual FSKit smoke test
+8. **Phase 2**: Finder polish tests (Swift unit tests for appex)
 
 ---
 
@@ -632,10 +768,18 @@ xcodebuild -scheme CtxfsFS -configuration Release \
 
 ## Open Questions
 
-1. **fskit-rs maturity**: The `fskit-rs` crate exists on crates.io but is relatively new. Need to evaluate: does it support non-local volumes on macOS 26? Does it handle the full VFS surface we need? Fallback: vendor and extend.
+### Must resolve before implementation (Phase 0 gates these)
 
-2. **FSKitBridge customization depth**: How much do we need to customize the Swift appex beyond branding? Volume naming, icon, and read-only flags likely require changes to the FSKit bridge protocol or the appex itself.
+1. **fskit-rs maturity**: The `fskit-rs` crate exists on crates.io but is relatively new. Phase 0 proof-of-concept must verify: does it support non-local volumes on macOS 26? Does it handle the full VFS surface we need (lookup, read, readdir, readlink, statfs)? If not, vendor and extend — or fork if the project is unmaintained.
 
-3. **Notarization**: For distribution outside the App Store, the `.app` bundle needs notarization via `notarytool`. This is a one-time CI setup, not a design question, but it's a prerequisite for shipping.
+2. **FSKitBridge customization depth**: How much do we need to modify the Swift appex beyond branding? The auth token handshake, volume naming, mount options passthrough, and shutdown notification all require changes to the bridge protocol. Phase 0 will reveal how much of FSKitBridge is reusable vs. needs rewriting. Budget for forking rather than light patching.
 
-4. **Performance**: The extra XPC → TCP hop adds latency compared to NFS direct loopback. Need to benchmark on real workloads (large `grep` across a mounted repo). If latency is problematic, consider the direct C FFI approach (Option 2) as a future optimization.
+3. **Performance**: Phase 0 must benchmark the XPC → TCP hop vs. NFS direct loopback. Measure: single file read latency, `grep` across 100+ files, `find` on a 10k-file repo. If latency is >10x NFS, the direct C FFI approach becomes necessary and the architecture changes significantly.
+
+### Resolve during implementation
+
+4. **Notarization**: For distribution outside the App Store, the `.app` bundle needs notarization via `notarytool`. One-time CI setup, not a design blocker, but must be done before the first public release with FSKit.
+
+5. **Reproducible builds and cert rotation**: The Swift appex build must be reproducible in CI. Pin the FSKitBridge commit in-tree (vendored, not a git submodule). Document how entitlements are provisioned, how Developer ID certs rotate, and how a second maintainer would be onboarded to sign releases. Avoid single-developer signing key as a bus factor.
+
+6. **`cargo install` UX**: Users who install via `cargo install ctxfs` will get NFS-only. The CLI should detect macOS 26+ and print a one-time hint: `"Tip: FSKit backend is available for macOS 26+. Install CtxfsFS.app for a better experience (no sudo/FDA). See: ctxfs setup install-fskit"`. This avoids silent fallback confusion.
