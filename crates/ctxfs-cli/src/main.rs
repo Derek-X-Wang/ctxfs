@@ -95,6 +95,8 @@ enum SetupAction {
     Uninstall,
     /// Check if sudoers is already configured
     Check,
+    /// Install FSKit extension for macOS 26+ (no sudo, no FDA).
+    InstallFskit,
 }
 
 #[derive(Subcommand)]
@@ -321,6 +323,29 @@ async fn main() -> Result<()> {
         Commands::Setup { action } => match action {
             SetupAction::Install => {
                 setup::install_sudoers()?;
+
+                // On macOS 26+, prompt to also set up the FSKit extension.
+                #[cfg(target_os = "macos")]
+                if setup::is_macos_26_or_later() {
+                    println!();
+                    println!("FSKit backend available (macOS 26+):");
+                    println!("  - No sudo required for mounts");
+                    println!("  - No Full Disk Access required");
+                    println!("  - Faster, more reliable than NFS");
+                    println!();
+                    let install_fskit = dialoguer::Confirm::new()
+                        .with_prompt("Also install the FSKit extension now?")
+                        .default(true)
+                        .interact()
+                        .unwrap_or(false);
+                    if install_fskit {
+                        if let Err(e) = setup::install_fskit() {
+                            eprintln!("FSKit install failed: {e}");
+                        }
+                    } else {
+                        println!("Skipped. You can run `ctxfs setup install-fskit` later.");
+                    }
+                }
             }
             SetupAction::Uninstall => {
                 setup::uninstall_sudoers()?;
@@ -346,6 +371,10 @@ async fn main() -> Result<()> {
                     println!("To open this pane now, run:");
                     println!("  open \"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles\"");
                 }
+                setup::check_fskit_status();
+            }
+            SetupAction::InstallFskit => {
+                setup::install_fskit().map_err(|e| anyhow::anyhow!(e))?;
             }
         },
 
