@@ -64,11 +64,26 @@ ctxfs setup check
 
 ### Check 0d: Can you actually read files from an NFS mount?
 
-Some sandboxed environments (notably Claude Code on macOS) block access to NFS volumes even when Bash and Read tools work fine on regular files. A mount will succeed, but every `Read`, `Grep`, or `ls` against the mount point returns `EPERM / Operation not permitted`.
+On macOS, the process running your session needs **Full Disk Access** to read files from NFS mounts. Without it, the mount succeeds but every `Read`, `Grep`, or `ls` against the mount point returns `EPERM / Operation not permitted` — the kernel blocks the syscall at the client side before it ever reaches ctxfs's NFS server.
 
-The cheapest way to detect this is empirical: after the first mount, immediately attempt to read a known file (like `README.md` at the mount root). If the read fails with `EPERM` despite the mount being live and world-readable (`mount | grep ctxfs` shows the loopback NFS mount), you're sandboxed.
+This is macOS TCC enforcement treating NFS mounts (including loopback ones) as "network volumes". It affects ctxfs the same way it affects macFUSE, s3fs-fuse, and other user-space filesystem tools — see [macfuse#690](https://github.com/macfuse/macfuse/issues/690) for the canonical discussion. HuggingFace's `hf-mount` uses the same NFS-loopback approach as ctxfs and hits the same issue.
 
-> **Fallback for sandbox NFS block**: Tell the user: "I can mount the source successfully, but this session's sandbox blocks reading NFS volumes. On macOS, you can grant Claude Code 'Full Disk Access' in System Settings → Privacy & Security, which usually fixes this. Alternatively, I'll fall back to training knowledge for this question." Then answer from training knowledge. Note: NFS mounts created during a blocked session may also be un-unmountable from within the session — the user may need to `sudo umount` them from their own terminal.
+The cheapest way to detect it is empirical: after the first mount, attempt to read a known file. If the read fails with `EPERM` despite `mount | grep ctxfs` showing the filesystem is live, the runtime is missing Full Disk Access.
+
+> **Fallback when Full Disk Access is missing**: Tell the user:
+>
+> "I can mount sources successfully, but my session can't read NFS volumes because macOS's TCC is blocking the access. To fix this permanently:
+>
+> 1. Identify the process running this session — usually your terminal app (Terminal.app, iTerm2, Ghostty), Claude Code itself, or a containerized tool like cmux.
+> 2. Open **System Settings → Privacy & Security → Full Disk Access**.
+> 3. Toggle that app ON (click `+` to add it if it's not listed).
+> 4. **Restart the session** — TCC grants only apply to new processes.
+>
+> Until then I'll fall back to training knowledge for this question."
+>
+> Then answer from training knowledge.
+>
+> **Note on stuck mounts**: If you created an NFS mount and now the access is blocked, the mount can only be cleaned up from a terminal that DOES have Full Disk Access (e.g., your own terminal app running `sudo umount /path/to/mount`). The ctxfs daemon itself can't force-unmount a sandboxed mount.
 
 ### Check 0e: Is GITHUB_TOKEN set?
 
@@ -192,7 +207,7 @@ If you can't do a kernel mount, the right path is to stop and ask the user to he
 
 **`ctxfs setup check` says "Not configured" but sudoers is actually installed** — Known issue: `setup check` can report false negatives. Verify directly: `ls /etc/sudoers.d/ctxfs` (should exist) and `sudo -n mount_nfs` (should return usage without prompting for a password). If both pass, setup is actually configured and you can proceed.
 
-**"Operation not permitted" when reading a mounted file** — Sandbox NFS block. See Step 0d. This is NOT a file-permission issue; the mount is world-readable but the runtime isn't allowed to touch NFS volumes. Fall back to training knowledge.
+**"Operation not permitted" when reading a mounted file** — macOS TCC is blocking NFS access. See Step 0d. This is NOT a file-permission issue; the mount is world-readable but the runtime process lacks Full Disk Access. The fix is confirmed working on macOS Tahoe 26 with cmux: grant Full Disk Access to the session's host app in System Settings → Privacy & Security → Full Disk Access, then restart the session. Do NOT spin on this — fall back to training knowledge and ask the user to apply the grant.
 
 **"sudo: a password is required"** — Passwordless sudo is not configured. See Step 0c fallback.
 
