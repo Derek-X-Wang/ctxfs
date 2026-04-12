@@ -1,5 +1,7 @@
+mod backend;
 mod deps;
 mod setup;
+mod symlink;
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -8,6 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ctxfs_core::config::Config;
+use ctxfs_core::Backend;
 use ctxfs_ipc::service::CtxfsServiceClient;
 use ctxfs_ipc::transport;
 
@@ -39,6 +42,9 @@ enum Commands {
         /// `mount_nfs` yourself with custom flags.
         #[arg(long)]
         server_only: bool,
+        /// Backend to use for mounting (nfs or fskit); overrides env and config
+        #[arg(long, value_parser = clap::value_parser!(Backend))]
+        backend: Option<Backend>,
     },
     /// Unmount a mounted filesystem
     Unmount {
@@ -181,8 +187,9 @@ async fn main() -> Result<()> {
             mount_point,
             mount_dir,
             server_only,
+            backend: backend_flag,
         } => {
-            handle_mount(&config, sources, mount_point, mount_dir, server_only).await?;
+            handle_mount(&config, sources, mount_point, mount_dir, server_only, backend_flag).await?;
         }
 
         Commands::Unmount { target, all } => {
@@ -360,7 +367,15 @@ async fn handle_mount(
     mount_point: Option<PathBuf>,
     mount_dir: Option<PathBuf>,
     server_only: bool,
+    backend_flag: Option<Backend>,
 ) -> Result<()> {
+    let selected_backend = backend::detect_backend(backend_flag, None);
+    if selected_backend == Backend::FsKit {
+        eprintln!(
+            "note: FSKit backend is not yet wired up — falling back to NFS"
+        );
+    }
+
     // Validation: mount_point and mount_dir are mutually exclusive.
     if mount_point.is_some() && mount_dir.is_some() {
         anyhow::bail!("--mount-point and --mount-dir are mutually exclusive");
