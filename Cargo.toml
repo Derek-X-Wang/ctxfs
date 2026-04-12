@@ -14,6 +14,7 @@ members = [
     "crates/ctxfs-provider-crate",
     "crates/ctxfs-cache-redis",
     "crates/ctxfs-vfs",
+    "crates/ctxfs-fskit",
 ]
 resolver = "2"
 
@@ -51,6 +52,7 @@ ctxfs-provider-crate = { path = "crates/ctxfs-provider-crate", version = "0.0.0"
 ctxfs-daemon = { path = "crates/ctxfs-daemon", version = "0.0.0" }
 ctxfs-cache-redis = { path = "crates/ctxfs-cache-redis", version = "0.0.0" }
 ctxfs-vfs = { path = "crates/ctxfs-vfs", version = "0.0.0" }
+ctxfs-fskit = { path = "crates/ctxfs-fskit", version = "0.0.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -90,6 +92,9 @@ anyhow = "1"
 
 # Async trait
 async-trait = "0.1"
+
+# Crypto / random
+rand = "0.8"
 
 # Utilities
 linked-hash-map = "0.5"
