@@ -20,6 +20,7 @@ ctxfs-provider-npm = { workspace = true }
 ctxfs-provider-pypi = { workspace = true }
 ctxfs-provider-crate = { workspace = true }
 ctxfs-nfs = { workspace = true }
+ctxfs-vfs = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

@@ -6,17 +6,18 @@ publish = false
 
 [dependencies]
 ctxfs-core = { workspace = true }
-ctxfs-manifest = { workspace = true }
-ctxfs-cache = { workspace = true }
+ctxfs-vfs = { workspace = true }
 async-trait = { workspace = true }
-dashmap = { workspace = true }
 nfsserve = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+ctxfs-cache = { workspace = true }
+ctxfs-manifest = { workspace = true }
 ctxfs-provider-git = { workspace = true }
+ctxfs-vfs = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
