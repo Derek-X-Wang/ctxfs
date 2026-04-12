@@ -65,7 +65,7 @@ ctxfs daemon status
 - "Daemon is not running" → start it: `nohup ctxfs daemon start > /tmp/ctxfs-daemon.log 2>&1 &` then wait ~500ms and re-check status
 - "Daemon unreachable" / other errors → surface the error to the user, ask how to proceed
 
-If the ctxfs binary isn't on `PATH`, substitute the build path (e.g., `./target/release/ctxfs`). If the binary doesn't exist at all, ask the user to build or install it first.
+If `ctxfs` isn't on `PATH`, try `ctxfs-dev` (a symlink to the local dev build). If neither exists, substitute the build path (e.g., `./target/release/ctxfs`). If the binary doesn't exist at all, ask the user to build or install it first.
 
 ### Check 0c: Is passwordless sudo configured for mounts?
 

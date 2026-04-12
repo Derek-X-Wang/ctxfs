@@ -56,6 +56,25 @@ Read the CLAUDE.md at the repo root for the canonical dependency graph. Summary 
 
 **Golden rule**: follow existing crate boundaries. Don't cross-import between unrelated crates. If something would require it, look for the right shared abstraction or add one in `ctxfs-core`.
 
+## Dev Setup
+
+After building, create a global symlink so you can use `ctxfs-dev` from anywhere:
+
+```bash
+cargo build --release
+ln -sf "$(pwd)/target/release/ctxfs" ~/.local/bin/ctxfs-dev
+```
+
+This gives you `ctxfs-dev` on PATH, pointing at your local release build. After every `cargo build --release`, the symlink picks up the new binary automatically. Use `ctxfs-dev` (not `ctxfs`) during development to distinguish from any installed release version.
+
+**macOS first-time setup** (also needed for dev testing mounts):
+```bash
+ctxfs-dev setup install                   # passwordless sudo for NFS mounts
+# Then grant Full Disk Access to your terminal app:
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+# Restart your terminal after granting.
+```
+
 ## Build, Test, Lint
 
 ```bash
@@ -129,26 +148,28 @@ Read in `ctxfs-core::config::Config::from_env`:
 
 ## Running the Daemon Locally
 
-For dev testing of mount flows:
+For dev testing of mount flows (assumes `ctxfs-dev` symlink from Dev Setup):
 
 ```bash
 # Foreground (for logs)
-cargo run --release -p ctxfs -- daemon start
+ctxfs-dev daemon start
 
 # Background (detach)
-nohup ./target/release/ctxfs daemon start > /tmp/ctxfs-daemon.log 2>&1 &
+nohup ctxfs-dev daemon start > /tmp/ctxfs-daemon.log 2>&1 &
 
 # Stop
-./target/release/ctxfs daemon stop
+ctxfs-dev daemon stop
 ```
 
 For testing a mount without needing sudo (NFS kernel mount), use `--server-only`:
 
 ```bash
-./target/release/ctxfs mount github:octocat/Hello-World@master /tmp/mnt --server-only
+ctxfs-dev mount github:octocat/Hello-World@master -p ./test-mnt --server-only
 ```
 
 This exercises the daemon → provider → cache → NFS-server path without requiring a kernel mount. Useful for iterating on provider/cache/daemon code.
+
+Mount test output under the project directory (e.g., `./test-mnt/`) rather than in your home folder — keeps things tidy.
 
 ## Key Architectural Constraints
 
