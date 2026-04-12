@@ -110,7 +110,20 @@ pub async fn batch_mount(
                     continue;
                 }
 
-                if let Err(e) = crate::run_mount_nfs(info.nfs_port, &mp_str) {
+                let port = match info.nfs_port {
+                    Some(p) => p,
+                    None => {
+                        results.push(MountResult {
+                            source,
+                            mount_point: PathBuf::from(&mp_str),
+                            success: false,
+                            error: Some("mount did not return an NFS port".into()),
+                            note: None,
+                        });
+                        continue;
+                    }
+                };
+                if let Err(e) = crate::run_mount_nfs(port, &mp_str) {
                     // Clean up daemon-side mount.
                     let _ = client
                         .unmount(tarpc::context::current(), mp_str.clone())

@@ -361,14 +361,17 @@ impl DaemonServer {
         let port = pick_free_port()?;
         let addr = format!("127.0.0.1:{port}");
 
-        // Use new_with_subpath to support monorepo mounts.
-        let fs = CtxfsNfs::new_with_subpath(
-            provider,
-            github_source,
-            self.cache.clone(),
-            snapshot,
-            subpath,
-        );
+        // Build the protocol-agnostic VFS, then wrap it in the NFS adapter.
+        let vfs = self
+            .rt_handle
+            .block_on(ctxfs_vfs::VfsState::new(
+                provider,
+                self.cache.clone(),
+                snapshot,
+                subpath,
+            ))
+            .map_err(|e| format!("failed to build VFS: {e}"))?;
+        let fs = CtxfsNfs::new(Arc::new(vfs), github_source);
         let nfs_handle = self
             .rt_handle
             .block_on(fs.spawn(&addr))
@@ -386,7 +389,10 @@ impl DaemonServer {
             commit_sha,
             status: MountStatus::Ready,
             mounted_at: chrono::Utc::now().to_rfc3339(),
-            nfs_port: port,
+            nfs_port: Some(port),
+            backend: ctxfs_core::backend::Backend::Nfs,
+            volume_path: None,
+            symlink_paths: vec![],
         };
 
         let handle = MountHandle {

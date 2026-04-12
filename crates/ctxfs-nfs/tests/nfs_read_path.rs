@@ -19,6 +19,7 @@ use ctxfs_core::source::SourceSpec;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::CtxfsNfs;
 use ctxfs_provider_git::GitHubProvider;
+use ctxfs_vfs::VfsState;
 use nfsserve::nfs::filename3;
 use nfsserve::vfs::NFSFileSystem;
 use std::sync::Arc;
@@ -43,7 +44,8 @@ async fn build_fs_for(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, temp
     let snapshot_bytes = provider.fetch_snapshot(&source).await.unwrap();
     let snapshot: Snapshot = serde_json::from_slice(&snapshot_bytes).unwrap();
 
-    let fs = CtxfsNfs::new(provider, source, cache, snapshot);
+    let vfs = VfsState::new(provider, cache, snapshot, None).await.unwrap();
+    let fs = CtxfsNfs::new(Arc::new(vfs), source);
     (fs, tempdir)
 }
 

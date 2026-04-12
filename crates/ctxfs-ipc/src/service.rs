@@ -1,3 +1,4 @@
+use ctxfs_core::backend::Backend;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +20,10 @@ impl std::fmt::Display for MountStatus {
     }
 }
 
+fn default_backend() -> Backend {
+    Backend::Nfs
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountInfo {
     pub id: String,
@@ -29,7 +34,18 @@ pub struct MountInfo {
     pub mounted_at: String,
     /// Loopback port where the daemon's NFS server for this mount is listening.
     /// The CLI uses this to invoke `mount_nfs` on the user's behalf.
-    pub nfs_port: u16,
+    /// `None` for FSKit mounts which do not use NFS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nfs_port: Option<u16>,
+    /// Which backend is serving this mount.
+    #[serde(default = "default_backend")]
+    pub backend: Backend,
+    /// Filesystem path to the volume (FSKit mounts only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_path: Option<String>,
+    /// Symlink paths tracked for this mount (e.g. project-level convenience links).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symlink_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +94,10 @@ mod tests {
             commit_sha: "abc123def456".into(),
             status: MountStatus::Ready,
             mounted_at: "2025-01-01T00:00:00Z".into(),
-            nfs_port: 11111,
+            nfs_port: Some(11111),
+            backend: Backend::Nfs,
+            volume_path: None,
+            symlink_paths: vec![],
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -100,7 +119,10 @@ mod tests {
             commit_sha: "000000".into(),
             status: MountStatus::Error("FUSE unavailable".into()),
             mounted_at: "2025-01-01T00:00:00Z".into(),
-            nfs_port: 0,
+            nfs_port: None,
+            backend: Backend::Nfs,
+            volume_path: None,
+            symlink_paths: vec![],
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -152,10 +174,83 @@ mod tests {
             commit_sha: "sha".into(),
             status: MountStatus::Ready,
             mounted_at: "now".into(),
-            nfs_port: 12345,
+            nfs_port: Some(12345),
+            backend: Backend::Nfs,
+            volume_path: None,
+            symlink_paths: vec![],
         };
         let debug = format!("{info:?}");
         assert!(debug.contains("MountInfo"));
         assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn mount_info_with_backend_and_volume_path() {
+        let info = MountInfo {
+            id: "fskit_mount".into(),
+            source: "github:owner/repo@main".into(),
+            mount_point: "/tmp/fskit_mnt".into(),
+            commit_sha: "def456abc789".into(),
+            status: MountStatus::Ready,
+            mounted_at: "2025-01-01T00:00:00Z".into(),
+            nfs_port: None,
+            backend: Backend::FsKit,
+            volume_path: Some("/Volumes/ctxfs-owner-repo-main".into()),
+            symlink_paths: vec!["/tmp/links/repo".into(), "/tmp/links/repo-alias".into()],
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        let info2: MountInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(info2.backend, Backend::FsKit);
+        assert_eq!(info2.nfs_port, None);
+        assert_eq!(
+            info2.volume_path.as_deref(),
+            Some("/Volumes/ctxfs-owner-repo-main")
+        );
+        assert_eq!(info2.symlink_paths.len(), 2);
+        assert_eq!(info2.symlink_paths[0], "/tmp/links/repo");
+
+        // FSKit fields should appear in JSON
+        assert!(json.contains("fskit"));
+        assert!(json.contains("volume_path"));
+        assert!(json.contains("symlink_paths"));
+        // nfs_port should be absent (skip_serializing_if)
+        assert!(!json.contains("nfs_port"));
+    }
+
+    #[test]
+    fn mount_info_nfs_backward_compat() {
+        let info = MountInfo {
+            id: "nfs_mount".into(),
+            source: "github:owner/repo@main".into(),
+            mount_point: "/tmp/nfs_mnt".into(),
+            commit_sha: "abc123".into(),
+            status: MountStatus::Ready,
+            mounted_at: "2025-01-01T00:00:00Z".into(),
+            nfs_port: Some(12345),
+            backend: Backend::Nfs,
+            volume_path: None,
+            symlink_paths: vec![],
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        let info2: MountInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(info2.backend, Backend::Nfs);
+        assert_eq!(info2.nfs_port, Some(12345));
+        assert_eq!(info2.volume_path, None);
+        assert!(info2.symlink_paths.is_empty());
+
+        // volume_path and symlink_paths should be absent (skip_serializing_if)
+        assert!(!json.contains("volume_path"));
+        assert!(!json.contains("symlink_paths"));
+
+        // Old JSON without backend field should deserialize to Nfs by default
+        let old_json = r#"{"id":"old","source":"github:a/b@c","mount_point":"/mnt","commit_sha":"abc","status":"Ready","mounted_at":"2025-01-01T00:00:00Z","nfs_port":9999}"#;
+        let old: MountInfo = serde_json::from_str(old_json).unwrap();
+        assert_eq!(old.backend, Backend::Nfs);
+        assert_eq!(old.nfs_port, Some(9999));
+        assert!(old.symlink_paths.is_empty());
     }
 }

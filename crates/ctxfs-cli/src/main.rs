@@ -1,5 +1,7 @@
+mod backend;
 mod deps;
 mod setup;
+mod symlink;
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -8,6 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ctxfs_core::config::Config;
+use ctxfs_core::Backend;
 use ctxfs_ipc::service::CtxfsServiceClient;
 use ctxfs_ipc::transport;
 
@@ -39,6 +42,9 @@ enum Commands {
         /// `mount_nfs` yourself with custom flags.
         #[arg(long)]
         server_only: bool,
+        /// Backend to use for mounting (nfs or fskit); overrides env and config
+        #[arg(long, value_parser = clap::value_parser!(Backend))]
+        backend: Option<Backend>,
     },
     /// Unmount a mounted filesystem
     Unmount {
@@ -89,6 +95,8 @@ enum SetupAction {
     Uninstall,
     /// Check if sudoers is already configured
     Check,
+    /// Install FSKit extension for macOS 26+ (no sudo, no FDA).
+    InstallFskit,
 }
 
 #[derive(Subcommand)]
@@ -181,8 +189,9 @@ async fn main() -> Result<()> {
             mount_point,
             mount_dir,
             server_only,
+            backend: backend_flag,
         } => {
-            handle_mount(&config, sources, mount_point, mount_dir, server_only).await?;
+            handle_mount(&config, sources, mount_point, mount_dir, server_only, backend_flag).await?;
         }
 
         Commands::Unmount { target, all } => {
@@ -314,6 +323,29 @@ async fn main() -> Result<()> {
         Commands::Setup { action } => match action {
             SetupAction::Install => {
                 setup::install_sudoers()?;
+
+                // On macOS 26+, prompt to also set up the FSKit extension.
+                #[cfg(target_os = "macos")]
+                if setup::is_macos_26_or_later() {
+                    println!();
+                    println!("FSKit backend available (macOS 26+):");
+                    println!("  - No sudo required for mounts");
+                    println!("  - No Full Disk Access required");
+                    println!("  - Faster, more reliable than NFS");
+                    println!();
+                    let install_fskit = dialoguer::Confirm::new()
+                        .with_prompt("Also install the FSKit extension now?")
+                        .default(true)
+                        .interact()
+                        .unwrap_or(false);
+                    if install_fskit {
+                        if let Err(e) = setup::install_fskit() {
+                            eprintln!("FSKit install failed: {e}");
+                        }
+                    } else {
+                        println!("Skipped. You can run `ctxfs setup install-fskit` later.");
+                    }
+                }
             }
             SetupAction::Uninstall => {
                 setup::uninstall_sudoers()?;
@@ -339,6 +371,10 @@ async fn main() -> Result<()> {
                     println!("To open this pane now, run:");
                     println!("  open \"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles\"");
                 }
+                setup::check_fskit_status();
+            }
+            SetupAction::InstallFskit => {
+                setup::install_fskit().map_err(|e| anyhow::anyhow!(e))?;
             }
         },
 
@@ -360,7 +396,15 @@ async fn handle_mount(
     mount_point: Option<PathBuf>,
     mount_dir: Option<PathBuf>,
     server_only: bool,
+    backend_flag: Option<Backend>,
 ) -> Result<()> {
+    let selected_backend = backend::detect_backend(backend_flag, None);
+    if selected_backend == Backend::FsKit {
+        eprintln!(
+            "note: FSKit backend is not yet wired up — falling back to NFS"
+        );
+    }
+
     // Validation: mount_point and mount_dir are mutually exclusive.
     if mount_point.is_some() && mount_dir.is_some() {
         anyhow::bail!("--mount-point and --mount-dir are mutually exclusive");
@@ -395,11 +439,13 @@ async fn handle_mount(
             return Ok(());
         }
 
+        let port = info
+            .nfs_port
+            .ok_or_else(|| anyhow::anyhow!("mount did not return an NFS port"))?;
         println!(
-            "NFS server listening on 127.0.0.1:{} — mounting kernel side (may prompt for sudo)",
-            info.nfs_port
+            "NFS server listening on 127.0.0.1:{port} — mounting kernel side (may prompt for sudo)"
         );
-        if let Err(e) = run_mount_nfs(info.nfs_port, &mp_str) {
+        if let Err(e) = run_mount_nfs(port, &mp_str) {
             let _ = client
                 .unmount(tarpc::context::current(), mp_str.clone())
                 .await;
@@ -409,7 +455,7 @@ async fn handle_mount(
         println!("Mounted {} at {}", info.source, info.mount_point);
         println!("  Commit:   {}", info.commit_sha);
         println!("  ID:       {}", info.id);
-        println!("  NFS port: {}", info.nfs_port);
+        println!("  NFS port: {port}");
     } else if let Some(base_dir) = mount_dir {
         // Multi-source mount with slug-derived paths.
         let mounts: HashMap<String, PathBuf> = sources
@@ -437,18 +483,18 @@ fn print_server_only_info(info: &ctxfs_ipc::service::MountInfo) {
     println!("  Source:   {}", info.source);
     println!("  Commit:   {}", info.commit_sha);
     println!("  ID:       {}", info.id);
-    println!("  NFS port: {}", info.nfs_port);
+    println!("  NFS port: {}", info.nfs_port.unwrap_or(0));
     println!();
     println!("To mount manually, run:");
     #[cfg(target_os = "macos")]
     println!(
         "  sudo mount_nfs -o nolocks,vers=3,tcp,port={p},mountport={p},soft \\",
-        p = info.nfs_port
+        p = info.nfs_port.unwrap_or(0)
     );
     #[cfg(target_os = "linux")]
     println!(
         "  sudo mount -t nfs -o nolock,vers=3,tcp,port={p},mountport={p},soft \\",
-        p = info.nfs_port
+        p = info.nfs_port.unwrap_or(0)
     );
     println!("    127.0.0.1:/ {}", info.mount_point);
 }

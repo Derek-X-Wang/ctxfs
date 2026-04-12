@@ -16,7 +16,7 @@ ContextFS is an AI-native read-only mountable filesystem. It mounts Git repos an
 **Core flow**: `ctxfs mount npm:react@19.1.0 -p ./mnt` →
 CLI (tarpc client) → Daemon (tarpc server) → Registry resolver (npm → GitHub coords) → Git provider (fetches tree manifest via GitHub REST API) → Stores in tiered cache (blob/tree/resolution) → Spawns NFS server on loopback → CLI runs `sudo mount_nfs` to kernel-mount it.
 
-## Crate Layout (13 crates)
+## Crate Layout (15 crates)
 
 Read the CLAUDE.md at the repo root for the canonical dependency graph. Summary by role:
 
@@ -37,6 +37,10 @@ Read the CLAUDE.md at the repo root for the canonical dependency graph. Summary 
 **NFS backend:**
 - `ctxfs-nfs` — Implements `nfsserve::NFSFileSystem` over a `Snapshot`+`InodeTable`+`BlobCache`. Spawns an NFSv3 TCP server on a loopback port per mount.
 
+**FSKit backend (macOS 26+):**
+- `ctxfs-vfs` — Virtual filesystem abstraction layer shared by NFS and FSKit backends. Provides unified read operations over `Snapshot`+`InodeTable`+`BlobCache` without the NFS protocol overhead.
+- `ctxfs-fskit` — FSKit system extension for macOS 26+. Implements the Apple `FSKit` framework interface using `ctxfs-vfs`. No sudo or Full Disk Access required; ships as `CtxfsFS.app`.
+
 **Top-level binaries:**
 - `ctxfs-daemon` — The background service. Hosts the tarpc server, manages mount lifecycle, owns the cache instances. `Daemon::run()` is the entry point.
 - `ctxfs-cli` — The `ctxfs` binary (clap-based CLI). Contains `deps/` module for dependency detection. Talks to the daemon over UDS.
@@ -53,6 +57,8 @@ Read the CLAUDE.md at the repo root for the canonical dependency graph. Summary 
 | New error kind | `crates/ctxfs-core/src/error.rs` `CtxfsError` enum (uses `thiserror`) |
 | CLI dependency detection for a new manifest | `crates/ctxfs-cli/src/deps/` — new parser file, register in `mod.rs` `detect_all` parser table |
 | New NFS feature | `crates/ctxfs-nfs/src/` — `NFSFileSystem` trait methods |
+| FSKit backend changes | `crates/ctxfs-fskit/src/` — FSKit system extension implementation |
+| VFS logic (shared between NFS + FSKit) | `crates/ctxfs-vfs/src/` — virtual filesystem abstraction |
 
 **Golden rule**: follow existing crate boundaries. Don't cross-import between unrelated crates. If something would require it, look for the right shared abstraction or add one in `ctxfs-core`.
 
@@ -223,7 +229,7 @@ Stop and ask the user (or report `BLOCKED`) if:
 - The plan calls for modifying crates you weren't asked to touch
 - You've tried the same clippy/test fix three times and it keeps failing differently each time
 
-Don't improvise architecture decisions — the 13-crate boundary is deliberate.
+Don't improvise architecture decisions — the 15-crate boundary is deliberate.
 
 ## References
 

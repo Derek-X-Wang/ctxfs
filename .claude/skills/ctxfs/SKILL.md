@@ -27,7 +27,9 @@ Don't use this skill for code the user already has locally (use `Read`/`Grep` di
 
 ## macOS First-Time Setup
 
-Two one-time steps before ctxfs will work on macOS:
+**On macOS 26+ (Tahoe), the FSKit backend is available and recommended.** It requires no sudo and no Full Disk Access. Run `ctxfs setup install-fskit` to enable it, then skip steps 1 and 2 below.
+
+Two one-time steps before ctxfs will work on macOS (required if not using FSKit):
 
 1. **Passwordless sudo for NFS mounts**: run `ctxfs setup install` from your terminal (prompts for your password once, then never again).
 
@@ -79,6 +81,20 @@ ctxfs setup check
 - "Not configured" → **stop and escalate** (see fallback below)
 
 > **Fallback for "Not configured"**: Tell the user: "ctxfs needs passwordless sudo to run NFS kernel mounts non-interactively. Please run `ctxfs setup install` **from your own terminal** (not through me — the install itself prompts for a sudo password and needs a real TTY). Alternatively, I can print the exact `sudo mount_nfs` command for you to run manually one time. Which do you prefer?" Wait for the answer. Do NOT try to run `ctxfs setup install` or `ctxfs mount` yourself — both will hang.
+
+### Check 0c-fskit: Is the FSKit backend available and preferred?
+
+On macOS 26+, ctxfs supports a FSKit backend that does not require sudo or Full Disk Access.
+
+```bash
+ctxfs setup check
+```
+
+Look at the "FSKit backend" section of the output:
+
+- **macOS version: 26+** AND **App installed: yes** → FSKit is ready. `ctxfs mount` will use it automatically (or you can force it with `--backend fskit`). Skip checks 0c and 0d entirely — they apply only to the NFS backend.
+- **macOS version: <26** → FSKit not available on this system. Continue with check 0c.
+- **App installed: no** → FSKit available but not yet set up. Run `ctxfs setup install-fskit` to enable it. After install, FSKit is ready and you can skip 0c and 0d.
 
 ### Check 0d: Can you actually read files from an NFS mount?
 

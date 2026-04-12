@@ -182,6 +182,198 @@ pub fn uninstall_sudoers() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// FSKit setup helpers (macOS 26+)
+// ---------------------------------------------------------------------------
+
+/// Returns true if running on macOS 26 (Tahoe) or later.
+///
+/// Shells out to `sw_vers -productVersion` and checks the major version number.
+/// Returns false on any error or on non-macOS platforms.
+pub fn is_macos_26_or_later() -> bool {
+    #[cfg(not(target_os = "macos"))]
+    return false;
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = match std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        let version = String::from_utf8_lossy(&output.stdout);
+        let major: u32 = version
+            .trim()
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        major >= 26
+    }
+}
+
+/// Find the CtxfsFS.app bundle.
+///
+/// Search order:
+/// 1. `CTXFS_FSKIT_APP_PATH` environment variable
+/// 2. Next to the current binary
+/// 3. `~/Applications/CtxfsFS.app`
+/// 4. `/Applications/CtxfsFS.app`
+pub fn find_fskit_app() -> Option<std::path::PathBuf> {
+    // 1. Environment override.
+    if let Ok(env_path) = std::env::var("CTXFS_FSKIT_APP_PATH") {
+        let p = std::path::PathBuf::from(env_path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. Next to the current binary.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("CtxfsFS.app");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 3. ~/Applications/CtxfsFS.app
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join("Applications").join("CtxfsFS.app");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // 4. /Applications/CtxfsFS.app
+    let system_path = std::path::PathBuf::from("/Applications/CtxfsFS.app");
+    if system_path.exists() {
+        return Some(system_path);
+    }
+
+    None
+}
+
+/// Install the FSKit extension for macOS 26+.
+///
+/// 1. Locates `CtxfsFS.app` via `find_fskit_app`.
+/// 2. Copies it to `~/Applications/CtxfsFS.app` (skips if already there).
+/// 3. Creates `/Volumes/ctxfs/` as the standard mount-point root (requires sudo once).
+/// 4. Prints instructions to enable the System Extension in System Settings and opens
+///    the relevant pane on macOS.
+pub fn install_fskit() -> Result<(), String> {
+    // Step 1: find the app bundle.
+    let app_src = find_fskit_app()
+        .ok_or_else(|| {
+            "CtxfsFS.app not found. Make sure it is next to the ctxfs binary, in \
+             ~/Applications, or /Applications, or set CTXFS_FSKIT_APP_PATH."
+                .to_string()
+        })?;
+
+    // Step 2: copy to ~/Applications if not already there.
+    let home = dirs::home_dir()
+        .ok_or_else(|| "could not determine home directory".to_string())?;
+    let dest = home.join("Applications").join("CtxfsFS.app");
+
+    if dest != app_src {
+        if dest.exists() {
+            println!("CtxfsFS.app already installed at {}.", dest.display());
+        } else {
+            println!("Copying {} to {}...", app_src.display(), dest.display());
+            std::fs::create_dir_all(home.join("Applications"))
+                .map_err(|e| format!("failed to create ~/Applications: {e}"))?;
+
+            // Use `cp -R` for a recursive bundle copy.
+            let status = std::process::Command::new("cp")
+                .args(["-R", &app_src.to_string_lossy(), &dest.to_string_lossy()])
+                .status()
+                .map_err(|e| format!("failed to run cp: {e}"))?;
+            if !status.success() {
+                return Err(format!("cp exited with {status}"));
+            }
+            println!("Copied.");
+        }
+    } else {
+        println!("CtxfsFS.app is already at the target location.");
+    }
+
+    // Step 3: create /Volumes/ctxfs/ as mount-point root.
+    let volumes_dir = std::path::Path::new("/Volumes/ctxfs");
+    if volumes_dir.exists() {
+        println!("/Volumes/ctxfs already exists.");
+    } else {
+        println!("Creating /Volumes/ctxfs (requires sudo)...");
+        let status = std::process::Command::new("sudo")
+            .args(["mkdir", "-p", "/Volumes/ctxfs"])
+            .status()
+            .map_err(|e| format!("failed to run sudo mkdir: {e}"))?;
+        if !status.success() {
+            return Err(format!("sudo mkdir /Volumes/ctxfs exited with {status}"));
+        }
+        println!("Created /Volumes/ctxfs.");
+    }
+
+    // Step 4: print instructions and open System Settings.
+    println!();
+    println!("FSKit extension installed. To activate it:");
+    println!();
+    println!("  1. Open System Settings → General → Login Items & Extensions");
+    println!("     (or Privacy & Security → Extensions on older macOS 26 betas)");
+    println!("  2. Click the ContextFS entry under File System Extensions");
+    println!("  3. Toggle it ON and authenticate when prompted.");
+    println!();
+    println!("Once enabled, `ctxfs mount` will use the FSKit backend — no sudo,");
+    println!("no Full Disk Access required.");
+    println!();
+
+    #[cfg(target_os = "macos")]
+    {
+        // Open the Login Items & Extensions pane.
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+            .status();
+    }
+
+    Ok(())
+}
+
+/// Print FSKit backend status for `ctxfs setup check`.
+pub fn check_fskit_status() {
+    #[cfg(target_os = "macos")]
+    {
+        println!();
+        println!("FSKit backend (macOS 26+):");
+
+        let macos_ok = is_macos_26_or_later();
+        if macos_ok {
+            println!("  macOS version:  26+ (FSKit supported)");
+        } else {
+            println!("  macOS version:  <26 (FSKit not available on this version)");
+        }
+
+        match find_fskit_app() {
+            Some(p) => println!("  App installed:  yes ({})", p.display()),
+            None => println!("  App installed:  no — run `ctxfs setup install-fskit` to install"),
+        }
+
+        let volumes_dir = std::path::Path::new("/Volumes/ctxfs");
+        if volumes_dir.exists() {
+            println!("  Mount dir:      /Volumes/ctxfs (exists)");
+        } else {
+            println!("  Mount dir:      /Volumes/ctxfs (missing — run `ctxfs setup install-fskit`)");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!();
+        println!("FSKit backend: not applicable (macOS only)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +423,26 @@ mod tests {
         // developer machines where `ctxfs setup install` has been run,
         // it correctly returns true. Either way, it shouldn't panic.
         let _ = is_configured("testuser");
+    }
+
+    #[test]
+    fn is_macos_26_or_later_does_not_panic() {
+        // Just verify the function runs without panicking regardless of platform.
+        let _ = is_macos_26_or_later();
+    }
+
+    #[test]
+    fn find_fskit_app_returns_option() {
+        // Without CTXFS_FSKIT_APP_PATH set (and no real app bundle present in CI),
+        // this returns None. What matters is it doesn't panic.
+        // If CTXFS_FSKIT_APP_PATH is set to a valid path in the environment, it
+        // returns Some. Either outcome is acceptable.
+        let _ = find_fskit_app();
+    }
+
+    #[test]
+    fn check_fskit_status_does_not_panic() {
+        // Should print to stdout without panicking regardless of platform / state.
+        check_fskit_status();
     }
 }

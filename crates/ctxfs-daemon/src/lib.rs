@@ -3,5 +3,6 @@
 #![allow(clippy::ignored_unit_patterns, clippy::let_underscore_future)]
 
 mod daemon;
+pub mod mount_state;
 
 pub use daemon::Daemon;

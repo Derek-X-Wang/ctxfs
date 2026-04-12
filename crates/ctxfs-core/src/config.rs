@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::backend::Backend;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub socket_path: PathBuf,
@@ -12,6 +14,7 @@ pub struct Config {
     pub redis_url: Option<String>,
     pub latest_ttl_secs: u64,
     pub tree_cache_max_bytes: u64,
+    pub default_backend: Option<Backend>,
 }
 
 impl Default for Config {
@@ -29,6 +32,7 @@ impl Default for Config {
             redis_url: None,
             latest_ttl_secs: 3600,
             tree_cache_max_bytes: 500 * 1024 * 1024, // 500 MB
+            default_backend: None,
         }
     }
 }
@@ -70,6 +74,10 @@ impl Config {
                 config.tree_cache_max_bytes = n;
             }
         }
+        config.default_backend = std::env::var("CTXFS_BACKEND")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok());
 
         config
     }
