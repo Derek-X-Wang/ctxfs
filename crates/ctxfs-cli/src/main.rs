@@ -326,6 +326,19 @@ async fn main() -> Result<()> {
                 } else {
                     println!("Not configured. Run `ctxfs setup install` for passwordless mounts.");
                 }
+                #[cfg(target_os = "macos")]
+                {
+                    println!();
+                    println!("macOS note: your terminal app also needs Full Disk Access to read");
+                    println!(
+                        "NFS-mounted files. If `ls` on a mount returns 'Operation not permitted',"
+                    );
+                    println!("grant Full Disk Access to your terminal in:");
+                    println!("  System Settings > Privacy & Security > Full Disk Access");
+                    println!();
+                    println!("To open this pane now, run:");
+                    println!("  open \"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles\"");
+                }
             }
         },
 

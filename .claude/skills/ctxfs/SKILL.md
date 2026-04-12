@@ -25,6 +25,24 @@ Don't use this skill for code the user already has locally (use `Read`/`Grep` di
 
 ---
 
+## macOS First-Time Setup
+
+Two one-time steps before ctxfs will work on macOS:
+
+1. **Passwordless sudo for NFS mounts**: run `ctxfs setup install` from your terminal (prompts for your password once, then never again).
+
+2. **Full Disk Access for your terminal app**: macOS treats NFS mounts (even loopback ones) as network volumes and blocks access unless your terminal has Full Disk Access. Without this, mounts succeed but reads fail with "Operation not permitted". To fix, open this pane and grant access to your terminal app (Terminal, iTerm2, cmux, Ghostty, etc.), then restart it:
+
+```bash
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+```
+
+This is the same restriction that affects macFUSE, s3fs-fuse, and HuggingFace's hf-mount — see [macfuse#690](https://github.com/macfuse/macfuse/issues/690). It's not a ctxfs bug.
+
+**Linux** only needs step 1. No FDA equivalent exists.
+
+---
+
 ## Step 0: Feasibility Check (do this first, always)
 
 Before touching ctxfs, confirm the environment can actually use it. This is the single biggest failure mode.
