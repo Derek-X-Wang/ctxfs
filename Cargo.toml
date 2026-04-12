@@ -13,6 +13,7 @@ members = [
     "crates/ctxfs-provider-pypi",
     "crates/ctxfs-provider-crate",
     "crates/ctxfs-cache-redis",
+    "crates/ctxfs-vfs",
 ]
 resolver = "2"
 
@@ -49,6 +50,7 @@ ctxfs-provider-pypi = { path = "crates/ctxfs-provider-pypi", version = "0.0.0" }
 ctxfs-provider-crate = { path = "crates/ctxfs-provider-crate", version = "0.0.0" }
 ctxfs-daemon = { path = "crates/ctxfs-daemon", version = "0.0.0" }
 ctxfs-cache-redis = { path = "crates/ctxfs-cache-redis", version = "0.0.0" }
+ctxfs-vfs = { path = "crates/ctxfs-vfs", version = "0.0.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
