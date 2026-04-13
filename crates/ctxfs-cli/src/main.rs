@@ -439,23 +439,53 @@ async fn handle_mount(
             return Ok(());
         }
 
-        let port = info
-            .nfs_port
-            .ok_or_else(|| anyhow::anyhow!("mount did not return an NFS port"))?;
-        println!(
-            "NFS server listening on 127.0.0.1:{port} — mounting kernel side (may prompt for sudo)"
-        );
-        if let Err(e) = run_mount_nfs(port, &mp_str) {
-            let _ = client
-                .unmount(tarpc::context::current(), mp_str.clone())
-                .await;
-            return Err(anyhow::anyhow!("kernel mount failed: {e}"));
-        }
+        if info.backend == Backend::FsKit {
+            if let Some(volume_path) = info.volume_path.as_deref() {
+                let user_path = std::path::Path::new(&mp_str);
+                let volume = std::path::Path::new(volume_path);
 
-        println!("Mounted {} at {}", info.source, info.mount_point);
-        println!("  Commit:   {}", info.commit_sha);
-        println!("  ID:       {}", info.id);
-        println!("  NFS port: {port}");
+                if user_path == volume {
+                    println!("Mounted FSKit volume at {}", volume.display());
+                } else {
+                    match symlink::create_symlink(user_path, volume) {
+                        Ok(created_at) => {
+                            println!("Mounted FSKit volume at {}", volume.display());
+                            println!("Linked from: {}", created_at.display());
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: mounted at {} but failed to create symlink {}: {e}",
+                                volume.display(),
+                                user_path.display()
+                            );
+                        }
+                    }
+                }
+            } else {
+                println!("Mounted FSKit volume (no volume_path reported)");
+            }
+            println!("  Source:   {}", info.source);
+            println!("  Commit:   {}", info.commit_sha);
+            println!("  ID:       {}", info.id);
+        } else {
+            let port = info
+                .nfs_port
+                .ok_or_else(|| anyhow::anyhow!("mount did not return an NFS port"))?;
+            println!(
+                "NFS server listening on 127.0.0.1:{port} — mounting kernel side (may prompt for sudo)"
+            );
+            if let Err(e) = run_mount_nfs(port, &mp_str) {
+                let _ = client
+                    .unmount(tarpc::context::current(), mp_str.clone())
+                    .await;
+                return Err(anyhow::anyhow!("kernel mount failed: {e}"));
+            }
+
+            println!("Mounted {} at {}", info.source, info.mount_point);
+            println!("  Commit:   {}", info.commit_sha);
+            println!("  ID:       {}", info.id);
+            println!("  NFS port: {port}");
+        }
     } else if let Some(base_dir) = mount_dir {
         // Multi-source mount with slug-derived paths.
         let mounts: HashMap<String, PathBuf> = sources
@@ -517,17 +547,36 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
 
     let target = target.context("target is required unless --all is specified")?;
 
+    let target_path = std::path::Path::new(&target);
+    let is_ctxfs_link = symlink::is_ctxfs_symlink(target_path);
+
+    // Resolve symlink to the underlying volume path for the daemon.
+    let daemon_target = if is_ctxfs_link {
+        symlink::resolve_ctxfs_path(target_path)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        target.clone()
+    };
+
     // Step 1: unmount the kernel mount first (may prompt for sudo).
-    if let Err(e) = run_umount(&target) {
+    // For FSKit mounts there is no kernel NFS mount to tear down, but
+    // we attempt it anyway and swallow the failure as a warning.
+    if let Err(e) = run_umount(&daemon_target) {
         eprintln!("warning: kernel umount failed: {e}");
     }
 
-    // Step 2: ask the daemon to stop the NFS server for this mount.
+    // Step 2: ask the daemon to stop serving this mount.
     let client = connect(config).await?;
     client
-        .unmount(tarpc::context::current(), target.clone())
+        .unmount(tarpc::context::current(), daemon_target)
         .await?
         .map_err(|e| anyhow::anyhow!(e))?;
+
+    // Step 3: remove the ctxfs symlink now that the daemon has acknowledged.
+    if is_ctxfs_link {
+        let _ = symlink::safe_remove_symlink(target_path);
+    }
 
     println!("Unmounted {target}");
     Ok(())
