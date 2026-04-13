@@ -398,17 +398,7 @@ async fn handle_mount(
     server_only: bool,
     backend_flag: Option<Backend>,
 ) -> Result<()> {
-    let detected = backend::detect_backend(backend_flag, None);
-    // Task 7: IPC carries backend, but daemon FSKit dispatch lands in Task 8.
-    // Until then, transparently fall back to NFS so existing users aren't broken.
-    let selected_backend = if detected == Backend::FsKit {
-        eprintln!(
-            "note: FSKit backend is not yet wired up — falling back to NFS"
-        );
-        Backend::Nfs
-    } else {
-        detected
-    };
+    let selected_backend = backend::detect_backend(backend_flag, None);
 
     // Validation: mount_point and mount_dir are mutually exclusive.
     if mount_point.is_some() && mount_dir.is_some() {

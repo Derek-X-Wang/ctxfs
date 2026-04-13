@@ -2,7 +2,8 @@
 // "matching over ()". Detached `tokio::spawn` return values are idiomatic.
 #![allow(clippy::ignored_unit_patterns, clippy::let_underscore_future)]
 
-mod daemon;
+pub mod daemon;
+pub mod fskit_mount;
 pub mod mount_state;
 
 pub use daemon::Daemon;
