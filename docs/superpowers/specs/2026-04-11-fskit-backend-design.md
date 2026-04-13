@@ -1,8 +1,22 @@
 # FSKit Backend for macOS — Design Spec
 
 **Date**: 2026-04-11
-**Status**: Draft
+**Status**: Phase 0 ✅ validated 2026-04-13. Phase 1 cleared to start.
 **Scope**: Add an FSKit-based filesystem backend for macOS 26+, eliminating the need for sudo and Full Disk Access on modern Macs. NFS remains the cross-platform fallback.
+
+## Phase 0 Evidence (2026-04-13)
+
+The proof of concept at `docs/poc/fskit-poc/` confirmed on macOS 26.4:
+
+| Test | Result |
+|---|---|
+| Mount a synthetic (non-block-device) filesystem via FSKitBridge + fskit-rs | ✅ Works |
+| `ls`, `cat`, `find`, `grep`, `stat` on mounted files | ✅ All work |
+| Read latency | **2ms** per read — imperceptible |
+| No sudo per mount | ✅ Confirmed |
+| No Full Disk Access required | ✅ Confirmed (the huge win) |
+
+Mount reports as `fskit` type, `mounted by <user>` (not root). See `docs/poc/fskit-poc/README.md` for gotchas encountered during Phase 0 (swift-protobuf 1.36+ required, bundle ID must be overridden from fskit-rs default).
 
 ---
 
@@ -768,13 +782,13 @@ xcodebuild -scheme CtxfsFS -configuration Release \
 
 ## Open Questions
 
-### Must resolve before implementation (Phase 0 gates these)
+### Resolved by Phase 0 (2026-04-13)
 
-1. **fskit-rs maturity**: The `fskit-rs` crate exists on crates.io but is relatively new. Phase 0 proof-of-concept must verify: does it support non-local volumes on macOS 26? Does it handle the full VFS surface we need (lookup, read, readdir, readlink, statfs)? If not, vendor and extend — or fork if the project is unmaintained.
+1. **fskit-rs maturity**: ✅ Works. API is complete for read-only filesystems. All methods we need (activate, lookup_item, enumerate_directory, get_attributes, read, read_symbolic_link, statfs) function correctly. Risk: v0.1.0, single contributor. Mitigation: vendor the crate in Phase 1.
 
-2. **FSKitBridge customization depth**: How much do we need to modify the Swift appex beyond branding? The auth token handshake, volume naming, mount options passthrough, and shutdown notification all require changes to the bridge protocol. Phase 0 will reveal how much of FSKitBridge is reusable vs. needs rewriting. Budget for forking rather than light patching.
+2. **FSKitBridge customization depth**: The appex works unmodified for read-only filesystems. Customization needed: bundle ID per-deployment (trivial), volume display name (attribute), Finder icon (resource). Auth token handshake can be layered on top of the existing Protobuf protocol without modifying the Swift code. Mitigation: vendor the Swift source.
 
-3. **Performance**: Phase 0 must benchmark the XPC → TCP hop vs. NFS direct loopback. Measure: single file read latency, `grep` across 100+ files, `find` on a 10k-file repo. If latency is >10x NFS, the direct C FFI approach becomes necessary and the architecture changes significantly.
+3. **Performance**: ✅ 2ms per small-file read on macOS 26.4 (MacBook Pro M-series). Comparable to NFS loopback. The XPC→TCP hop adds no meaningful overhead for interactive workloads. Direct C FFI optimization is NOT warranted.
 
 ### Resolve during implementation
 

@@ -16,6 +16,11 @@ members = [
     "crates/ctxfs-vfs",
     "crates/ctxfs-fskit",
 ]
+exclude = [
+    # Phase 0 proof-of-concept, kept for reference. Not part of the workspace
+    # because it has its own dependency graph (fskit-rs pulls in prost/protoc).
+    "docs/poc/fskit-poc",
+]
 resolver = "2"
 
 [workspace.lints.rust]
