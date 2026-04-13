@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
+use ctxfs_core::Backend;
 use ctxfs_ipc::service::CtxfsServiceClient;
 use futures::StreamExt;
 
@@ -81,7 +82,10 @@ pub async fn batch_mount(
                     return (src, mp_str, Err(format!("create dir: {e}")));
                 }
                 let ctx = crate::long_context();
-                match client.mount(ctx, src.clone(), mp_str.clone()).await {
+                match client
+                    .mount(ctx, src.clone(), mp_str.clone(), Backend::Nfs)
+                    .await
+                {
                     Ok(Ok(info)) => (src, mp_str, Ok(info)),
                     Ok(Err(e)) => (src, mp_str, Err(e)),
                     Err(e) => (src, mp_str, Err(format!("rpc: {e}"))),

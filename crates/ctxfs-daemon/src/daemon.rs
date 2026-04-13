@@ -3,6 +3,7 @@ use ctxfs_cache::{BlobCache, ResolutionCache, SharedTreeCache, TreeCache};
 use ctxfs_core::config::Config;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::source::{ProviderType, SourceSpec};
+use ctxfs_core::Backend;
 use ctxfs_ipc::service::{CacheStats, CtxfsService, MountInfo, MountStatus};
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
@@ -20,8 +21,12 @@ use tracing::{error, info, warn};
 
 struct MountHandle {
     info: MountInfo,
+    #[allow(dead_code)]
+    backend: Backend,
     /// Keeps the NFS server task alive for the lifetime of the mount.
-    _nfs: NfsServerHandle,
+    /// `None` for `FSKit` mounts.
+    _nfs: Option<NfsServerHandle>,
+    // _fskit will come in Task 8 when we have FsKitHandle.
 }
 
 pub struct Daemon {
@@ -365,10 +370,25 @@ impl DaemonServer {
         })
     }
 
+    /// Dispatch a mount request to the appropriate backend implementation.
+    fn do_mount(
+        &self,
+        source_str: &str,
+        mount_point: &str,
+        backend: Backend,
+    ) -> Result<MountInfo, String> {
+        match backend {
+            Backend::Nfs => self.do_mount_nfs(source_str, mount_point),
+            Backend::FsKit => {
+                Err("FSKit dispatch not yet implemented (coming in Task 8)".into())
+            }
+        }
+    }
+
     /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
     /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
     /// terminal instead of the daemon's log.
-    fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+    fn do_mount_nfs(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
         let prep = self.prepare_mount(source_str)?;
 
         std::fs::create_dir_all(mount_point)
@@ -408,14 +428,15 @@ impl DaemonServer {
             status: MountStatus::Ready,
             mounted_at: chrono::Utc::now().to_rfc3339(),
             nfs_port: Some(port),
-            backend: ctxfs_core::backend::Backend::Nfs,
+            backend: Backend::Nfs,
             volume_path: None,
             symlink_paths: vec![],
         };
 
         let handle = MountHandle {
             info: info.clone(),
-            _nfs: nfs_handle,
+            backend: Backend::Nfs,
+            _nfs: Some(nfs_handle),
         };
 
         self.rt_handle.block_on(async {
@@ -432,10 +453,11 @@ impl CtxfsService for DaemonServer {
         _: tarpc::context::Context,
         source: String,
         mount_point: String,
+        backend: Backend,
     ) -> Result<MountInfo, String> {
-        info!("mount request: {source} -> {mount_point}");
+        info!("mount request: {source} -> {mount_point} (backend={backend})");
         let server = self.clone();
-        tokio::task::spawn_blocking(move || server.do_mount(&source, &mount_point))
+        tokio::task::spawn_blocking(move || server.do_mount(&source, &mount_point, backend))
             .await
             .map_err(|e| format!("mount task panicked: {e}"))?
     }

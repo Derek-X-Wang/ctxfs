@@ -15,6 +15,8 @@ pub struct Config {
     pub latest_ttl_secs: u64,
     pub tree_cache_max_bytes: u64,
     pub default_backend: Option<Backend>,
+    /// Bundle ID of the installed `FSKitBridge` appex.
+    pub fskit_bundle_id: Option<String>,
 }
 
 impl Default for Config {
@@ -33,6 +35,7 @@ impl Default for Config {
             latest_ttl_secs: 3600,
             tree_cache_max_bytes: 500 * 1024 * 1024, // 500 MB
             default_backend: None,
+            fskit_bundle_id: None,
         }
     }
 }
@@ -78,6 +81,9 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .and_then(|s| s.parse().ok());
+        config.fskit_bundle_id = std::env::var("CTXFS_FSKIT_BUNDLE_ID")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         config
     }
@@ -140,6 +146,29 @@ mod tests {
         assert_eq!(config.latest_ttl_secs, 3600);
         assert_eq!(config.tree_cache_max_bytes, 500 * 1024 * 1024);
         assert!(config.redis_url.is_none());
+    }
+
+    #[test]
+    fn default_config_has_no_fskit_bundle_id() {
+        assert!(Config::default().fskit_bundle_id.is_none());
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn from_env_reads_fskit_bundle_id() {
+        let prev = std::env::var("CTXFS_FSKIT_BUNDLE_ID").ok();
+        unsafe {
+            std::env::set_var("CTXFS_FSKIT_BUNDLE_ID", "com.example.fskitbridge.fskitext");
+        }
+        let config = Config::from_env();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CTXFS_FSKIT_BUNDLE_ID", v) },
+            None => unsafe { std::env::remove_var("CTXFS_FSKIT_BUNDLE_ID") },
+        }
+        assert_eq!(
+            config.fskit_bundle_id.as_deref(),
+            Some("com.example.fskitbridge.fskitext")
+        );
     }
 
     #[test]

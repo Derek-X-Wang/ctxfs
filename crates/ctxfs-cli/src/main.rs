@@ -398,12 +398,17 @@ async fn handle_mount(
     server_only: bool,
     backend_flag: Option<Backend>,
 ) -> Result<()> {
-    let selected_backend = backend::detect_backend(backend_flag, None);
-    if selected_backend == Backend::FsKit {
+    let detected = backend::detect_backend(backend_flag, None);
+    // Task 7: IPC carries backend, but daemon FSKit dispatch lands in Task 8.
+    // Until then, transparently fall back to NFS so existing users aren't broken.
+    let selected_backend = if detected == Backend::FsKit {
         eprintln!(
             "note: FSKit backend is not yet wired up — falling back to NFS"
         );
-    }
+        Backend::Nfs
+    } else {
+        detected
+    };
 
     // Validation: mount_point and mount_dir are mutually exclusive.
     if mount_point.is_some() && mount_dir.is_some() {
@@ -430,7 +435,12 @@ async fn handle_mount(
         std::fs::create_dir_all(&mp).context("failed to create mount point directory")?;
 
         let info = client
-            .mount(long_context(), source.clone(), mp_str.clone())
+            .mount(
+                long_context(),
+                source.clone(),
+                mp_str.clone(),
+                selected_backend,
+            )
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
 

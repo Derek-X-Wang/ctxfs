@@ -21,6 +21,8 @@ ctxfs-provider-pypi = { workspace = true }
 ctxfs-provider-crate = { workspace = true }
 ctxfs-nfs = { workspace = true }
 ctxfs-vfs = { workspace = true }
+ctxfs-fskit = { workspace = true }
+fskit-rs = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
