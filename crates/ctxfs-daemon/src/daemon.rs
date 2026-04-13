@@ -245,6 +245,21 @@ fn pick_free_port() -> Result<u16, String> {
     Ok(port)
 }
 
+/// All the state a backend needs from `prepare_mount` to build a `VfsState`
+/// and start serving. Backend-agnostic.
+struct MountPrep {
+    /// The original parsed source (for mount ID and registry cache).
+    source_spec: ctxfs_core::source::SourceSpec,
+    /// A GitHub-shaped source (registries resolved to owner/repo/ref).
+    github_source: ctxfs_core::source::SourceSpec,
+    /// Provider that fetches blobs and directories.
+    provider: std::sync::Arc<ctxfs_provider_git::GitHubProvider>,
+    /// Parsed snapshot manifest.
+    snapshot: ctxfs_manifest::Snapshot,
+    /// Optional subpath to re-root the mount at.
+    subpath: Option<String>,
+}
+
 impl DaemonServer {
     /// Build the appropriate registry resolver for a non-GitHub source.
     fn make_resolver(source: &SourceSpec) -> Result<Box<dyn RegistryResolver>, String> {
@@ -256,18 +271,15 @@ impl DaemonServer {
         }
     }
 
-    /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
-    /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
-    /// terminal instead of the daemon's log.
+    /// Resolve `source_str` to GitHub coordinates, fetch the snapshot, and
+    /// return all the state backends need.
     #[allow(clippy::too_many_lines)]
-    fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+    fn prepare_mount(&self, source_str: &str) -> Result<MountPrep, String> {
         let mut source =
             SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
 
         let is_latest = source.version == "latest";
 
-        // ── Resolution cache check ──────────────────────────────────────────
-        // For registry sources, see if we already have cached GitHub coordinates.
         let cached_resolution = if source.provider_type == ProviderType::GitHub {
             None
         } else {
@@ -275,7 +287,6 @@ impl DaemonServer {
             guard.get(source_str).cloned()
         };
 
-        // ── Resolve to GitHub coordinates ───────────────────────────────────
         let (owner, repo, git_ref, subpath) = if source.provider_type == ProviderType::GitHub {
             let (o, r) = source
                 .name
@@ -288,7 +299,6 @@ impl DaemonServer {
                 source.subpath.clone(),
             )
         } else if let Some(resolved) = cached_resolution {
-            // Cache hit — skip registry resolution entirely.
             info!("resolution cache hit for {source_str}");
             let sp = source.subpath.clone().or(resolved.subpath.clone());
             (
@@ -298,10 +308,8 @@ impl DaemonServer {
                 sp,
             )
         } else {
-            // Cache miss — resolve from the registry.
             let resolver = Self::make_resolver(&source)?;
 
-            // Step 1: Resolve "latest" to an exact version.
             if is_latest {
                 source.version = self
                     .rt_handle
@@ -309,7 +317,6 @@ impl DaemonServer {
                     .map_err(|e| format!("failed to resolve latest: {e}"))?;
             }
 
-            // Step 2: Resolve to GitHub coordinates.
             let src = self
                 .rt_handle
                 .block_on(resolver.resolve(&source.name, &source.version))
@@ -317,7 +324,6 @@ impl DaemonServer {
 
             let sp = source.subpath.clone().or(src.subpath.clone());
 
-            // Cache the resolution for future mounts.
             {
                 let mut guard = self.resolution_cache.lock().unwrap();
                 if let Err(e) = guard.put(source_str.to_string(), src.clone(), is_latest) {
@@ -328,7 +334,6 @@ impl DaemonServer {
             (src.owner, src.repo, src.git_ref, sp)
         };
 
-        // Build a GitHub-shaped SourceSpec for the provider.
         let github_source = SourceSpec {
             provider_type: ProviderType::GitHub,
             name: format!("{owner}/{repo}"),
@@ -351,27 +356,40 @@ impl DaemonServer {
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
             .map_err(|e| format!("failed to parse snapshot: {e}"))?;
 
+        Ok(MountPrep {
+            source_spec: source,
+            github_source,
+            provider,
+            snapshot,
+            subpath,
+        })
+    }
+
+    /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
+    /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
+    /// terminal instead of the daemon's log.
+    fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+        let prep = self.prepare_mount(source_str)?;
+
         std::fs::create_dir_all(mount_point)
             .map_err(|e| format!("failed to create mount point: {e}"))?;
 
-        let id = source.id();
-        let commit_sha = snapshot.commit_sha.clone();
+        let id = prep.source_spec.id();
+        let commit_sha = prep.snapshot.commit_sha.clone();
 
-        // Pick a loopback port and spawn the NFS server in the daemon's runtime.
         let port = pick_free_port()?;
         let addr = format!("127.0.0.1:{port}");
 
-        // Build the protocol-agnostic VFS, then wrap it in the NFS adapter.
         let vfs = self
             .rt_handle
             .block_on(ctxfs_vfs::VfsState::new(
-                provider,
+                prep.provider,
                 self.cache.clone(),
-                snapshot,
-                subpath,
+                prep.snapshot,
+                prep.subpath,
             ))
             .map_err(|e| format!("failed to build VFS: {e}"))?;
-        let fs = CtxfsNfs::new(Arc::new(vfs), github_source);
+        let fs = CtxfsNfs::new(Arc::new(vfs), prep.github_source);
         let nfs_handle = self
             .rt_handle
             .block_on(fs.spawn(&addr))
