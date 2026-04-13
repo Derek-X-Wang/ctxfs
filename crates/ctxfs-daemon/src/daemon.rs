@@ -130,6 +130,7 @@ impl Daemon {
     }
 
     pub async fn run(&self) -> Result<()> {
+        self.cleanup_stale_mounts();
         self.write_pid_file()?;
 
         // Attempt to connect to Redis if configured.
@@ -245,21 +246,67 @@ impl Daemon {
     async fn cleanup(&self) {
         info!("cleaning up...");
 
+        let ids: Vec<String> = {
+            let mounts = self.mounts.read().await;
+            mounts.keys().cloned().collect()
+        };
         let mut mounts = self.mounts.write().await;
-        let ids: Vec<String> = mounts.keys().cloned().collect();
         for id in ids {
             if let Some(handle) = mounts.remove(&id) {
-                info!("stopping NFS server for {}", handle.info.mount_point);
-                // Dropping the handle stops the NFS server task; the kernel
-                // mount is the CLI's responsibility to tear down.
-                drop(handle);
+                info!("shutting down mount {}", handle.info.mount_point);
+                // FSKit: explicit async shutdown (can't await in Drop).
+                #[allow(clippy::used_underscore_binding)]
+                if let Some(fskit) = handle._fskit {
+                    fskit.shutdown().await;
+                }
+                // Dropping the NFS handle stops the NFS server task.
+                #[allow(clippy::used_underscore_binding)]
+                drop(handle._nfs);
             }
+        }
+
+        // Clear mounts.json — we've shut down cleanly.
+        let state_file = crate::mount_state::MountStateFile::new(
+            self.config.pid_file.parent().unwrap_or_else(|| {
+                std::path::Path::new("/tmp")
+            }),
+        );
+        if let Err(e) = state_file.clear() {
+            warn!("failed to clear mount state: {e}");
         }
 
         let _ = std::fs::remove_file(&self.config.pid_file);
         let _ = std::fs::remove_file(&self.config.socket_path);
 
         info!("daemon stopped");
+    }
+
+    fn cleanup_stale_mounts(&self) {
+        let state_file = crate::mount_state::MountStateFile::new(
+            self.config.pid_file.parent().unwrap_or_else(|| {
+                std::path::Path::new("/tmp")
+            }),
+        );
+        let entries = state_file.read();
+        if entries.is_empty() {
+            return;
+        }
+        warn!(
+            "found {} stale mount entries from previous daemon run, attempting cleanup",
+            entries.len()
+        );
+        for entry in &entries {
+            if entry.backend != ctxfs_core::Backend::FsKit {
+                continue;
+            }
+            let _ = std::process::Command::new("diskutil")
+                .args(["unmount", "force", &entry.volume_path])
+                .output();
+            info!("cleaned up stale FSKit volume {}", entry.volume_path);
+        }
+        if let Err(e) = state_file.clear() {
+            warn!("failed to clear stale mount state: {e}");
+        }
     }
 
     pub fn cancel(&self) {
