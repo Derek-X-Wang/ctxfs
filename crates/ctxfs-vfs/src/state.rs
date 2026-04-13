@@ -216,6 +216,7 @@ impl VfsState {
         match &node.kind {
             NodeKind::Directory { .. } => NodeAttr {
                 inode: node.id,
+                parent_inode: node.parent,
                 size: BLOCK_SIZE,
                 kind: NodeType::Directory,
                 executable: false,
@@ -224,12 +225,14 @@ impl VfsState {
                 size, executable, ..
             } => NodeAttr {
                 inode: node.id,
+                parent_inode: node.parent,
                 size: *size,
                 kind: NodeType::File,
                 executable: *executable,
             },
             NodeKind::Symlink { target } => NodeAttr {
                 inode: node.id,
+                parent_inode: node.parent,
                 size: target.len() as u64,
                 kind: NodeType::Symlink,
                 executable: false,
