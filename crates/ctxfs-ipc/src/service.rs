@@ -61,7 +61,11 @@ pub struct CacheStats {
 /// tarpc service definition.
 #[tarpc::service]
 pub trait CtxfsService {
-    async fn mount(source: String, mount_point: String) -> Result<MountInfo, String>;
+    async fn mount(
+        source: String,
+        mount_point: String,
+        backend: ctxfs_core::Backend,
+    ) -> Result<MountInfo, String>;
     async fn unmount(target: String) -> Result<(), String>;
     async fn list() -> Vec<MountInfo>;
     async fn status(mount_id: String) -> Result<MountInfo, String>;

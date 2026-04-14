@@ -7,11 +7,15 @@ publish = false
 [dependencies]
 ctxfs-vfs = { workspace = true }
 ctxfs-core = { workspace = true }
+ctxfs-manifest = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+libc = { workspace = true }
+fskit-rs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

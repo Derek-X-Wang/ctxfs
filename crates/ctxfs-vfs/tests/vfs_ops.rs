@@ -250,3 +250,26 @@ async fn subpath_reroots() {
     let data = vfs.read(main_id, 0, 4096).await.unwrap();
     assert_eq!(data, main_rs);
 }
+
+#[tokio::test]
+async fn lookup_populates_parent_inode() {
+    let (provider, snapshot, _main_rs) = build_fixture();
+    let cache = make_cache();
+    let vfs = VfsState::new(provider, cache, snapshot, None).await.unwrap();
+
+    let root = vfs.root_id();
+
+    // Root's parent is itself
+    let root_attr = vfs.getattr(root).await.unwrap();
+    assert_eq!(root_attr.parent_inode, root);
+
+    // README.md's parent is root
+    let (_readme_id, readme_attr) = vfs.lookup(root, "README.md").await.unwrap();
+    assert_eq!(readme_attr.parent_inode, root);
+
+    // src/main.rs: parent is src/, not root
+    let (src_id, _) = vfs.lookup(root, "src").await.unwrap();
+    let (_, main_rs_attr) = vfs.lookup(src_id, "main.rs").await.unwrap();
+    assert_eq!(main_rs_attr.parent_inode, src_id);
+    assert_ne!(main_rs_attr.parent_inode, root);
+}

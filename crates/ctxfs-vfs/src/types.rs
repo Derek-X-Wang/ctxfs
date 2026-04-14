@@ -11,6 +11,8 @@ pub enum NodeType {
 #[derive(Debug, Clone)]
 pub struct NodeAttr {
     pub inode: u64,
+    /// Inode of the parent directory. The root's parent is itself.
+    pub parent_inode: u64,
     pub size: u64,
     pub kind: NodeType,
     pub executable: bool,
@@ -102,6 +104,7 @@ mod tests {
     fn node_attr_properties() {
         let attr = NodeAttr {
             inode: 42,
+            parent_inode: 1,
             size: 1024,
             kind: NodeType::File,
             executable: true,
@@ -116,6 +119,7 @@ mod tests {
     fn node_attr_directory() {
         let attr = NodeAttr {
             inode: 1,
+            parent_inode: 1,
             size: 0,
             kind: NodeType::Directory,
             executable: false,
@@ -128,6 +132,7 @@ mod tests {
     fn node_attr_clone() {
         let attr = NodeAttr {
             inode: 10,
+            parent_inode: 1,
             size: 512,
             kind: NodeType::Symlink,
             executable: false,

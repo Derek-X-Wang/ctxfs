@@ -3,12 +3,14 @@ use ctxfs_cache::{BlobCache, ResolutionCache, SharedTreeCache, TreeCache};
 use ctxfs_core::config::Config;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::source::{ProviderType, SourceSpec};
+use ctxfs_core::Backend;
 use ctxfs_ipc::service::{CacheStats, CtxfsService, MountInfo, MountStatus};
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
 use ctxfs_provider_common::resolver::RegistryResolver;
 use ctxfs_provider_git::GitHubProvider;
+use fskit_rs::session::Session as FsKitSession;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -18,10 +20,58 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+/// State owned by the daemon for an FSKit mount. Explicit async shutdown
+/// unmounts; Drop closes the session as a fallback.
+pub struct FsKitHandle {
+    session: Option<FsKitSession>,
+    volume_path: std::path::PathBuf,
+}
+
+impl FsKitHandle {
+    pub fn new(session: FsKitSession, volume_path: std::path::PathBuf) -> Self {
+        Self {
+            session: Some(session),
+            volume_path,
+        }
+    }
+
+    pub fn volume_path(&self) -> &std::path::Path {
+        &self.volume_path
+    }
+
+    /// Consume the handle and drop the session (triggers unmount via fskit-rs).
+    /// This is the preferred cleanup path — called explicitly from daemon
+    /// shutdown in Task 9 so we don't rely on Drop (can't await in Drop).
+    ///
+    /// Kept `async` because fskit-rs may in the future expose an async
+    /// teardown path; callers already `.await` this so changing the shape
+    /// later would be breaking.
+    #[allow(clippy::unused_async)]
+    pub async fn shutdown(mut self) {
+        if let Some(session) = self.session.take() {
+            drop(session);
+        }
+    }
+}
+
+impl std::fmt::Debug for FsKitHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FsKitHandle")
+            .field("volume_path", &self.volume_path)
+            .finish_non_exhaustive()
+    }
+}
+
 struct MountHandle {
     info: MountInfo,
+    #[allow(dead_code)]
+    backend: Backend,
     /// Keeps the NFS server task alive for the lifetime of the mount.
-    _nfs: NfsServerHandle,
+    /// `None` for `FSKit` mounts.
+    _nfs: Option<NfsServerHandle>,
+    /// Keeps the FSKit session alive for the lifetime of the mount.
+    /// `None` for NFS mounts.
+    _fskit: Option<FsKitHandle>,
 }
 
 pub struct Daemon {
@@ -80,6 +130,7 @@ impl Daemon {
     }
 
     pub async fn run(&self) -> Result<()> {
+        self.cleanup_stale_mounts();
         self.write_pid_file()?;
 
         // Attempt to connect to Redis if configured.
@@ -195,21 +246,67 @@ impl Daemon {
     async fn cleanup(&self) {
         info!("cleaning up...");
 
+        let ids: Vec<String> = {
+            let mounts = self.mounts.read().await;
+            mounts.keys().cloned().collect()
+        };
         let mut mounts = self.mounts.write().await;
-        let ids: Vec<String> = mounts.keys().cloned().collect();
         for id in ids {
             if let Some(handle) = mounts.remove(&id) {
-                info!("stopping NFS server for {}", handle.info.mount_point);
-                // Dropping the handle stops the NFS server task; the kernel
-                // mount is the CLI's responsibility to tear down.
-                drop(handle);
+                info!("shutting down mount {}", handle.info.mount_point);
+                // FSKit: explicit async shutdown (can't await in Drop).
+                #[allow(clippy::used_underscore_binding)]
+                if let Some(fskit) = handle._fskit {
+                    fskit.shutdown().await;
+                }
+                // Dropping the NFS handle stops the NFS server task.
+                #[allow(clippy::used_underscore_binding)]
+                drop(handle._nfs);
             }
+        }
+
+        // Clear mounts.json — we've shut down cleanly.
+        let state_file = crate::mount_state::MountStateFile::new(
+            self.config.pid_file.parent().unwrap_or_else(|| {
+                std::path::Path::new("/tmp")
+            }),
+        );
+        if let Err(e) = state_file.clear() {
+            warn!("failed to clear mount state: {e}");
         }
 
         let _ = std::fs::remove_file(&self.config.pid_file);
         let _ = std::fs::remove_file(&self.config.socket_path);
 
         info!("daemon stopped");
+    }
+
+    fn cleanup_stale_mounts(&self) {
+        let state_file = crate::mount_state::MountStateFile::new(
+            self.config.pid_file.parent().unwrap_or_else(|| {
+                std::path::Path::new("/tmp")
+            }),
+        );
+        let entries = state_file.read();
+        if entries.is_empty() {
+            return;
+        }
+        warn!(
+            "found {} stale mount entries from previous daemon run, attempting cleanup",
+            entries.len()
+        );
+        for entry in &entries {
+            if entry.backend != ctxfs_core::Backend::FsKit {
+                continue;
+            }
+            let _ = std::process::Command::new("diskutil")
+                .args(["unmount", "force", &entry.volume_path])
+                .output();
+            info!("cleaned up stale FSKit volume {}", entry.volume_path);
+        }
+        if let Err(e) = state_file.clear() {
+            warn!("failed to clear stale mount state: {e}");
+        }
     }
 
     pub fn cancel(&self) {
@@ -245,6 +342,21 @@ fn pick_free_port() -> Result<u16, String> {
     Ok(port)
 }
 
+/// All the state a backend needs from `prepare_mount` to build a `VfsState`
+/// and start serving. Backend-agnostic.
+struct MountPrep {
+    /// The original parsed source (for mount ID and registry cache).
+    source_spec: ctxfs_core::source::SourceSpec,
+    /// A GitHub-shaped source (registries resolved to owner/repo/ref).
+    github_source: ctxfs_core::source::SourceSpec,
+    /// Provider that fetches blobs and directories.
+    provider: std::sync::Arc<ctxfs_provider_git::GitHubProvider>,
+    /// Parsed snapshot manifest.
+    snapshot: ctxfs_manifest::Snapshot,
+    /// Optional subpath to re-root the mount at.
+    subpath: Option<String>,
+}
+
 impl DaemonServer {
     /// Build the appropriate registry resolver for a non-GitHub source.
     fn make_resolver(source: &SourceSpec) -> Result<Box<dyn RegistryResolver>, String> {
@@ -256,18 +368,15 @@ impl DaemonServer {
         }
     }
 
-    /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
-    /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
-    /// terminal instead of the daemon's log.
+    /// Resolve `source_str` to GitHub coordinates, fetch the snapshot, and
+    /// return all the state backends need.
     #[allow(clippy::too_many_lines)]
-    fn do_mount(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+    fn prepare_mount(&self, source_str: &str) -> Result<MountPrep, String> {
         let mut source =
             SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
 
         let is_latest = source.version == "latest";
 
-        // ── Resolution cache check ──────────────────────────────────────────
-        // For registry sources, see if we already have cached GitHub coordinates.
         let cached_resolution = if source.provider_type == ProviderType::GitHub {
             None
         } else {
@@ -275,7 +384,6 @@ impl DaemonServer {
             guard.get(source_str).cloned()
         };
 
-        // ── Resolve to GitHub coordinates ───────────────────────────────────
         let (owner, repo, git_ref, subpath) = if source.provider_type == ProviderType::GitHub {
             let (o, r) = source
                 .name
@@ -288,7 +396,6 @@ impl DaemonServer {
                 source.subpath.clone(),
             )
         } else if let Some(resolved) = cached_resolution {
-            // Cache hit — skip registry resolution entirely.
             info!("resolution cache hit for {source_str}");
             let sp = source.subpath.clone().or(resolved.subpath.clone());
             (
@@ -298,10 +405,8 @@ impl DaemonServer {
                 sp,
             )
         } else {
-            // Cache miss — resolve from the registry.
             let resolver = Self::make_resolver(&source)?;
 
-            // Step 1: Resolve "latest" to an exact version.
             if is_latest {
                 source.version = self
                     .rt_handle
@@ -309,7 +414,6 @@ impl DaemonServer {
                     .map_err(|e| format!("failed to resolve latest: {e}"))?;
             }
 
-            // Step 2: Resolve to GitHub coordinates.
             let src = self
                 .rt_handle
                 .block_on(resolver.resolve(&source.name, &source.version))
@@ -317,7 +421,6 @@ impl DaemonServer {
 
             let sp = source.subpath.clone().or(src.subpath.clone());
 
-            // Cache the resolution for future mounts.
             {
                 let mut guard = self.resolution_cache.lock().unwrap();
                 if let Err(e) = guard.put(source_str.to_string(), src.clone(), is_latest) {
@@ -328,7 +431,6 @@ impl DaemonServer {
             (src.owner, src.repo, src.git_ref, sp)
         };
 
-        // Build a GitHub-shaped SourceSpec for the provider.
         let github_source = SourceSpec {
             provider_type: ProviderType::GitHub,
             name: format!("{owner}/{repo}"),
@@ -351,27 +453,139 @@ impl DaemonServer {
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
             .map_err(|e| format!("failed to parse snapshot: {e}"))?;
 
+        Ok(MountPrep {
+            source_spec: source,
+            github_source,
+            provider,
+            snapshot,
+            subpath,
+        })
+    }
+
+    /// Dispatch a mount request to the appropriate backend implementation.
+    fn do_mount(
+        &self,
+        source_str: &str,
+        mount_point: &str,
+        backend: Backend,
+    ) -> Result<MountInfo, String> {
+        match backend {
+            Backend::Nfs => self.do_mount_nfs(source_str, mount_point),
+            Backend::FsKit => self.do_mount_fskit(source_str, mount_point),
+        }
+    }
+
+    /// Start an FSKit mount. Unlike NFS, the kernel mount happens inside
+    /// `fskit_rs::mount` (via the FSKit host app) — the CLI does not need
+    /// to run `mount_nfs`. `mount_point` is the user's *logical* path
+    /// (a symlink managed by the CLI); the real volume lives under
+    /// `/Volumes/ctxfs/<slug>`.
+    fn do_mount_fskit(
+        &self,
+        source_str: &str,
+        mount_point: &str,
+    ) -> Result<MountInfo, String> {
+        let bundle_id = self
+            .config
+            .fskit_bundle_id
+            .clone()
+            .ok_or_else(|| "CTXFS_FSKIT_BUNDLE_ID not set — cannot start FSKit mount".to_string())?;
+
+        let prep = self.prepare_mount(source_str)?;
+
+        let fskit_handle = self
+            .rt_handle
+            .block_on(crate::fskit_mount::start_fskit_mount(
+                &prep.source_spec,
+                prep.provider,
+                self.cache.clone(),
+                prep.snapshot.clone(),
+                prep.subpath,
+                &bundle_id,
+            ))
+            .map_err(|e| format!("fskit mount failed: {e}"))?;
+
+        let id = prep.source_spec.id();
+        let commit_sha = prep.snapshot.commit_sha.clone();
+        let volume_path_str = fskit_handle.volume_path().to_string_lossy().to_string();
+
+        let symlink_paths = if mount_point == volume_path_str {
+            vec![]
+        } else {
+            vec![mount_point.to_string()]
+        };
+
+        let info = MountInfo {
+            id: id.clone(),
+            source: source_str.to_string(),
+            mount_point: mount_point.to_string(),
+            commit_sha,
+            status: MountStatus::Ready,
+            mounted_at: chrono::Utc::now().to_rfc3339(),
+            nfs_port: None,
+            backend: Backend::FsKit,
+            volume_path: Some(volume_path_str.clone()),
+            symlink_paths: symlink_paths.clone(),
+        };
+
+        // Persist to mounts.json for crash recovery.
+        let state_file = crate::mount_state::MountStateFile::new(
+            self.config
+                .pid_file
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/tmp")),
+        );
+        let entry = crate::mount_state::MountStateEntry {
+            source: source_str.to_string(),
+            volume_path: volume_path_str,
+            symlink_paths,
+            backend: Backend::FsKit,
+            tcp_port: None,
+            auth_token: None,
+        };
+        if let Err(e) = state_file.add(entry) {
+            warn!("failed to persist mount state: {e}");
+        }
+
+        let handle = MountHandle {
+            info: info.clone(),
+            backend: Backend::FsKit,
+            _nfs: None,
+            _fskit: Some(fskit_handle),
+        };
+
+        self.rt_handle.block_on(async {
+            let _ = self.mounts.write().await.insert(id, handle);
+        });
+
+        Ok(info)
+    }
+
+    /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
+    /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
+    /// terminal instead of the daemon's log.
+    fn do_mount_nfs(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+        let prep = self.prepare_mount(source_str)?;
+
         std::fs::create_dir_all(mount_point)
             .map_err(|e| format!("failed to create mount point: {e}"))?;
 
-        let id = source.id();
-        let commit_sha = snapshot.commit_sha.clone();
+        let id = prep.source_spec.id();
+        let commit_sha = prep.snapshot.commit_sha.clone();
 
-        // Pick a loopback port and spawn the NFS server in the daemon's runtime.
         let port = pick_free_port()?;
         let addr = format!("127.0.0.1:{port}");
 
-        // Build the protocol-agnostic VFS, then wrap it in the NFS adapter.
         let vfs = self
             .rt_handle
             .block_on(ctxfs_vfs::VfsState::new(
-                provider,
+                prep.provider,
                 self.cache.clone(),
-                snapshot,
-                subpath,
+                prep.snapshot,
+                prep.subpath,
             ))
             .map_err(|e| format!("failed to build VFS: {e}"))?;
-        let fs = CtxfsNfs::new(Arc::new(vfs), github_source);
+        let fs = CtxfsNfs::new(Arc::new(vfs), prep.github_source);
         let nfs_handle = self
             .rt_handle
             .block_on(fs.spawn(&addr))
@@ -390,14 +604,16 @@ impl DaemonServer {
             status: MountStatus::Ready,
             mounted_at: chrono::Utc::now().to_rfc3339(),
             nfs_port: Some(port),
-            backend: ctxfs_core::backend::Backend::Nfs,
+            backend: Backend::Nfs,
             volume_path: None,
             symlink_paths: vec![],
         };
 
         let handle = MountHandle {
             info: info.clone(),
-            _nfs: nfs_handle,
+            backend: Backend::Nfs,
+            _nfs: Some(nfs_handle),
+            _fskit: None,
         };
 
         self.rt_handle.block_on(async {
@@ -414,10 +630,11 @@ impl CtxfsService for DaemonServer {
         _: tarpc::context::Context,
         source: String,
         mount_point: String,
+        backend: Backend,
     ) -> Result<MountInfo, String> {
-        info!("mount request: {source} -> {mount_point}");
+        info!("mount request: {source} -> {mount_point} (backend={backend})");
         let server = self.clone();
-        tokio::task::spawn_blocking(move || server.do_mount(&source, &mount_point))
+        tokio::task::spawn_blocking(move || server.do_mount(&source, &mount_point, backend))
             .await
             .map_err(|e| format!("mount task panicked: {e}"))?
     }
@@ -428,16 +645,44 @@ impl CtxfsService for DaemonServer {
 
         let key = mounts
             .iter()
-            .find(|(_, h)| h.info.mount_point == target || h.info.id == target)
+            .find(|(_, h)| {
+                h.info.mount_point == target
+                    || h.info.id == target
+                    || h.info.volume_path.as_deref() == Some(&target)
+            })
             .map(|(k, _)| k.clone());
 
         match key {
             Some(k) => {
                 if let Some(handle) = mounts.remove(&k) {
-                    // Dropping the handle stops the NFS server task; the CLI
-                    // has already run the kernel `umount` before calling us.
-                    drop(handle);
-                    info!("stopped NFS server for {target}");
+                    let volume_path = handle.info.volume_path.clone();
+
+                    // FSKit: explicit async shutdown (can't await in Drop).
+                    // The `_fskit`/`_nfs` prefix marks these as "lifetime-only"
+                    // at construction; here we deliberately consume them.
+                    #[allow(clippy::used_underscore_binding)]
+                    let fskit_opt = handle._fskit;
+                    #[allow(clippy::used_underscore_binding)]
+                    let nfs_opt = handle._nfs;
+                    if let Some(fskit) = fskit_opt {
+                        fskit.shutdown().await;
+                    }
+                    drop(nfs_opt);
+
+                    // Clean up mounts.json entry for FSKit mounts.
+                    if let Some(vp) = volume_path.as_deref() {
+                        let state_file = crate::mount_state::MountStateFile::new(
+                            self.config
+                                .pid_file
+                                .parent()
+                                .unwrap_or_else(|| std::path::Path::new("/tmp")),
+                        );
+                        if let Err(e) = state_file.remove_volume(vp) {
+                            warn!("failed to remove mount state entry: {e}");
+                        }
+                    }
+
+                    info!("stopped mount for {target}");
                     Ok(())
                 } else {
                     Err(format!("mount not found: {target}"))

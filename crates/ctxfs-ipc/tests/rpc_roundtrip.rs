@@ -23,6 +23,7 @@ impl CtxfsService for MockServer {
         _: tarpc::context::Context,
         source: String,
         mount_point: String,
+        _backend: ctxfs_core::Backend,
     ) -> Result<MountInfo, String> {
         let info = MountInfo {
             id: format!("mount_{}", self.mounts.read().await.len()),
@@ -151,6 +152,7 @@ async fn mount_list_unmount_lifecycle() {
             tarpc::context::current(),
             "github:owner/repo@main".into(),
             "/tmp/mnt".into(),
+            ctxfs_core::Backend::Nfs,
         )
         .await
         .unwrap()
@@ -257,6 +259,7 @@ async fn multiple_mounts() {
             tarpc::context::current(),
             "github:a/b@main".into(),
             "/mnt/1".into(),
+            ctxfs_core::Backend::Nfs,
         )
         .await
         .unwrap()
@@ -267,6 +270,7 @@ async fn multiple_mounts() {
             tarpc::context::current(),
             "github:c/d@main".into(),
             "/mnt/2".into(),
+            ctxfs_core::Backend::Nfs,
         )
         .await
         .unwrap()
@@ -309,6 +313,7 @@ async fn concurrent_clients() {
                     tarpc::context::current(),
                     format!("github:owner/repo{i}@main"),
                     format!("/mnt/{i}"),
+                    ctxfs_core::Backend::Nfs,
                 )
                 .await
                 .unwrap()
