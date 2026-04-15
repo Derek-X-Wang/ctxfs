@@ -239,16 +239,35 @@ The `fskit-rs` crate on the Rust side handles serialization/deserialization and 
 
 ### Bridge Security
 
-The TCP listener on localhost is authenticated with a **per-mount shared secret**. On mount, the daemon generates a random 256-bit token and passes it to the appex via the FSKit mount options. The appex includes this token in every TCP connection handshake. The daemon rejects connections with invalid or missing tokens. This prevents other local processes from reading mounted source code through the bridge.
+The TCP listener on localhost is authenticated with a **per-mount shared secret**. On mount, the daemon generates a random 256-bit token and passes it to the appex via `FSTaskOptions`. The appex stores the token in its `Socket` singleton and sends it as the first frame on every TCP connection (including automatic reconnects). The Rust side enforces the handshake in `fskit-rs`'s `handle_stream` socket layer, rejecting unauthenticated connections with `posix_error = EACCES` before routing any VFS request.
+
+**Enforcement point**: `fskit-rs/src/socket.rs` `handle_stream` — NOT the `Filesystem` trait. `Filesystem` is a trait, not a struct, so the check cannot be attached to it as a method. The listener validates the handshake before dispatching any frame to user code.
+
+**Token implementation**: already exists at `crates/ctxfs-fskit/src/auth.rs` — `AuthToken` with `generate()` (rand 32 bytes), `to_hex()`/`from_hex()`, and constant-time `validate()`. Phase 1.5 wires this through the listener and the Swift client; no new crypto code is written.
+
+**Protocol wire format**: `AuthenticateRequest { token: bytes }` as a new variant in `Pb_Request.content`. Token is raw 32 bytes on the wire; hex encoding is only for human-readable surfaces (log lines, `mounts.json` if persisted). `Pb_Response` already has `posix_error` — there is no string `error` field, so failures return `EACCES` and close the connection.
+
+**Threat model — explicit about what this does and does not cover:**
+
+| Attacker | Mitigated? |
+|---|---|
+| Other user on shared Mac, same machine | ✅ Yes — they cannot read the token from another user's `FSTaskOptions` |
+| Sandboxed process without process-inspection entitlements | ✅ Yes |
+| Unprivileged same-user process with `ps`/proc introspection | ⚠️ Partial — `FSTaskOptions` is documented as "equivalent to argv" and may leak via `ps`, log redactions, or crash reports |
+| Root / same-user malware with debugger or process memory access | ❌ No — they can read the token from daemon memory or intercept `FSTaskOptions` |
+| Network attacker | ✅ Yes (listener binds `127.0.0.1` only; no IPv6 dual-stack) |
+
+**Phase 1.5 explicitly does not claim resistance to same-user malware.** Defense against same-user malware requires Keychain-backed token exchange or XPC message passing, both out of scope.
 
 ### Bridge Lifecycle
 
 **Mount handshake:**
 1. Daemon starts fskit-rs TCP listener on a random loopback port
-2. Daemon generates a per-mount auth token
-3. Daemon signals fskitd to mount the volume, passing `(tcp_port, auth_token)` via FSKit mount options
-4. Appex connects to `127.0.0.1:<tcp_port>`, sends the auth token in the handshake frame
-5. Daemon validates the token, begins serving VFS calls
+2. Daemon generates a per-mount auth token (`AuthToken::generate()`)
+3. Daemon signals fskitd to mount the volume, passing `(tcp_port, auth_token)` via `FSTaskOptions`
+4. Appex connects to `127.0.0.1:<tcp_port>`, sends `AuthenticateRequest { token }` as the first frame
+5. Listener validates via `AuthToken::validate()`, begins serving VFS calls
+6. **Every reconnect repeats steps 4-5**: `Socket.getChannel()` in Swift performs the handshake synchronously before returning the channel to the caller
 
 **Finder eject / external unmount:**
 1. User clicks "Eject" in Finder → FSKit sends unmount to appex
@@ -257,8 +276,8 @@ The TCP listener on localhost is authenticated with a **per-mount shared secret*
 4. Daemon updates its mount table atomically
 
 **Appex crash / daemon restart:**
-- If the appex crashes, fskitd restarts it. The appex reconnects to the daemon's TCP listener (same port, same token).
-- If the daemon restarts, the TCP listener is gone. The appex's reads will fail with connection errors. FSKit surfaces these as I/O errors to userland. The stale volume must be unmounted and re-mounted. Startup cleanup handles dangling symlinks.
+- If the appex crashes, fskitd restarts it. The appex reconnects and re-authenticates with the same token (stored in its `Socket` from the original mount options).
+- **If the daemon restarts, all FSKit mounts must be remounted.** Current `daemon.rs` startup force-cleans stale FSKit mounts (`daemon.rs:133,284`) and does not persist `auth_token` across restarts (`daemon.rs:544` always writes `None`). The spec previously claimed "re-handshake via mounts.json" — that was wrong, and the daemon behavior is the correct one: stale tokens are a security smell, remount is the clean answer.
 - The appex implements exponential backoff on TCP reconnection (up to 5 retries, then gives up and lets FSKit report errors).
 
 ---
@@ -614,14 +633,29 @@ Shipped. Validated end-to-end on macOS 26.4 — see `docs/poc/fskit-phase1-smoke
 
 ### Phase 1.5: Bridge Security (auth token handshake)
 
-Close the TCP trust gap before any broader distribution. Required before Phase 2 signing/ship, since the signed release will be the thing malware can attack.
+Close the TCP trust gap before any broader distribution. Required before Phase 2 signing/ship, since the signed release is the thing attackers will target.
 
-- Daemon generates a 32-byte random token per mount, passes it to the appex via `FSTaskOptions`
-- `FilesystemAdapter` rejects any bridge RPC whose first frame doesn't match the token
-- Token rotates on daemon restart (mounts re-handshake via `mounts.json` recovery path)
-- Threat model doc: what this closes (local-process impersonation of appex), what it doesn't (root can still read the token)
+**Scope correction after Codex review:** `AuthToken` is already implemented at `crates/ctxfs-fskit/src/auth.rs` (generate/hex/validate, 6 passing tests). Phase 1.5 does not write new crypto; it threads the existing token through the listener and Swift client.
 
-Pure Swift + Rust work — no distribution/signing dependency.
+**Canonical decisions:**
+
+1. **Vendor FSKitBridge first.** `mv /Users/derekxwang/Development/incubator/ContextFS/FSKitBridge → ctxfs/swift/CtxfsFS/`. Bundle IDs are already `ai.ctxfs.fskitbridge[.fskitext]` in the sibling xcodeproj — no rename needed. Fix xcodeproj path refs after the move.
+2. **Fork fskit-rs on day 1.** Vendor as `crates/fskit-rs/`, patch the workspace dep. Upstream PR in parallel; do not gate Phase 1.5 on upstream review cadence.
+3. **Canonicalize `protocol.proto`.** Today there are two copies (one in FSKitBridge, one in fskit-rs). Pick `crates/fskit-rs/src/protocol.proto` as the single source, symlink or build-generate the Swift copy. `authenticate` is the first proto change that benefits from this.
+4. **Enforce auth in `fskit-rs`'s socket layer** (`handle_stream` in `socket.rs`), not the `Filesystem` trait. See Bridge Security section.
+5. **Swift `Socket.getChannel()` performs handshake synchronously before returning.** Every new TCP channel (initial mount or reconnect) goes through authenticate as its first frame. Token stored in `Socket` so reconnect has what it needs.
+6. **Daemon restart = remount required.** Matches current `daemon.rs:133,284` cleanup behavior. Previous spec claim of "re-handshake via mounts.json" was wrong and is deleted.
+7. **Threat model is explicit about same-user malware**: Phase 1.5 does NOT protect against it. See Bridge Security section table.
+
+Implementation sketch (full plan written next):
+
+- Daemon: plumb `AuthToken` from `MountHandle` through `fskit_rs::Filesystem::mount_with_auth()` (new fork-side API)
+- fskit-rs fork: add auth enforcement in `handle_stream`, emit `posix_error = EACCES` on mismatch
+- protocol.proto: add `AuthenticateRequest { bytes token = 1 }` as a `Pb_Request.content` variant
+- Swift: `Socket.initialize(host:port:token:)`, `getChannel()` handshake on every channel, `TaskOptions` parses token option
+- Integration test: `crates/ctxfs-fskit/tests/tcp_roundtrip.rs` — mock client, valid + invalid + missing token cases
+
+Pure Swift + Rust work — no distribution/signing dependency. No new Apple Developer infrastructure needed.
 
 ### Phase 2: Distribution + Finder Polish
 
@@ -629,8 +663,9 @@ Split into two sub-tracks that can progress in parallel once Phase 1.5 lands.
 
 **2a. Distribution pipeline (one-time setup, then boring forever)**
 
-- Vendor FSKitBridge into `swift/CtxfsFS/`, rename targets, switch bundle IDs to `ai.ctxfs.fskitbridge[.fskitext]`
-- Apple Developer portal: register App ID + FSKit capability for both bundle IDs
+Note: Vendoring move into `swift/CtxfsFS/` and bundle-ID rename happen in Phase 1.5 (both are pre-reqs for the auth token Swift changes). Phase 2a is strictly the distribution pipeline.
+
+- Apple Developer portal: register App ID + FSKit capability for `ai.ctxfs.fskitbridge` + `.fskitext`
 - Developer ID Application signing cert + App Store Connect API key in GitHub Actions secrets
 - Release workflow on `macos-14`: `xcodebuild archive` → `-exportArchive` → `notarytool submit --wait` → `stapler staple`
 - Homebrew tap (e.g. `derekxwang/tap`): `ctxfs` formula (CLI) + `ctxfs` cask (CtxfsFS.app)
