@@ -1,7 +1,8 @@
 # FSKit Backend for macOS — Design Spec
 
-**Date**: 2026-04-11
-**Status**: Phase 0 ✅ validated 2026-04-13. Phase 1 cleared to start.
+**Date**: 2026-04-11 (phases revised 2026-04-14)
+**Status**: Phase 0 ✅ validated 2026-04-13. Phase 1 ✅ shipped 2026-04-14. Phase 1.5 next.
+**Reserved bundle IDs**: `ai.ctxfs.fskitbridge` (host app), `ai.ctxfs.fskitbridge.fskitext` (appex).
 **Scope**: Add an FSKit-based filesystem backend for macOS 26+, eliminating the need for sudo and Full Disk Access on modern Macs. NFS remains the cross-platform fallback.
 
 ## Phase 0 Evidence (2026-04-13)
@@ -596,29 +597,57 @@ The work is split into three phases to de-risk the FSKit dependency before inves
 
 **Gate**: If this doesn't work, or latency is unacceptable (>10x NFS), revisit the bridge strategy (direct FFI) or defer FSKit until the ecosystem matures. Do not proceed to Phase 1.
 
-### Phase 1: Core Backend
+### Phase 1: Core Backend ✅ (2026-04-14)
 
-Ship the FSKit backend with minimal CLI surface:
+Shipped. Validated end-to-end on macOS 26.4 — see `docs/poc/fskit-phase1-smoke-test.md`.
 
-- `ctxfs-vfs` extraction from `ctxfs-nfs`
-- `ctxfs-fskit` crate implementing `fskit_rs::Filesystem`
-- Vendored + customized FSKitBridge appex in `swift/CtxfsFS/`
-- Daemon backend dispatch (`do_mount` with `Backend::FsKit` path)
-- Bridge security (per-mount auth token)
-- `--backend nfs|fskit` flag, `CTXFS_BACKEND` env, auto-detection
-- Symlink management (creation, absolute paths, shared volumes, safe removal)
-- Mount state persistence (`mounts.json` with atomic writes)
-- `ctxfs setup install-fskit` and `setup check` FSKit status
-- `ctxfs setup install` FSKit prompt on macOS 26+
+- ✅ `ctxfs-vfs` extraction from `ctxfs-nfs`
+- ✅ `ctxfs-fskit` crate implementing `fskit_rs::Filesystem`
+- ✅ Daemon backend dispatch (`do_mount` with `Backend::FsKit` path)
+- ✅ `--backend nfs|fskit` flag, `CTXFS_BACKEND` env, auto-detection
+- ✅ Symlink management (creation, absolute paths, shared volumes, safe removal)
+- ✅ Mount state persistence (`mounts.json` with atomic writes)
+- ✅ `ctxfs setup install-fskit` and `setup check` FSKit status
+- ✅ `ctxfs setup install` FSKit prompt on macOS 26+
+- ⏸ Vendored + customized FSKitBridge appex in `swift/CtxfsFS/` — **deferred to Phase 2** (Phase 1 used sibling FSKitBridge install; user provides `CTXFS_FSKIT_BUNDLE_ID`)
+- ⏸ Bridge security (per-mount auth token) — **deferred to Phase 1.5** (requires Swift-side changes)
 
-### Phase 2: Polish (after Phase 1 is proven reliable)
+### Phase 1.5: Bridge Security (auth token handshake)
 
-- Finder integration: volume display name, custom icon, read-only badge
-- Finder eject → daemon unmount notification path
-- `ctxfs setup default-backend` persistent preference
+Close the TCP trust gap before any broader distribution. Required before Phase 2 signing/ship, since the signed release will be the thing malware can attack.
+
+- Daemon generates a 32-byte random token per mount, passes it to the appex via `FSTaskOptions`
+- `FilesystemAdapter` rejects any bridge RPC whose first frame doesn't match the token
+- Token rotates on daemon restart (mounts re-handshake via `mounts.json` recovery path)
+- Threat model doc: what this closes (local-process impersonation of appex), what it doesn't (root can still read the token)
+
+Pure Swift + Rust work — no distribution/signing dependency.
+
+### Phase 2: Distribution + Finder Polish
+
+Split into two sub-tracks that can progress in parallel once Phase 1.5 lands.
+
+**2a. Distribution pipeline (one-time setup, then boring forever)**
+
+- Vendor FSKitBridge into `swift/CtxfsFS/`, rename targets, switch bundle IDs to `ai.ctxfs.fskitbridge[.fskitext]`
+- Apple Developer portal: register App ID + FSKit capability for both bundle IDs
+- Developer ID Application signing cert + App Store Connect API key in GitHub Actions secrets
+- Release workflow on `macos-14`: `xcodebuild archive` → `-exportArchive` → `notarytool submit --wait` → `stapler staple`
+- Homebrew tap (e.g. `derekxwang/tap`): `ctxfs` formula (CLI) + `ctxfs` cask (CtxfsFS.app)
+- `ctxfs setup install-fskit` downloads the cask if not present
 - `ctxfs setup uninstall-fskit`
+
+**2b. Finder integration (UX polish)**
+
+- Volume display name: `{source-spec} (ctxfs)` via `FSItemAttributes`
+- Custom volume icon: `VolumeIcon.icns` in the appex bundle
+- Read-only badge: `FSVolumeFlags.readOnly`
+- Finder eject → daemon shutdown-RPC → symlink + state cleanup
+- `ctxfs setup default-backend` persistent preference
 - Swift unit tests for the appex
-- Performance benchmarking and optimization
+- Performance benchmarking on large dependency trees
+
+**Release gating**: 2a ships before 2b. A user installing via `brew install --cask ctxfs` should get a working mount experience before we polish how it looks in Finder.
 
 ---
 
