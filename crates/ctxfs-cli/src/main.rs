@@ -430,7 +430,27 @@ async fn handle_mount(
         let source = &sources[0];
         let mp_str = mp.to_str().context("invalid mount point path")?.to_string();
 
-        std::fs::create_dir_all(&mp).context("failed to create mount point directory")?;
+        // NFS mounts AT the -p path, so the path itself must be a directory.
+        // FSKit mounts at /Volumes/ctxfs/<slug> and we later create a symlink
+        // AT the -p path, so the path must NOT pre-exist. For FSKit we only
+        // need to ensure the parent directory exists.
+        if selected_backend == Backend::FsKit {
+            if let Some(parent) = mp.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .context("failed to create mount point parent directory")?;
+                }
+            }
+            // If -p path already exists, try to resolve the ambiguity:
+            // - Stale ctxfs symlink (into /Volumes/ctxfs/) → remove it
+            // - Empty directory → remove it so we can create the symlink
+            // - Anything else → error with a clear message
+            if mp.exists() || mp.is_symlink() {
+                handle_existing_fskit_mount_point(&mp)?;
+            }
+        } else {
+            std::fs::create_dir_all(&mp).context("failed to create mount point directory")?;
+        }
 
         let info = client
             .mount(
@@ -559,6 +579,62 @@ fn ensure_volumes_ctxfs_exists() -> Result<()> {
     Ok(())
 }
 
+/// Resolve a pre-existing `-p` path when doing an FSKit mount.
+///
+/// The CLI needs to create a symlink AT the `-p` path, but if the path
+/// already exists we have to decide what to do:
+/// - Ctxfs symlink into `/Volumes/ctxfs/`: likely stale from a previous
+///   mount — remove it so we can recreate.
+/// - Empty directory: safe to remove (likely left over from an NFS mount
+///   or from `std::fs::create_dir_all` in a previous attempt).
+/// - Non-empty directory or other file: bail with a clear message so the
+///   user can decide.
+fn handle_existing_fskit_mount_point(path: &std::path::Path) -> Result<()> {
+    // Symlinks first — symlink_metadata() doesn't follow.
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?;
+
+    if meta.is_symlink() {
+        if symlink::is_ctxfs_symlink(path) {
+            std::fs::remove_file(path).with_context(|| {
+                format!("failed to remove stale ctxfs symlink {}", path.display())
+            })?;
+            return Ok(());
+        }
+        anyhow::bail!(
+            "{} is a symlink that does not point into /Volumes/ctxfs/. \
+             Remove it manually if you want to reuse this path.",
+            path.display()
+        );
+    }
+
+    if meta.is_dir() {
+        // Only remove the directory if it's empty — never silently delete
+        // user data.
+        let is_empty = std::fs::read_dir(path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+            .next()
+            .is_none();
+        if is_empty {
+            std::fs::remove_dir(path).with_context(|| {
+                format!("failed to remove empty directory {}", path.display())
+            })?;
+            return Ok(());
+        }
+        anyhow::bail!(
+            "{} is a non-empty directory. Remove it manually if you want \
+             to use this path for an FSKit mount.",
+            path.display()
+        );
+    }
+
+    anyhow::bail!(
+        "{} exists and is not a directory or ctxfs symlink. \
+         Remove it manually.",
+        path.display()
+    )
+}
+
 fn print_server_only_info(info: &ctxfs_ipc::service::MountInfo) {
     println!("NFS server ready:");
     println!("  Source:   {}", info.source);
@@ -610,21 +686,26 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
         target.clone()
     };
 
-    // Step 1: unmount the kernel mount first (may prompt for sudo).
-    // For FSKit mounts there is no kernel NFS mount to tear down, but
-    // we attempt it anyway and swallow the failure as a warning.
-    if let Err(e) = run_umount(&daemon_target) {
-        eprintln!("warning: kernel umount failed: {e}");
+    // FSKit mounts live under /Volumes/ctxfs/ — the daemon handles their
+    // unmount internally by dropping the fskit-rs Session. Running the
+    // kernel `umount` here would either no-op (if the session already
+    // unmounted) or race with fskit-rs's own unmount call.
+    let is_fskit = daemon_target.starts_with("/Volumes/ctxfs/");
+    if !is_fskit {
+        // NFS: CLI owns the kernel mount lifecycle.
+        if let Err(e) = run_umount(&daemon_target) {
+            eprintln!("warning: kernel umount failed: {e}");
+        }
     }
 
-    // Step 2: ask the daemon to stop serving this mount.
+    // Ask the daemon to stop serving this mount.
     let client = connect(config).await?;
     client
         .unmount(tarpc::context::current(), daemon_target)
         .await?
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    // Step 3: remove the ctxfs symlink now that the daemon has acknowledged.
+    // Remove the ctxfs symlink now that the daemon has acknowledged.
     if is_ctxfs_link {
         let _ = symlink::safe_remove_symlink(target_path);
     }
