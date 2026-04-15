@@ -543,13 +543,26 @@ fn ensure_volumes_ctxfs_exists() -> Result<()> {
 
     println!("/Volumes/ctxfs/ does not exist yet — creating it (requires sudo)...");
 
-    let username = std::env::var("USER").unwrap_or_else(|_| whoami::username());
+    // whoami reads from the OS directly, not the USER env var, so it can't
+    // be poisoned by a malicious caller setting USER='; rm -rf /; #'.
+    let username = whoami::username();
 
-    // Single sudo invocation so the user sees one prompt.
-    let shell_cmd =
-        format!("mkdir -p /Volumes/ctxfs && chown {username}:staff /Volumes/ctxfs");
+    // Defense in depth: reject any username that isn't safe to pass to chown.
+    // Real POSIX usernames only contain these characters anyway.
+    if username.is_empty()
+        || !username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        anyhow::bail!("refusing to chown /Volumes/ctxfs to unsafe username {username:?}");
+    }
+
+    // Pass the username as a positional arg to sh so `$1` expands inside a
+    // double-quoted context — sh does not re-split the value, so even a
+    // bypass of our validation could not inject commands.
+    let script = r#"mkdir -p /Volumes/ctxfs && chown "$1":staff /Volumes/ctxfs"#;
     let status = std::process::Command::new("sudo")
-        .args(["sh", "-c", &shell_cmd])
+        .args(["sh", "-c", script, "--", &username])
         .status()
         .context("failed to invoke sudo for /Volumes/ctxfs setup")?;
 

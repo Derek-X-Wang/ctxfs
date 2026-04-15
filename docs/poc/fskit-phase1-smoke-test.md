@@ -42,7 +42,7 @@ Linked from: /Users/derekxwang/Development/incubator/ContextFS/ctxfs/test-mnt
 ```
 
 Key attributes:
-- **`fskit`** as filesystem type (not `nfs`)
+- **`fskitbridge`** as filesystem type (not `nfs`), with `fskit` listed as a mount option
 - **`mounted by derekxwang`** (not root — no sudo per mount)
 - No Full Disk Access requirement
 
