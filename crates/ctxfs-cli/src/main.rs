@@ -415,6 +415,14 @@ async fn handle_mount(
         anyhow::bail!("either --mount-point or --mount-dir is required");
     }
 
+    // For FSKit mounts, ensure /Volumes/ctxfs/ exists before asking the daemon.
+    // The daemon errors out cleanly if it's missing, but we can do better UX
+    // by creating it with a single sudo prompt instead of sending the user to
+    // `ctxfs setup install-fskit`.
+    if selected_backend == Backend::FsKit {
+        ensure_volumes_ctxfs_exists()?;
+    }
+
     let client = connect(config).await?;
 
     if let Some(mp) = mount_point {
@@ -505,6 +513,49 @@ async fn handle_mount(
         }
     }
 
+    Ok(())
+}
+
+/// Ensure `/Volumes/ctxfs/` exists and is writable by the current user.
+///
+/// `FSKit` mounts land under `/Volumes/ctxfs/<slug>` and the daemon creates
+/// the per-volume directory itself, but the parent must exist first. Since
+/// `/Volumes/` is root-owned, we prompt for sudo once to create + chown.
+///
+/// If the directory already exists, this is a no-op.
+fn ensure_volumes_ctxfs_exists() -> Result<()> {
+    let parent = std::path::Path::new("/Volumes/ctxfs");
+    if parent.exists() {
+        return Ok(());
+    }
+
+    println!("/Volumes/ctxfs/ does not exist yet — creating it (requires sudo)...");
+
+    let username =
+        std::env::var("USER").unwrap_or_else(|_| whoami::username());
+
+    // Use a single sudo invocation that does both mkdir and chown so the user
+    // only sees one prompt.
+    let shell_cmd = format!(
+        "mkdir -p /Volumes/ctxfs && chown {username}:staff /Volumes/ctxfs"
+    );
+    let status = std::process::Command::new("sudo")
+        .args(["sh", "-c", &shell_cmd])
+        .status()
+        .context("failed to invoke sudo for /Volumes/ctxfs setup")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "sudo failed to create /Volumes/ctxfs (exit status {status}). \
+             Run manually: sudo mkdir -p /Volumes/ctxfs && sudo chown {username}:staff /Volumes/ctxfs"
+        );
+    }
+
+    if !parent.exists() {
+        anyhow::bail!("/Volumes/ctxfs still missing after sudo mkdir — aborting");
+    }
+
+    println!("Created /Volumes/ctxfs/ (owned by {username}:staff)");
     Ok(())
 }
 
