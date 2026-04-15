@@ -698,20 +698,59 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
         }
     }
 
-    // Ask the daemon to stop serving this mount.
+    // Ask the daemon to stop serving this mount. FSKit unmounts may take
+    // longer than tarpc's default 10s deadline because fskit-rs internally
+    // runs `hdiutil detach` which can block when multiple volumes share a
+    // virtual device — use the longer deadline.
     let client = connect(config).await?;
-    client
-        .unmount(tarpc::context::current(), daemon_target)
-        .await?
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let rpc_result = client
+        .unmount(long_context(), daemon_target.clone())
+        .await;
 
-    // Remove the ctxfs symlink now that the daemon has acknowledged.
+    // Remove the ctxfs symlink regardless of RPC outcome — if the daemon
+    // eventually tore down the volume but we gave up waiting, the symlink
+    // is still stale. safe_remove_symlink only removes symlinks into
+    // /Volumes/ctxfs/, so it's a no-op if the user's path was never a
+    // ctxfs symlink in the first place.
     if is_ctxfs_link {
         let _ = symlink::safe_remove_symlink(target_path);
     }
 
-    println!("Unmounted {target}");
-    Ok(())
+    match rpc_result {
+        Ok(Ok(())) => {
+            println!("Unmounted {target}");
+            Ok(())
+        }
+        Ok(Err(e)) => Err(anyhow::anyhow!(e)),
+        Err(e) => {
+            // RPC failed (timeout, connection error, etc.). For FSKit, the
+            // daemon's unmount may have actually succeeded — check whether
+            // the volume is still live before declaring failure.
+            if is_fskit && !volume_still_mounted(&daemon_target) {
+                eprintln!(
+                    "note: unmount RPC timed out but volume is already torn down"
+                );
+                println!("Unmounted {target}");
+                Ok(())
+            } else {
+                Err(anyhow::Error::from(e))
+            }
+        }
+    }
+}
+
+/// Return true if a path is in the kernel mount table. Used to tell whether
+/// an FSKit unmount actually completed when the RPC times out.
+fn volume_still_mounted(path: &str) -> bool {
+    match std::process::Command::new("mount").output() {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout
+                .lines()
+                .any(|line| line.contains(&format!(" on {path} ")))
+        }
+        _ => false, // can't tell; assume it's gone
+    }
 }
 
 // ---------------------------------------------------------------------------
