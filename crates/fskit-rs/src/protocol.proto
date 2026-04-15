@@ -684,6 +684,18 @@ message DeactivateItem {
   uint64 item_id = 1;
 }
 
+// Authentication handshake for the bridge TCP connection.
+//
+// The daemon generates a per-mount 256-bit token and passes it to the appex
+// via FSTaskOptions. The appex MUST send an AuthenticateRequest as the first
+// frame on every new TCP channel (including automatic reconnects). The
+// listener validates the token, then accepts subsequent requests. Mismatch
+// results in posix_error = EACCES and connection close.
+message AuthenticateRequest {
+  // Raw 32-byte (256-bit) shared secret. Constant-time compared server-side.
+  bytes token = 1;
+}
+
 // Request envelope for communication over the local socket.
 message Request {
   // Correlation identifier used to match responses to requests.
@@ -806,6 +818,10 @@ message Request {
     // Methods and properties implemented by volumes that support
     // deactivating items.
     DeactivateItem deactivate_item = 43;
+
+    // Bridge authentication. MUST be the first frame on every new TCP channel.
+    // See AuthenticateRequest documentation for protocol semantics.
+    AuthenticateRequest authenticate = 50;
   }
 }
 

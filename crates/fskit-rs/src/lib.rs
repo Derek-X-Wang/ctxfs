@@ -36,6 +36,11 @@ mod pb {
     include!(concat!(env!("OUT_DIR"), "/pb.rs"));
 }
 
+/// Re-export of all generated protobuf types for use by downstream crates.
+pub mod protocol {
+    pub use super::pb::*;
+}
+
 const FSKIT_ID: &str = "network.debox.fskitbridge.fskitext";
 const DEFAULT_MOUNT_POINT: &str = "/tmp/fskitbridge";
 

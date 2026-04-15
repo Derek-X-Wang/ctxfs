@@ -339,6 +339,12 @@ where
                     Err(Error::Posix(code)) => response::Content::PosixError(code),
                 }
             }
+            // Auth handshake is validated by the socket listener before frames
+            // reach the handler; reaching here means a mis-sequenced frame —
+            // return EACCES. Full implementation in phase-1.5 Task 5.
+            request::Content::Authenticate(_) => {
+                response::Content::PosixError(libc::EACCES)
+            }
         })
     }
 }
