@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-/// The prefix used by ctxfs NFS/FSKit mounts.
-const CTXFS_VOLUMES_PREFIX: &str = "/Volumes/ctxfs/";
+/// The prefix used by ctxfs FSKit mounts under `/Volumes/`.
+pub const CTXFS_VOLUMES_PREFIX: &str = "/Volumes/ctxfs/";
 
 /// Create a symlink at `link_path` pointing to `target_path`.
 ///

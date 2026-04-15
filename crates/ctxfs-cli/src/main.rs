@@ -430,10 +430,8 @@ async fn handle_mount(
         let source = &sources[0];
         let mp_str = mp.to_str().context("invalid mount point path")?.to_string();
 
-        // NFS mounts AT the -p path, so the path itself must be a directory.
-        // FSKit mounts at /Volumes/ctxfs/<slug> and we later create a symlink
-        // AT the -p path, so the path must NOT pre-exist. For FSKit we only
-        // need to ensure the parent directory exists.
+        // NFS mounts AT the -p path, so it must pre-exist as a directory.
+        // FSKit places a symlink at -p, so the path must NOT pre-exist.
         if selected_backend == Backend::FsKit {
             if let Some(parent) = mp.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -441,11 +439,8 @@ async fn handle_mount(
                         .context("failed to create mount point parent directory")?;
                 }
             }
-            // If -p path already exists, try to resolve the ambiguity:
-            // - Stale ctxfs symlink (into /Volumes/ctxfs/) → remove it
-            // - Empty directory → remove it so we can create the symlink
-            // - Anything else → error with a clear message
-            if mp.exists() || mp.is_symlink() {
+            // One stat handles regular files, directories, and dangling symlinks.
+            if std::fs::symlink_metadata(&mp).is_ok() {
                 handle_existing_fskit_mount_point(&mp)?;
             }
         } else {
@@ -538,11 +533,8 @@ async fn handle_mount(
 
 /// Ensure `/Volumes/ctxfs/` exists and is writable by the current user.
 ///
-/// `FSKit` mounts land under `/Volumes/ctxfs/<slug>` and the daemon creates
-/// the per-volume directory itself, but the parent must exist first. Since
-/// `/Volumes/` is root-owned, we prompt for sudo once to create + chown.
-///
-/// If the directory already exists, this is a no-op.
+/// `/Volumes/` is root-owned, so we invoke sudo once to create the directory
+/// and chown it. Subsequent FSKit mounts create per-volume subdirs without sudo.
 fn ensure_volumes_ctxfs_exists() -> Result<()> {
     let parent = std::path::Path::new("/Volumes/ctxfs");
     if parent.exists() {
@@ -551,14 +543,11 @@ fn ensure_volumes_ctxfs_exists() -> Result<()> {
 
     println!("/Volumes/ctxfs/ does not exist yet — creating it (requires sudo)...");
 
-    let username =
-        std::env::var("USER").unwrap_or_else(|_| whoami::username());
+    let username = std::env::var("USER").unwrap_or_else(|_| whoami::username());
 
-    // Use a single sudo invocation that does both mkdir and chown so the user
-    // only sees one prompt.
-    let shell_cmd = format!(
-        "mkdir -p /Volumes/ctxfs && chown {username}:staff /Volumes/ctxfs"
-    );
+    // Single sudo invocation so the user sees one prompt.
+    let shell_cmd =
+        format!("mkdir -p /Volumes/ctxfs && chown {username}:staff /Volumes/ctxfs");
     let status = std::process::Command::new("sudo")
         .args(["sh", "-c", &shell_cmd])
         .status()
@@ -571,68 +560,53 @@ fn ensure_volumes_ctxfs_exists() -> Result<()> {
         );
     }
 
-    if !parent.exists() {
-        anyhow::bail!("/Volumes/ctxfs still missing after sudo mkdir — aborting");
-    }
-
     println!("Created /Volumes/ctxfs/ (owned by {username}:staff)");
     Ok(())
 }
 
 /// Resolve a pre-existing `-p` path when doing an FSKit mount.
 ///
-/// The CLI needs to create a symlink AT the `-p` path, but if the path
-/// already exists we have to decide what to do:
-/// - Ctxfs symlink into `/Volumes/ctxfs/`: likely stale from a previous
-///   mount — remove it so we can recreate.
-/// - Empty directory: safe to remove (likely left over from an NFS mount
-///   or from `std::fs::create_dir_all` in a previous attempt).
-/// - Non-empty directory or other file: bail with a clear message so the
-///   user can decide.
+/// FSKit places a symlink at `-p`, so the path must not pre-exist. Auto-clear
+/// only the two safe cases: stale ctxfs symlinks and empty directories.
+/// Anything else is user data — error with guidance.
 fn handle_existing_fskit_mount_point(path: &std::path::Path) -> Result<()> {
-    // Symlinks first — symlink_metadata() doesn't follow.
     let meta = std::fs::symlink_metadata(path)
         .with_context(|| format!("failed to stat {}", path.display()))?;
 
     if meta.is_symlink() {
-        if symlink::is_ctxfs_symlink(path) {
-            std::fs::remove_file(path).with_context(|| {
-                format!("failed to remove stale ctxfs symlink {}", path.display())
-            })?;
+        // safe_remove_symlink only touches symlinks into /Volumes/ctxfs/.
+        if symlink::safe_remove_symlink(path)
+            .with_context(|| format!("failed to remove symlink {}", path.display()))?
+        {
             return Ok(());
         }
         anyhow::bail!(
-            "{} is a symlink that does not point into /Volumes/ctxfs/. \
+            "{} is a symlink that does not point into {}. \
              Remove it manually if you want to reuse this path.",
-            path.display()
+            path.display(),
+            symlink::CTXFS_VOLUMES_PREFIX
         );
     }
 
     if meta.is_dir() {
-        // Only remove the directory if it's empty — never silently delete
-        // user data.
-        let is_empty = std::fs::read_dir(path)
-            .with_context(|| format!("failed to read {}", path.display()))?
-            .next()
-            .is_none();
-        if is_empty {
-            std::fs::remove_dir(path).with_context(|| {
-                format!("failed to remove empty directory {}", path.display())
-            })?;
-            return Ok(());
+        // Let the kernel tell us if it's non-empty — one syscall, no TOCTOU.
+        match std::fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => anyhow::bail!(
+                "{} is a non-empty directory. Remove it manually if you want \
+                 to use this path for an FSKit mount.",
+                path.display()
+            ),
+            Err(e) => Err(e)
+                .with_context(|| format!("failed to remove {}", path.display())),
         }
+    } else {
         anyhow::bail!(
-            "{} is a non-empty directory. Remove it manually if you want \
-             to use this path for an FSKit mount.",
+            "{} exists and is not a directory or ctxfs symlink. \
+             Remove it manually.",
             path.display()
-        );
+        )
     }
-
-    anyhow::bail!(
-        "{} exists and is not a directory or ctxfs symlink. \
-         Remove it manually.",
-        path.display()
-    )
 }
 
 fn print_server_only_info(info: &ctxfs_ipc::service::MountInfo) {
@@ -686,32 +660,25 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
         target.clone()
     };
 
-    // FSKit mounts live under /Volumes/ctxfs/ — the daemon handles their
-    // unmount internally by dropping the fskit-rs Session. Running the
-    // kernel `umount` here would either no-op (if the session already
-    // unmounted) or race with fskit-rs's own unmount call.
-    let is_fskit = daemon_target.starts_with("/Volumes/ctxfs/");
+    // FSKit's kernel teardown is owned by the daemon (via fskit-rs's Session
+    // drop). Running `umount` here would race with it. NFS is the opposite:
+    // the CLI did the kernel mount, so the CLI must do the kernel umount.
+    let is_fskit = daemon_target.starts_with(symlink::CTXFS_VOLUMES_PREFIX);
     if !is_fskit {
-        // NFS: CLI owns the kernel mount lifecycle.
         if let Err(e) = run_umount(&daemon_target) {
             eprintln!("warning: kernel umount failed: {e}");
         }
     }
 
-    // Ask the daemon to stop serving this mount. FSKit unmounts may take
-    // longer than tarpc's default 10s deadline because fskit-rs internally
-    // runs `hdiutil detach` which can block when multiple volumes share a
-    // virtual device — use the longer deadline.
+    // fskit-rs calls `hdiutil detach` on session drop, which can block >10s
+    // when multiple volumes share a virtual device — use the longer deadline.
     let client = connect(config).await?;
     let rpc_result = client
         .unmount(long_context(), daemon_target.clone())
         .await;
 
-    // Remove the ctxfs symlink regardless of RPC outcome — if the daemon
-    // eventually tore down the volume but we gave up waiting, the symlink
-    // is still stale. safe_remove_symlink only removes symlinks into
-    // /Volumes/ctxfs/, so it's a no-op if the user's path was never a
-    // ctxfs symlink in the first place.
+    // Clean up the symlink even if the RPC timed out — the daemon may have
+    // finished internally after we gave up waiting.
     if is_ctxfs_link {
         let _ = symlink::safe_remove_symlink(target_path);
     }
@@ -723,13 +690,10 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
         }
         Ok(Err(e)) => Err(anyhow::anyhow!(e)),
         Err(e) => {
-            // RPC failed (timeout, connection error, etc.). For FSKit, the
-            // daemon's unmount may have actually succeeded — check whether
-            // the volume is still live before declaring failure.
+            // fskit-rs's hdiutil detach can outlast our RPC deadline; if the
+            // volume is gone, treat the timeout as success.
             if is_fskit && !volume_still_mounted(&daemon_target) {
-                eprintln!(
-                    "note: unmount RPC timed out but volume is already torn down"
-                );
+                eprintln!("note: unmount RPC timed out but volume is already torn down");
                 println!("Unmounted {target}");
                 Ok(())
             } else {
@@ -739,8 +703,7 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
     }
 }
 
-/// Return true if a path is in the kernel mount table. Used to tell whether
-/// an FSKit unmount actually completed when the RPC times out.
+/// Returns true if `path` appears in the kernel mount table.
 fn volume_still_mounted(path: &str) -> bool {
     match std::process::Command::new("mount").output() {
         Ok(out) if out.status.success() => {
