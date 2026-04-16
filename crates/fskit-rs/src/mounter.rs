@@ -39,15 +39,23 @@ impl Mounter {
 
         let device = attach_image(&image)?;
 
-        let args = [
-            "-F",
-            "-t",
-            fs_type,
-            device.as_str(),
-            path!(opts.mount_point),
+        // Build the argument list for `mount`. Extra task_options are forwarded
+        // as `-o key=value` pairs so fskitd passes them to the appex as
+        // FSTaskOptions (equivalent to argv).
+        let mut args: Vec<String> = vec![
+            "-F".into(),
+            "-t".into(),
+            fs_type.into(),
         ];
+        for opt in &opts.task_options {
+            args.push("-o".into());
+            args.push(opt.clone());
+        }
+        args.push(device.clone());
+        args.push(path!(opts.mount_point).to_string());
+
         let mut process = Command::new("mount")
-            .args(args)
+            .args(&args)
             .stderr(Stdio::piped())
             .spawn()?;
         let start = Instant::now();

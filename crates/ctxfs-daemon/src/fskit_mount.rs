@@ -36,6 +36,10 @@ pub enum FsKitMountError {
 }
 
 /// Start an FSKit mount. Returns a handle whose shutdown() unmounts on scope exit.
+///
+/// `token_hex` is the hex-encoded form of `token`; it is forwarded to fskitd as
+/// `FSTaskOptions` so the appex can send it back as the first frame of every bridge
+/// TCP connection for authentication.
 pub async fn start_fskit_mount(
     source: &SourceSpec,
     provider: SharedProvider,
@@ -43,6 +47,8 @@ pub async fn start_fskit_mount(
     snapshot: Snapshot,
     subpath: Option<String>,
     bundle_id: &str,
+    token: &ctxfs_fskit::AuthToken,
+    token_hex: &str,
 ) -> Result<FsKitHandle, FsKitMountError> {
     let parent = PathBuf::from("/Volumes/ctxfs");
     if !parent.exists() {
@@ -65,9 +71,11 @@ pub async fn start_fskit_mount(
         fskit_id: bundle_id.to_string(),
         mount_point: volume_path.clone(),
         force: true,
+        auth_token: Some(token.bytes_vec()),
+        task_options: vec![format!("token={token_hex}")],
     };
     info!(
-        "starting FSKit mount at {} (bundle_id={})",
+        "starting FSKit mount at {} (bundle_id={}, auth=yes)",
         volume_path.display(),
         bundle_id
     );

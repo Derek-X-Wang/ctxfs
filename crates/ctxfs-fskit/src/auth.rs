@@ -43,6 +43,14 @@ impl AuthToken {
         hex::encode(self.bytes)
     }
 
+    /// Clone the raw bytes for passing to the fskit-rs session builder.
+    ///
+    /// Exposes the token as `Vec<u8>` rather than `[u8; 32]` so callers cannot
+    /// accidentally serialize unpadded bytes.
+    pub fn bytes_vec(&self) -> Vec<u8> {
+        self.bytes.to_vec()
+    }
+
     /// Constant-time comparison to validate a candidate byte slice.
     pub fn validate(&self, candidate: &[u8]) -> bool {
         if candidate.len() != 32 {
@@ -100,5 +108,13 @@ mod tests {
     fn from_hex_invalid() {
         let result = AuthToken::from_hex("not_valid_hex!!");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn bytes_vec_matches_raw_bytes() {
+        let token = AuthToken::generate();
+        let vec = token.bytes_vec();
+        assert_eq!(vec.len(), 32, "bytes_vec must return 32 bytes");
+        assert_eq!(vec.as_slice(), &token.bytes, "bytes_vec must equal raw bytes");
     }
 }

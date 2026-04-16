@@ -493,6 +493,9 @@ impl DaemonServer {
 
         let prep = self.prepare_mount(source_str)?;
 
+        let token = ctxfs_fskit::AuthToken::generate();
+        let token_hex = token.to_hex();
+
         let fskit_handle = self
             .rt_handle
             .block_on(crate::fskit_mount::start_fskit_mount(
@@ -502,6 +505,8 @@ impl DaemonServer {
                 prep.snapshot.clone(),
                 prep.subpath,
                 &bundle_id,
+                &token,
+                &token_hex,
             ))
             .map_err(|e| format!("fskit mount failed: {e}"))?;
 
@@ -541,7 +546,7 @@ impl DaemonServer {
             symlink_paths,
             backend: Backend::FsKit,
             tcp_port: None,
-            auth_token: None,
+            auth_token: Some(token_hex.clone()),
         };
         if let Err(e) = state_file.add(entry) {
             warn!("failed to persist mount state: {e}");
@@ -753,5 +758,60 @@ impl CtxfsService for DaemonServer {
 
     async fn ping(self, _: tarpc::context::Context) -> String {
         "pong".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ctxfs_core::Backend;
+
+    /// Verify that the FSKit mount path generates an auth token and stores it as a
+    /// 64-character hex string in the persisted mount state entry.
+    ///
+    /// This test exercises the token-generation and state-construction logic
+    /// without spawning a real TCP listener or calling into fskitd.
+    #[test]
+    fn fskit_mount_state_entry_has_auth_token() {
+        // Simulate the token-generation code executed inside do_mount_fskit.
+        let token = ctxfs_fskit::AuthToken::generate();
+        let token_hex = token.to_hex();
+
+        // A hex-encoded 256-bit (32-byte) token must be exactly 64 characters.
+        assert_eq!(
+            token_hex.len(),
+            64,
+            "auth token hex must be 64 chars (256-bit)"
+        );
+        assert!(
+            token_hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "auth token hex must contain only hex digits"
+        );
+
+        // Confirm that the MountStateEntry can be constructed with Some(token_hex),
+        // mirroring the assignment in do_mount_fskit.
+        let entry = crate::mount_state::MountStateEntry {
+            source: "github:owner/repo@main".to_string(),
+            volume_path: "/Volumes/ctxfs/test".to_string(),
+            symlink_paths: vec![],
+            backend: Backend::FsKit,
+            tcp_port: None,
+            auth_token: Some(token_hex.clone()),
+        };
+
+        assert!(
+            entry.auth_token.is_some(),
+            "FSKit mount entry must have auth_token populated"
+        );
+        let stored = entry.auth_token.unwrap();
+        assert_eq!(stored.len(), 64, "stored token must be 64-char hex");
+        assert_eq!(stored, token_hex, "stored token must match generated token");
+    }
+
+    /// Two sequential FSKit mounts must produce different auth tokens.
+    #[test]
+    fn fskit_mount_tokens_are_unique_per_mount() {
+        let t1 = ctxfs_fskit::AuthToken::generate().to_hex();
+        let t2 = ctxfs_fskit::AuthToken::generate().to_hex();
+        assert_ne!(t1, t2, "consecutive mounts must get distinct auth tokens");
     }
 }

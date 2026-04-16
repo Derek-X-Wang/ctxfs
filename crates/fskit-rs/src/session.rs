@@ -30,7 +30,7 @@ impl Session {
 
         let handler = Handler::new(fs);
 
-        let socket = Socket::start(handler, server_port, None).await?;
+        let socket = Socket::start(handler, server_port, opts.auth_token.clone()).await?;
 
         let mounter = match Mounter::mount(opts, &fs_type) {
             Ok(mount) => mount,

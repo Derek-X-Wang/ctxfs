@@ -217,11 +217,21 @@ pub enum Error {
 ///   (may require `sudo`) or a user-owned path. Default: `/tmp/fskitbridge`.
 /// * `force` — If `true`, preflight **unmounts** anything already mounted at `mount_point`
 ///   before mounting. Default: `true`.
+/// * `auth_token` — Optional 32-byte per-mount shared secret. When set, every TCP
+///   connection must send an `AuthenticateRequest` as its first frame before any VFS
+///   requests are dispatched. If `None`, all connections are accepted (backward-compatible
+///   with upstream behavior).
+/// * `task_options` — Extra strings passed to fskitd as `FSTaskOptions`. The daemon uses
+///   this to forward the auth token hex to the appex (e.g. `"token=<hex>"`).
 #[derive(Debug, Clone)]
 pub struct MountOptions {
     pub fskit_id: String,
     pub mount_point: PathBuf,
     pub force: bool,
+    /// Raw 32-byte auth token; `None` means no auth enforcement (backward-compatible).
+    pub auth_token: Option<Vec<u8>>,
+    /// Extra strings forwarded to the appex as `FSTaskOptions` (equivalent to argv).
+    pub task_options: Vec<String>,
 }
 
 impl Default for MountOptions {
@@ -230,6 +240,8 @@ impl Default for MountOptions {
             fskit_id: FSKIT_ID.to_string(),
             mount_point: PathBuf::from(DEFAULT_MOUNT_POINT),
             force: true,
+            auth_token: None,
+            task_options: Vec::new(),
         }
     }
 }
