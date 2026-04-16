@@ -105,7 +105,7 @@ async fn build_adapter() -> FilesystemAdapter {
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf(), 64 * 1024 * 1024).unwrap());
     let vfs = Arc::new(VfsState::new(provider, cache, snapshot, None).await.unwrap());
-    FilesystemAdapter::new(vfs, "test-vol".into())
+    FilesystemAdapter::new(vfs, "test-vol".into(), "Test Vol".into())
 }
 
 #[tokio::test]

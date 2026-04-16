@@ -3,7 +3,7 @@
 //! Creates a sudoers drop-in at `/etc/sudoers.d/ctxfs` that allows the
 //! current user to run `mount_nfs` and `umount` without a password prompt.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::path::Path;
 
 const SUDOERS_PATH: &str = "/etc/sudoers.d/ctxfs";
@@ -374,6 +374,99 @@ pub fn check_fskit_status() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Default backend configuration
+// ---------------------------------------------------------------------------
+
+/// Persist a default backend choice in `~/.ctxfs/config.toml`.
+///
+/// The function uses a line-by-line strategy to preserve other config
+/// settings and comments:
+///
+/// - If a `backend = "..."` line (or a commented-out `# backend = ...` line)
+///   is present, it is replaced with the canonical `backend = "<value>"` form.
+/// - If no such line exists, the setting is appended to the end.
+/// - If the file does not exist, a minimal file containing only the backend
+///   line is created (including the parent directory).
+pub fn set_default_backend(backend: &str, config_path: &std::path::Path) -> anyhow::Result<()> {
+    if !matches!(backend, "nfs" | "fskit") {
+        anyhow::bail!("invalid backend: {backend:?}. Use 'nfs' or 'fskit'");
+    }
+
+    let new_line = format!("backend = \"{backend}\"");
+
+    if !config_path.exists() {
+        // Create parent directory if needed.
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(config_path, format!("{new_line}\n"))
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        return Ok(());
+    }
+
+    let contents = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+
+    // Regex-free line rewrite: match `backend = "..."` or `# backend = ...`
+    let mut found = false;
+    let mut output_lines: Vec<String> = contents
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            // Match an active `backend = ...` line (possibly with leading spaces).
+            let is_active = trimmed.starts_with("backend") && {
+                let rest = trimmed.trim_start_matches("backend").trim_start();
+                rest.starts_with('=')
+            };
+            // Match a commented-out `# backend = ...` line.
+            let is_commented = {
+                let stripped = trimmed.trim_start_matches('#').trim_start();
+                stripped.starts_with("backend") && {
+                    let rest = stripped.trim_start_matches("backend").trim_start();
+                    rest.starts_with('=')
+                }
+            };
+            if is_active || is_commented {
+                found = true;
+                new_line.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    if !found {
+        output_lines.push(new_line);
+    }
+
+    // Re-join, preserving trailing newline if the original had one.
+    let mut result = output_lines.join("\n");
+    if contents.ends_with('\n') || !contents.is_empty() {
+        result.push('\n');
+    }
+
+    std::fs::write(config_path, result)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    Ok(())
+}
+
+/// CLI entry-point for `ctxfs setup default-backend <backend>`.
+pub fn handle_default_backend(backend: &str) -> anyhow::Result<()> {
+    let config_path = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join(".ctxfs")
+        .join("config.toml");
+
+    set_default_backend(backend, &config_path)?;
+
+    println!("Default backend set to: {backend}");
+    println!("Config file: {}", config_path.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +537,65 @@ mod tests {
     fn check_fskit_status_does_not_panic() {
         // Should print to stdout without panicking regardless of platform / state.
         check_fskit_status();
+    }
+
+    // -----------------------------------------------------------------------
+    // set_default_backend tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a temp dir and return a config path inside it.
+    fn temp_config() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        (dir, path)
+    }
+
+    #[test]
+    fn default_backend_creates_file_when_absent() {
+        let (_dir, path) = temp_config();
+        set_default_backend("fskit", &path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("backend = \"fskit\""));
+    }
+
+    #[test]
+    fn default_backend_replaces_existing_value() {
+        let (_dir, path) = temp_config();
+        std::fs::write(&path, "log_level = \"debug\"\nbackend = \"nfs\"\n").unwrap();
+        set_default_backend("fskit", &path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("backend = \"fskit\""));
+        assert!(!contents.contains("backend = \"nfs\""));
+        // Other settings are preserved.
+        assert!(contents.contains("log_level = \"debug\""));
+    }
+
+    #[test]
+    fn default_backend_uncomments_commented_line() {
+        let (_dir, path) = temp_config();
+        std::fs::write(&path, "# backend = \"auto\"  # nfs | fskit | auto\n").unwrap();
+        set_default_backend("nfs", &path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("backend = \"nfs\""));
+        assert!(!contents.contains("# backend"));
+    }
+
+    #[test]
+    fn default_backend_appends_when_line_absent() {
+        let (_dir, path) = temp_config();
+        std::fs::write(&path, "log_level = \"info\"\ncache_max_bytes = 1024\n").unwrap();
+        set_default_backend("nfs", &path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("backend = \"nfs\""));
+        // Other settings are preserved.
+        assert!(contents.contains("log_level = \"info\""));
+        assert!(contents.contains("cache_max_bytes = 1024"));
+    }
+
+    #[test]
+    fn default_backend_rejects_invalid_value() {
+        let (_dir, path) = temp_config();
+        let err = set_default_backend("auto", &path).unwrap_err();
+        assert!(err.to_string().contains("invalid backend"));
     }
 }
