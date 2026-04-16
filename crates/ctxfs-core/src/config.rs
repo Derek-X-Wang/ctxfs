@@ -15,7 +15,7 @@ pub struct Config {
     pub latest_ttl_secs: u64,
     pub tree_cache_max_bytes: u64,
     pub default_backend: Option<Backend>,
-    /// Bundle ID of the installed `FSKitBridge` appex.
+    /// Bundle ID of the installed `ContextFS` appex.
     pub fskit_bundle_id: Option<String>,
 }
 

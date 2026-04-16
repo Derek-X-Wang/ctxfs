@@ -39,7 +39,7 @@ Read the CLAUDE.md at the repo root for the canonical dependency graph. Summary 
 
 **FSKit backend (macOS 26+):**
 - `ctxfs-vfs` — Virtual filesystem abstraction layer shared by NFS and FSKit backends. Provides unified read operations over `Snapshot`+`InodeTable`+`BlobCache` without the NFS protocol overhead.
-- `ctxfs-fskit` — FSKit system extension for macOS 26+. Implements the Apple `FSKit` framework interface using `ctxfs-vfs`. No sudo or Full Disk Access required; ships as `CtxfsFS.app`.
+- `ctxfs-fskit` — FSKit system extension for macOS 26+. Implements the Apple `FSKit` framework interface using `ctxfs-vfs`. No sudo or Full Disk Access required; ships as `ContextFS.app`.
 
 **Top-level binaries:**
 - `ctxfs-daemon` — The background service. Hosts the tarpc server, manages mount lifecycle, owns the cache instances. `Daemon::run()` is the entry point.
