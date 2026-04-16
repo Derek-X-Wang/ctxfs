@@ -670,35 +670,44 @@ Rename user-facing surfaces from "FSKitBridge"/"CtxfsFS" to "ContextFS":
 | Source directory | `swift/CtxfsFS/` | **`swift/ContextFS/`** |
 | Bundle IDs | `ai.ctxfs.fskitbridge[.fskitext]` | **unchanged** (locked — changing breaks upgrades) |
 
-Bundle the `ctxfs` CLI inside the Mac app (Docker Desktop pattern):
+**App manages daemon lifecycle (Docker Desktop model):**
 
 ```
 ContextFS.app/
   Contents/
-    MacOS/ContextFS              # host app (menu bar, daemon lifecycle)
+    MacOS/ContextFS              # host app — starts daemon on launch, menu bar status
     Extensions/ContextFSExt.appex  # FSKit bridge extension
-    Resources/bin/ctxfs           # CLI binary (Rust)
 ```
 
-On first launch or `ctxfs setup install-cli`:
-- Create symlink `/usr/local/bin/ctxfs` → `ContextFS.app/Contents/Resources/bin/ctxfs`
+`ContextFS.app` starts the ctxfs daemon on launch (as a launchd agent or embedded process) and stops it on quit. The CLI (from the Homebrew formula) connects to the same daemon via `~/.ctxfs/ctxfs.sock`. No binary conflict — the cask owns the app, the formula owns the CLI.
+
+On first launch:
 - Install launchd agent (`~/Library/LaunchAgents/ai.ctxfs.daemon.plist`)
 - Enable FSKit extension
+- Add `ctxfs diag` command that prints product name + bundle IDs (for support/debugging)
 
-**Eliminating sudo for `/Volumes/ctxfs/`:**
-- Phase 2a: mount at user-writable `~/.ctxfs/mounts/<slug>` instead of `/Volumes/ctxfs/<slug>`. Users interact via symlinks (`./deps/react → ~/.ctxfs/mounts/react-19.1.0`), not the raw mount path. No sudo ever.
-- Phase 2b (optional): `ContextFS.app` creates `/Volumes/ctxfs/` via macOS authorization dialog (`SMAppService` privileged helper — the native "ContextFS wants to make changes" sheet with Touch ID). Same pattern as Docker Desktop creating `/var/run/docker.sock`. Mounts then appear as Finder sidebar volumes.
+**Config file for launchd** (Codex finding: launchd agents don't inherit shell env):
+- Add `~/.ctxfs/config.toml` loaded before env vars; env overrides config
+- Daemon reads `github_token`, `fskit_bundle_id`, `cache_dir`, etc. from config
+- `ContextFS.app` writes initial config on first launch
+- CLI `ctxfs config set github-token <token>` for manual setup
 
-**Homebrew distribution — cask and formula are mutually exclusive:**
+**Homebrew distribution — cask and formula are complementary, not conflicting:**
 
 | Package | Target | Contents |
 |---|---|---|
-| `brew install --cask contextfs` | macOS (FSKit backend) | `ContextFS.app` (app + appex + CLI + daemon) |
-| `brew install ctxfs` | macOS (NFS-only) / Linux / CI | CLI binary only |
+| `brew install --cask contextfs` | macOS (FSKit backend) | `ContextFS.app` (app + appex, manages daemon) |
+| `brew install ctxfs` | All platforms | `ctxfs` CLI binary (starts/talks to daemon) |
 
-The cask declares `conflicts_with formula: "ctxfs"`. The app's install-cli step checks for existing `/usr/local/bin/ctxfs` (from the formula) and warns before overwriting.
+The cask does NOT install a CLI binary or compete for `/usr/local/bin/ctxfs` (Codex finding: Homebrew `conflicts_with formula:` is not enforced in cask DSL). Users install both: the cask for the FSKit app, the formula for the CLI. Or just the formula for NFS-only / Linux / CI.
 
-**2b. Signing + CI pipeline**
+**Finder eject → daemon cleanup** is required in Phase 2a, not deferred to polish (Codex finding: stale mount state matters more for a filesystem tool than a container runtime).
+
+**Xcode rename**: done via Xcode GUI (targets + schemes), not hand-editing pbxproj (Codex finding: pbxproj manual edits are fragile). User does the GUI rename; CI validates with `xcodebuild -list`.
+
+**`/Volumes/ctxfs/` stays with terminal sudo** until Phase 2b.
+
+**2b. Signing + CI pipeline + no-sudo mounts**
 
 - Apple Developer portal: register App ID + FSKit capability for `ai.ctxfs.fskitbridge` + `.fskitext`
 - App Group shared container (`group.ai.ctxfs.shared`) for auth token delivery: daemon writes token, appex reads — activates the opt-in auth infrastructure from Phase 1.5
@@ -706,19 +715,18 @@ The cask declares `conflicts_with formula: "ctxfs"`. The app's install-cli step 
 - Release workflow on `macos-14`: `xcodebuild archive` → `-exportArchive` → `notarytool submit --wait` → `stapler staple`
 - Homebrew tap (`derekxwang/tap`): `contextfs` cask + `ctxfs` formula
 - `ctxfs setup uninstall-fskit`
+- `SMAppService` privileged helper: `ContextFS.app` creates `/Volumes/ctxfs/` via native macOS authorization dialog ("ContextFS wants to make changes" + Touch ID). Same pattern as Docker Desktop. Eliminates terminal sudo entirely.
 
 **2c. Finder integration (UX polish)**
 
 - Volume display name: `{source-spec} (ctxfs)` via `FSItemAttributes`
 - Custom volume icon: `VolumeIcon.icns` in the appex bundle
 - Read-only badge: `FSVolumeFlags.readOnly`
-- Finder eject → daemon shutdown-RPC → symlink + state cleanup
 - `ctxfs setup default-backend` persistent preference
-- Optional: `/Volumes/ctxfs/` via `SMAppService` privileged helper (Finder sidebar integration)
 - Swift unit tests for the appex
 - Performance benchmarking on large dependency trees
 
-**Release gating**: 2a → 2b → 2c. Rename and packaging first, then signing makes it distributable, then Finder polish makes it beautiful.
+**Release gating**: 2a → 2b → 2c. Rename and packaging first (includes Finder eject handling), then signing makes it distributable (includes no-sudo), then Finder polish makes it beautiful.
 
 ---
 
