@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		766207F02E3AC50D00C75C6C /* NIO in Frameworks */ = {isa = PBXBuildFile; productRef = 766207EF2E3AC50D00C75C6C /* NIO */; };
 		766207F92E3AD91200C75C6C /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = 766207F82E3AD91200C75C6C /* SwiftProtobuf */; };
-		76A2B12F2E2857B200BCA3F9 /* FSKitExt.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = 76A2B1252E2857B200BCA3F9 /* FSKitExt.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		76A2B12F2E2857B200BCA3F9 /* ContextFSExt.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = 76A2B1252E2857B200BCA3F9 /* ContextFSExt.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXBuildRule section */
@@ -29,7 +29,8 @@
 				"OUT_DIR=\"${DERIVED_SOURCES_DIR}/GeneratedProtos\"",
 				"mkdir -p \"$OUT_DIR\"",
 				"",
-				"protoc --proto_path=\"${SRCROOT}/FSKitExt\" --swift_out=\"$OUT_DIR\" \"$INPUT_FILE_PATH\"",
+				"protoc --proto_path=\"${SRCROOT}/ContextFSExt\" --swift_out=\"$OUT_DIR\" \"$INPUT_FILE_PATH\"",
+				"",
 				"",
 				"",
 			);
@@ -42,7 +43,7 @@
 			containerPortal = 76A2B1032E28555D00BCA3F9 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 76A2B1242E2857B200BCA3F9;
-			remoteInfo = FSKitExt;
+			remoteInfo = ContextFSExt;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -52,49 +53,49 @@
 			dstPath = "$(EXTENSIONS_FOLDER_PATH)";
 			dstSubfolder = Product;
 			files = (
-				76A2B12F2E2857B200BCA3F9 /* FSKitExt.appex in Embed ExtensionKit Extensions */,
+				76A2B12F2E2857B200BCA3F9 /* ContextFSExt.appex in Embed ExtensionKit Extensions */,
 			);
 			name = "Embed ExtensionKit Extensions";
 		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		76A2B10B2E28555D00BCA3F9 /* FSKitBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FSKitBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		76A2B1252E2857B200BCA3F9 /* FSKitExt.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = FSKitExt.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		76A2B10B2E28555D00BCA3F9 /* ContextFS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ContextFS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		76A2B1252E2857B200BCA3F9 /* ContextFSExt.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = ContextFSExt.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		7662BA4E2E2ECFE200982D2B /* Exceptions for "FSKitBridge" folder in "FSKitBridge" target */ = {
+		7662BA4E2E2ECFE200982D2B /* Exceptions for "ContextFS" folder in "ContextFS" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 76A2B10A2E28555D00BCA3F9 /* FSKitBridge */;
+			target = 76A2B10A2E28555D00BCA3F9 /* ContextFS */;
 		};
-		76A2B1302E2857B200BCA3F9 /* Exceptions for "FSKitExt" folder in "FSKitExt" target */ = {
+		76A2B1302E2857B200BCA3F9 /* Exceptions for "ContextFSExt" folder in "ContextFSExt" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 76A2B1242E2857B200BCA3F9 /* FSKitExt */;
+			target = 76A2B1242E2857B200BCA3F9 /* ContextFSExt */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		76A2B10D2E28555D00BCA3F9 /* FSKitBridge */ = {
+		76A2B10D2E28555D00BCA3F9 /* ContextFS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				7662BA4E2E2ECFE200982D2B /* Exceptions for "FSKitBridge" folder in "FSKitBridge" target */,
+				7662BA4E2E2ECFE200982D2B /* Exceptions for "ContextFS" folder in "ContextFS" target */,
 			);
-			path = FSKitBridge;
+			path = ContextFS;
 			sourceTree = "<group>";
 		};
-		76A2B1262E2857B200BCA3F9 /* FSKitExt */ = {
+		76A2B1262E2857B200BCA3F9 /* ContextFSExt */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				76A2B1302E2857B200BCA3F9 /* Exceptions for "FSKitExt" folder in "FSKitExt" target */,
+				76A2B1302E2857B200BCA3F9 /* Exceptions for "ContextFSExt" folder in "ContextFSExt" target */,
 			);
-			path = FSKitExt;
+			path = ContextFSExt;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -125,8 +126,8 @@
 		76A2B1022E28555D00BCA3F9 = {
 			isa = PBXGroup;
 			children = (
-				76A2B10D2E28555D00BCA3F9 /* FSKitBridge */,
-				76A2B1262E2857B200BCA3F9 /* FSKitExt */,
+				76A2B10D2E28555D00BCA3F9 /* ContextFS */,
+				76A2B1262E2857B200BCA3F9 /* ContextFSExt */,
 				766207EE2E3AC50D00C75C6C /* Frameworks */,
 				76A2B10C2E28555D00BCA3F9 /* Products */,
 			);
@@ -135,8 +136,8 @@
 		76A2B10C2E28555D00BCA3F9 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				76A2B10B2E28555D00BCA3F9 /* FSKitBridge.app */,
-				76A2B1252E2857B200BCA3F9 /* FSKitExt.appex */,
+				76A2B10B2E28555D00BCA3F9 /* ContextFS.app */,
+				76A2B1252E2857B200BCA3F9 /* ContextFSExt.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -144,9 +145,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		76A2B10A2E28555D00BCA3F9 /* FSKitBridge */ = {
+		76A2B10A2E28555D00BCA3F9 /* ContextFS */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 76A2B1172E28555E00BCA3F9 /* Build configuration list for PBXNativeTarget "FSKitBridge" */;
+			buildConfigurationList = 76A2B1172E28555E00BCA3F9 /* Build configuration list for PBXNativeTarget "ContextFS" */;
 			buildPhases = (
 				76A2B1072E28555D00BCA3F9 /* Sources */,
 				76A2B1082E28555D00BCA3F9 /* Frameworks */,
@@ -159,16 +160,16 @@
 				76A2B12E2E2857B200BCA3F9 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				76A2B10D2E28555D00BCA3F9 /* FSKitBridge */,
+				76A2B10D2E28555D00BCA3F9 /* ContextFS */,
 			);
-			name = FSKitBridge;
+			name = ContextFS;
 			productName = FSKitBridge;
-			productReference = 76A2B10B2E28555D00BCA3F9 /* FSKitBridge.app */;
+			productReference = 76A2B10B2E28555D00BCA3F9 /* ContextFS.app */;
 			productType = "com.apple.product-type.application";
 		};
-		76A2B1242E2857B200BCA3F9 /* FSKitExt */ = {
+		76A2B1242E2857B200BCA3F9 /* ContextFSExt */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 76A2B1312E2857B200BCA3F9 /* Build configuration list for PBXNativeTarget "FSKitExt" */;
+			buildConfigurationList = 76A2B1312E2857B200BCA3F9 /* Build configuration list for PBXNativeTarget "ContextFSExt" */;
 			buildPhases = (
 				76A2B1212E2857B200BCA3F9 /* Sources */,
 				76A2B1222E2857B200BCA3F9 /* Frameworks */,
@@ -178,15 +179,15 @@
 				76AA5CF32E9B46960040DF4A /* PBXBuildRule */,
 			);
 			fileSystemSynchronizedGroups = (
-				76A2B1262E2857B200BCA3F9 /* FSKitExt */,
+				76A2B1262E2857B200BCA3F9 /* ContextFSExt */,
 			);
-			name = FSKitExt;
+			name = ContextFSExt;
 			packageProductDependencies = (
 				766207EF2E3AC50D00C75C6C /* NIO */,
 				766207F82E3AD91200C75C6C /* SwiftProtobuf */,
 			);
 			productName = FSKitExt;
-			productReference = 76A2B1252E2857B200BCA3F9 /* FSKitExt.appex */;
+			productReference = 76A2B1252E2857B200BCA3F9 /* ContextFSExt.appex */;
 			productType = "com.apple.product-type.extensionkit-extension";
 		};
 /* End PBXNativeTarget section */
@@ -207,7 +208,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 76A2B1062E28555D00BCA3F9 /* Build configuration list for PBXProject "FSKitBridge" */;
+			buildConfigurationList = 76A2B1062E28555D00BCA3F9 /* Build configuration list for PBXProject "ContextFS" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -225,8 +226,8 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				76A2B10A2E28555D00BCA3F9 /* FSKitBridge */,
-				76A2B1242E2857B200BCA3F9 /* FSKitExt */,
+				76A2B10A2E28555D00BCA3F9 /* ContextFS */,
+				76A2B1242E2857B200BCA3F9 /* ContextFSExt */,
 			);
 		};
 /* End PBXProject section */
@@ -260,13 +261,13 @@
 /* Begin PBXTargetDependency section */
 		76A2B12E2E2857B200BCA3F9 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 76A2B1242E2857B200BCA3F9 /* FSKitExt */;
+			target = 76A2B1242E2857B200BCA3F9 /* ContextFSExt */;
 			targetProxy = 76A2B12D2E2857B200BCA3F9 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		76A2B1152E28555E00BCA3F9 /* Debug configuration for PBXProject "FSKitBridge" */ = {
+		76A2B1152E28555E00BCA3F9 /* Debug configuration for PBXProject "ContextFS" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -332,7 +333,7 @@
 			};
 			name = Debug;
 		};
-		76A2B1162E28555E00BCA3F9 /* Release configuration for PBXProject "FSKitBridge" */ = {
+		76A2B1162E28555E00BCA3F9 /* Release configuration for PBXProject "ContextFS" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -390,12 +391,12 @@
 			};
 			name = Release;
 		};
-		76A2B1182E28555E00BCA3F9 /* Debug configuration for PBXNativeTarget "FSKitBridge" */ = {
+		76A2B1182E28555E00BCA3F9 /* Debug configuration for PBXNativeTarget "ContextFS" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = FSKitBridge/FSKitBridge.entitlements;
+				CODE_SIGN_ENTITLEMENTS = ContextFS/ContextFS.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -407,7 +408,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = FSKitBridge/Info.plist;
+				INFOPLIST_FILE = ContextFS/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -425,12 +426,12 @@
 			};
 			name = Debug;
 		};
-		76A2B1192E28555E00BCA3F9 /* Release configuration for PBXNativeTarget "FSKitBridge" */ = {
+		76A2B1192E28555E00BCA3F9 /* Release configuration for PBXNativeTarget "ContextFS" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = FSKitBridge/FSKitBridge.entitlements;
+				CODE_SIGN_ENTITLEMENTS = ContextFS/ContextFS.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -442,7 +443,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = FSKitBridge/Info.plist;
+				INFOPLIST_FILE = ContextFS/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -460,10 +461,10 @@
 			};
 			name = Release;
 		};
-		76A2B1322E2857B200BCA3F9 /* Debug configuration for PBXNativeTarget "FSKitExt" */ = {
+		76A2B1322E2857B200BCA3F9 /* Debug configuration for PBXNativeTarget "ContextFSExt" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = FSKitExt/FSKitExt.entitlements;
+				CODE_SIGN_ENTITLEMENTS = ContextFSExt/ContextFSExt.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 0;
 				DEAD_CODE_STRIPPING = YES;
@@ -472,7 +473,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = FSKitExt/Info.plist;
+				INFOPLIST_FILE = ContextFSExt/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = fskitbridge;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -490,10 +491,10 @@
 			};
 			name = Debug;
 		};
-		76A2B1332E2857B200BCA3F9 /* Release configuration for PBXNativeTarget "FSKitExt" */ = {
+		76A2B1332E2857B200BCA3F9 /* Release configuration for PBXNativeTarget "ContextFSExt" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = FSKitExt/FSKitExt.entitlements;
+				CODE_SIGN_ENTITLEMENTS = ContextFSExt/ContextFSExt.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 0;
 				DEAD_CODE_STRIPPING = YES;
@@ -502,7 +503,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = FSKitExt/Info.plist;
+				INFOPLIST_FILE = ContextFSExt/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = fskitbridge;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -523,27 +524,27 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		76A2B1062E28555D00BCA3F9 /* Build configuration list for PBXProject "FSKitBridge" */ = {
+		76A2B1062E28555D00BCA3F9 /* Build configuration list for PBXProject "ContextFS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				76A2B1152E28555E00BCA3F9 /* Debug configuration for PBXProject "FSKitBridge" */,
-				76A2B1162E28555E00BCA3F9 /* Release configuration for PBXProject "FSKitBridge" */,
+				76A2B1152E28555E00BCA3F9 /* Debug configuration for PBXProject "ContextFS" */,
+				76A2B1162E28555E00BCA3F9 /* Release configuration for PBXProject "ContextFS" */,
 			);
 			defaultConfigurationName = Release;
 		};
-		76A2B1172E28555E00BCA3F9 /* Build configuration list for PBXNativeTarget "FSKitBridge" */ = {
+		76A2B1172E28555E00BCA3F9 /* Build configuration list for PBXNativeTarget "ContextFS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				76A2B1182E28555E00BCA3F9 /* Debug configuration for PBXNativeTarget "FSKitBridge" */,
-				76A2B1192E28555E00BCA3F9 /* Release configuration for PBXNativeTarget "FSKitBridge" */,
+				76A2B1182E28555E00BCA3F9 /* Debug configuration for PBXNativeTarget "ContextFS" */,
+				76A2B1192E28555E00BCA3F9 /* Release configuration for PBXNativeTarget "ContextFS" */,
 			);
 			defaultConfigurationName = Release;
 		};
-		76A2B1312E2857B200BCA3F9 /* Build configuration list for PBXNativeTarget "FSKitExt" */ = {
+		76A2B1312E2857B200BCA3F9 /* Build configuration list for PBXNativeTarget "ContextFSExt" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				76A2B1322E2857B200BCA3F9 /* Debug configuration for PBXNativeTarget "FSKitExt" */,
-				76A2B1332E2857B200BCA3F9 /* Release configuration for PBXNativeTarget "FSKitExt" */,
+				76A2B1322E2857B200BCA3F9 /* Debug configuration for PBXNativeTarget "ContextFSExt" */,
+				76A2B1332E2857B200BCA3F9 /* Release configuration for PBXNativeTarget "ContextFSExt" */,
 			);
 			defaultConfigurationName = Release;
 		};
