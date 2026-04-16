@@ -655,31 +655,70 @@ macOS `mount -o` flags do NOT propagate to `FSTaskOptions` in the FSKit appex (d
 
 ### Phase 2: Distribution + Finder Polish
 
-Split into two sub-tracks that can progress in parallel once Phase 1.5 lands.
+Split into three sub-tracks.
 
-**2a. Distribution pipeline + auth activation**
+**2a. Rename + Packaging**
 
-Vendoring and bundle-ID rename shipped in Phase 1.5. Phase 2a handles signing, distribution, and activating auth.
+Rename user-facing surfaces from "FSKitBridge"/"CtxfsFS" to "ContextFS":
+
+| What | Before | After |
+|---|---|---|
+| App display name | FSKitBridge | **ContextFS** |
+| Xcode scheme/targets | FSKitBridge / FSKitExt | **ContextFS / ContextFSExt** |
+| `/Applications/` | `FSKitBridge.app` | **`ContextFS.app`** |
+| System Settings | "FSKitBridge" | **"ContextFS"** |
+| Source directory | `swift/CtxfsFS/` | **`swift/ContextFS/`** |
+| Bundle IDs | `ai.ctxfs.fskitbridge[.fskitext]` | **unchanged** (locked — changing breaks upgrades) |
+
+Bundle the `ctxfs` CLI inside the Mac app (Docker Desktop pattern):
+
+```
+ContextFS.app/
+  Contents/
+    MacOS/ContextFS              # host app (menu bar, daemon lifecycle)
+    Extensions/ContextFSExt.appex  # FSKit bridge extension
+    Resources/bin/ctxfs           # CLI binary (Rust)
+```
+
+On first launch or `ctxfs setup install-cli`:
+- Create symlink `/usr/local/bin/ctxfs` → `ContextFS.app/Contents/Resources/bin/ctxfs`
+- Install launchd agent (`~/Library/LaunchAgents/ai.ctxfs.daemon.plist`)
+- Enable FSKit extension
+
+**Eliminating sudo for `/Volumes/ctxfs/`:**
+- Phase 2a: mount at user-writable `~/.ctxfs/mounts/<slug>` instead of `/Volumes/ctxfs/<slug>`. Users interact via symlinks (`./deps/react → ~/.ctxfs/mounts/react-19.1.0`), not the raw mount path. No sudo ever.
+- Phase 2b (optional): `ContextFS.app` creates `/Volumes/ctxfs/` via macOS authorization dialog (`SMAppService` privileged helper — the native "ContextFS wants to make changes" sheet with Touch ID). Same pattern as Docker Desktop creating `/var/run/docker.sock`. Mounts then appear as Finder sidebar volumes.
+
+**Homebrew distribution — cask and formula are mutually exclusive:**
+
+| Package | Target | Contents |
+|---|---|---|
+| `brew install --cask contextfs` | macOS (FSKit backend) | `ContextFS.app` (app + appex + CLI + daemon) |
+| `brew install ctxfs` | macOS (NFS-only) / Linux / CI | CLI binary only |
+
+The cask declares `conflicts_with formula: "ctxfs"`. The app's install-cli step checks for existing `/usr/local/bin/ctxfs` (from the formula) and warns before overwriting.
+
+**2b. Signing + CI pipeline**
 
 - Apple Developer portal: register App ID + FSKit capability for `ai.ctxfs.fskitbridge` + `.fskitext`
 - App Group shared container (`group.ai.ctxfs.shared`) for auth token delivery: daemon writes token, appex reads — activates the opt-in auth infrastructure from Phase 1.5
 - Developer ID Application signing cert + App Store Connect API key in GitHub Actions secrets
 - Release workflow on `macos-14`: `xcodebuild archive` → `-exportArchive` → `notarytool submit --wait` → `stapler staple`
-- Homebrew tap (e.g. `derekxwang/tap`): `ctxfs` formula (CLI) + `ctxfs` cask (CtxfsFS.app)
-- `ctxfs setup install-fskit` downloads the cask if not present
+- Homebrew tap (`derekxwang/tap`): `contextfs` cask + `ctxfs` formula
 - `ctxfs setup uninstall-fskit`
 
-**2b. Finder integration (UX polish)**
+**2c. Finder integration (UX polish)**
 
 - Volume display name: `{source-spec} (ctxfs)` via `FSItemAttributes`
 - Custom volume icon: `VolumeIcon.icns` in the appex bundle
 - Read-only badge: `FSVolumeFlags.readOnly`
 - Finder eject → daemon shutdown-RPC → symlink + state cleanup
 - `ctxfs setup default-backend` persistent preference
+- Optional: `/Volumes/ctxfs/` via `SMAppService` privileged helper (Finder sidebar integration)
 - Swift unit tests for the appex
 - Performance benchmarking on large dependency trees
 
-**Release gating**: 2a ships before 2b. A user installing via `brew install --cask ctxfs` should get a working mount experience before we polish how it looks in Finder.
+**Release gating**: 2a → 2b → 2c. Rename and packaging first, then signing makes it distributable, then Finder polish makes it beautiful.
 
 ---
 
