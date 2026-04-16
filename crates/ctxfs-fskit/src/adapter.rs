@@ -258,7 +258,14 @@ impl Filesystem for FilesystemAdapter {
     }
 
     async fn get_volume_capabilities(&mut self) -> FsKitResult<SupportedCapabilities> {
-        Ok(SupportedCapabilities::default())
+        Ok(SupportedCapabilities {
+            // Signal read-only: no setting file permissions, no immutable-file
+            // flag support, which together tell FSKit this volume cannot be
+            // written to.
+            does_not_support_setting_file_permissions: Some(true),
+            does_not_support_immutable_files: Some(true),
+            ..Default::default()
+        })
     }
 
     async fn get_volume_statistics(&mut self) -> FsKitResult<StatFsResult> {

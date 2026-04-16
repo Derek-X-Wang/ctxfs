@@ -148,6 +148,13 @@ extension Volume: FSVolume.Operations {
         FSVolume.SupportedCapabilities(supportedCapabilities)
     }
 
+    /// Request a read-only mount so Finder shows the lock badge and blocks
+    /// drag-to-copy operations. Available on macOS 26+ (FSKit V2).
+    @available(macOS 26.0, *)
+    var requestedMountOptions: FSVolume.MountOptions {
+        .readOnly
+    }
+
     var volumeStatistics: FSStatFSResult {
         log.d("getVolumeStatistics")
         let response = try? socket.send(
