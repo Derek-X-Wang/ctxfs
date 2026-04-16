@@ -35,7 +35,7 @@ impl Default for Config {
             latest_ttl_secs: 3600,
             tree_cache_max_bytes: 500 * 1024 * 1024, // 500 MB
             default_backend: None,
-            fskit_bundle_id: None,
+            fskit_bundle_id: Some("ai.ctxfs.fskitbridge.fskitext".to_string()),
         }
     }
 }
@@ -149,8 +149,11 @@ mod tests {
     }
 
     #[test]
-    fn default_config_has_no_fskit_bundle_id() {
-        assert!(Config::default().fskit_bundle_id.is_none());
+    fn default_config_has_fskit_bundle_id() {
+        assert_eq!(
+            Config::default().fskit_bundle_id.as_deref(),
+            Some("ai.ctxfs.fskitbridge.fskitext")
+        );
     }
 
     #[test]
