@@ -25,6 +25,7 @@ pub use crate::pb::{
 };
 use crate::session::Session;
 
+pub mod auth;
 mod handler;
 mod info;
 pub mod installer;

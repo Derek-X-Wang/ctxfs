@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::Filesystem;
 use crate::handler::Handler;
-use crate::pb::{Request, Response, response};
+use crate::pb::{Request, Response, Success, request, response};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -21,7 +21,29 @@ pub(super) struct Socket {
 }
 
 impl Socket {
-    pub(super) async fn start<FS>(handler: Handler<FS>, server_port: u16) -> Result<Self>
+    pub(super) async fn start<FS>(
+        handler: Handler<FS>,
+        server_port: u16,
+        expected_token: Option<Vec<u8>>,
+    ) -> Result<Self>
+    where
+        FS: Filesystem + Send + Sync + Clone + 'static,
+    {
+        let listener = TcpListener::bind(format!("{}:{}", Ipv4Addr::LOCALHOST, server_port))
+            .await
+            .map_err(Error::Io)?;
+        Self::start_with_listener(handler, listener, expected_token).await
+    }
+
+    /// Start the accept loop using an already-bound `TcpListener`.
+    ///
+    /// This is used by `SessionBuilder::bind_random` to avoid the need for a
+    /// registered FSKit extension (e.g. in integration tests).
+    pub(super) async fn start_with_listener<FS>(
+        handler: Handler<FS>,
+        listener: TcpListener,
+        expected_token: Option<Vec<u8>>,
+    ) -> Result<Self>
     where
         FS: Filesystem + Send + Sync + Clone + 'static,
     {
@@ -29,7 +51,7 @@ impl Socket {
         let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
 
         tokio::spawn(async move {
-            if spawn_loop(&start_tx, stop_rx, handler, server_port)
+            if spawn_loop(&start_tx, stop_rx, handler, listener, expected_token)
                 .await
                 .is_err()
             {
@@ -53,14 +75,13 @@ async fn spawn_loop<FS>(
     start_tx: &Sender<bool>,
     mut stop_rx: Receiver<()>,
     handler: Handler<FS>,
-    server_port: u16,
+    listener: TcpListener,
+    expected_token: Option<Vec<u8>>,
 ) -> Result<()>
 where
     FS: Filesystem + Send + Sync + Clone + 'static,
 {
-    let addr = format!("{}:{}", Ipv4Addr::LOCALHOST, server_port);
-
-    let listener = TcpListener::bind(&addr).await?;
+    let addr = listener.local_addr()?;
     info!("listening on {addr}");
 
     let _ = start_tx.send(true).await;
@@ -79,8 +100,9 @@ where
                 info!("accepted connection from {peer}");
                 let handler = handler.clone();
                 let shutdown_rx = shutdown_tx.subscribe();
+                let token = expected_token.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_stream(stream, handler, shutdown_rx).await {
+                    if let Err(err) = handle_stream(stream, handler, shutdown_rx, token).await {
                         error!("{err}");
                     }
                 });
@@ -95,11 +117,15 @@ async fn handle_stream<FS>(
     mut stream: TcpStream,
     mut handler: Handler<FS>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    expected_token: Option<Vec<u8>>,
 ) -> Result<()>
 where
     FS: Filesystem + Send + Sync + Clone + 'static,
 {
     let mut buf = BytesMut::with_capacity(4096);
+    // If no token is configured, start in authenticated state (backward compat).
+    let mut authenticated = expected_token.is_none();
+
     loop {
         select! {
             _ = shutdown_rx.recv() => {
@@ -123,21 +149,98 @@ where
                                     debug!("received message: {request:?}");
                                     buf.advance(buf.len() - frozen.remaining());
 
-                                    let content = match request.content {
-                                        Some(content) => match handler.handle(content).await {
-                                            Ok(content) => Some(content),
-                                            Err(err) => {
-                                                error!("handler error: {err}");
-                                                None
+                                    let content = match (authenticated, request.content) {
+                                        // Pre-auth: Authenticate frame — validate token.
+                                        (false, Some(request::Content::Authenticate(auth_req))) => {
+                                            match &expected_token {
+                                                Some(expected)
+                                                    if crate::auth::verify_token_ct(
+                                                        expected,
+                                                        &auth_req.token,
+                                                    ) =>
+                                                {
+                                                    authenticated = true;
+                                                    info!("bridge connection authenticated");
+                                                    Some(response::Content::Success(Success {}))
+                                                }
+                                                _ => {
+                                                    warn!("bridge authentication failed: token mismatch");
+                                                    let resp = Response {
+                                                        request_id: request.id,
+                                                        content: Some(response::Content::PosixError(
+                                                            libc::EACCES,
+                                                        )),
+                                                    };
+                                                    let mut out = Vec::with_capacity(64);
+                                                    resp.encode_length_delimited(&mut out).unwrap();
+                                                    stream.ready(Interest::WRITABLE).await?;
+                                                    let _ = stream.write_all(&out).await;
+                                                    let _ = stream.shutdown().await;
+                                                    return Ok(());
+                                                }
                                             }
-                                        },
-                                        None => {
-                                            warn!("received request without content: {}", request.id);
+                                        }
+                                        // Pre-auth: any other frame → reject and close.
+                                        (false, Some(_)) => {
+                                            warn!(
+                                                "bridge rejected pre-auth request id={}",
+                                                request.id
+                                            );
+                                            let resp = Response {
+                                                request_id: request.id,
+                                                content: Some(response::Content::PosixError(
+                                                    libc::EACCES,
+                                                )),
+                                            };
+                                            let mut out = Vec::with_capacity(64);
+                                            resp.encode_length_delimited(&mut out).unwrap();
+                                            stream.ready(Interest::WRITABLE).await?;
+                                            let _ = stream.write_all(&out).await;
+                                            let _ = stream.shutdown().await;
+                                            return Ok(());
+                                        }
+                                        // Post-auth: replay Authenticate → protocol error, close.
+                                        (true, Some(request::Content::Authenticate(_))) => {
+                                            warn!(
+                                                "bridge rejected replay Authenticate after success"
+                                            );
+                                            let resp = Response {
+                                                request_id: request.id,
+                                                content: Some(response::Content::PosixError(
+                                                    libc::EPROTO,
+                                                )),
+                                            };
+                                            let mut out = Vec::with_capacity(64);
+                                            resp.encode_length_delimited(&mut out).unwrap();
+                                            stream.ready(Interest::WRITABLE).await?;
+                                            let _ = stream.write_all(&out).await;
+                                            let _ = stream.shutdown().await;
+                                            return Ok(());
+                                        }
+                                        // Post-auth: normal dispatch.
+                                        (true, Some(content)) => {
+                                            match handler.handle(content).await {
+                                                Ok(content) => Some(content),
+                                                Err(err) => {
+                                                    error!("handler error: {err}");
+                                                    None
+                                                }
+                                            }
+                                        }
+                                        // Missing content: existing EINVAL behavior.
+                                        (_, None) => {
+                                            warn!(
+                                                "received request without content: {}",
+                                                request.id
+                                            );
                                             Some(response::Content::PosixError(libc::EINVAL))
                                         }
                                     };
 
-                                    let response = Response { request_id: request.id, content };
+                                    let response = Response {
+                                        request_id: request.id,
+                                        content,
+                                    };
 
                                     let mut out = Vec::with_capacity(4096);
                                     response.encode_length_delimited(&mut out).unwrap();
