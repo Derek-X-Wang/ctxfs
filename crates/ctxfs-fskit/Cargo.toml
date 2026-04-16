@@ -23,6 +23,8 @@ ctxfs-cache = { workspace = true }
 ctxfs-manifest = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+prost = "0.14"
+libc = { workspace = true }
 
 [lints]
 workspace = true

@@ -15,6 +15,7 @@ members = [
     "crates/ctxfs-cache-redis",
     "crates/ctxfs-vfs",
     "crates/ctxfs-fskit",
+    "crates/fskit-rs",
 ]
 exclude = [
     # Phase 0 proof-of-concept, kept for reference. Not part of the workspace
@@ -73,8 +74,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# FSKit backend (macOS 26+)
-fskit-rs = "0.1"
+# FSKit backend (macOS 26+) — forked from crates.io v0.1.0
+fskit-rs = { path = "crates/fskit-rs" }
 
 # NFS backend (zero-install, no kernel extension needed)
 nfsserve = "0.11"
