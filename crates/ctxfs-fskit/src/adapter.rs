@@ -194,7 +194,8 @@ use fskit_rs::{
 };
 use std::ffi::OsStr;
 use std::sync::Arc;
-use tracing::debug;
+use tokio::sync::mpsc;
+use tracing::{debug, info};
 
 /// Adapter implementing `fskit_rs::Filesystem` on top of a shared `VfsState`.
 ///
@@ -209,6 +210,10 @@ pub struct FilesystemAdapter {
     volume_id: String,
     /// Human-readable name shown in Finder sidebar (used in `VolumeIdentifier.name`).
     display_name: String,
+    /// Signaled when the filesystem unmounts (e.g., Finder eject).
+    /// The daemon listens on the paired receiver and performs full cleanup
+    /// (symlinks, mounts.json, `MountHandle` drop).
+    unmount_notifier: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl FilesystemAdapter {
@@ -233,7 +238,18 @@ impl FilesystemAdapter {
             volume_name,
             volume_id,
             display_name,
+            unmount_notifier: None,
         }
+    }
+
+    /// Attach a sender that fires when `unmount()` is called (e.g. Finder eject).
+    ///
+    /// The daemon passes a channel receiver here so it can react to filesystem-
+    /// initiated unmounts and run the full cleanup path (symlinks, mounts.json).
+    #[must_use]
+    pub fn with_unmount_notifier(mut self, notifier: mpsc::UnboundedSender<()>) -> Self {
+        self.unmount_notifier = Some(notifier);
+        self
     }
 }
 
@@ -308,7 +324,14 @@ impl Filesystem for FilesystemAdapter {
     }
 
     async fn unmount(&mut self) -> FsKitResult<()> {
-        debug!("fskit unmount called for volume {}", self.volume_name);
+        info!(
+            "FSKit unmount requested for volume {} (Finder eject or system)",
+            self.volume_name
+        );
+        if let Some(notifier) = &self.unmount_notifier {
+            // Ignore send errors — the daemon may have already been torn down.
+            let _ = notifier.send(());
+        }
         Ok(())
     }
 

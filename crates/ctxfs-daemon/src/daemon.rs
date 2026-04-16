@@ -25,6 +25,10 @@ use tracing::{error, info, warn};
 pub struct FsKitHandle {
     session: Option<FsKitSession>,
     volume_path: std::path::PathBuf,
+    /// Receives a signal when the FSKit filesystem calls `unmount()` (e.g.
+    /// Finder eject).  The daemon spawns a task per mount that listens on this
+    /// and triggers the full cleanup path.
+    pub unmount_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
 }
 
 impl FsKitHandle {
@@ -32,7 +36,18 @@ impl FsKitHandle {
         Self {
             session: Some(session),
             volume_path,
+            unmount_rx: None,
         }
+    }
+
+    /// Attach the receiver side of the unmount-notification channel.
+    #[must_use]
+    pub fn with_unmount_rx(
+        mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) -> Self {
+        self.unmount_rx = Some(rx);
+        self
     }
 
     pub fn volume_path(&self) -> &std::path::Path {
@@ -493,7 +508,7 @@ impl DaemonServer {
 
         let prep = self.prepare_mount(source_str)?;
 
-        let fskit_handle = self
+        let mut fskit_handle = self
             .rt_handle
             .block_on(crate::fskit_mount::start_fskit_mount(
                 &prep.source_spec,
@@ -504,6 +519,10 @@ impl DaemonServer {
                 &bundle_id,
             ))
             .map_err(|e| format!("fskit mount failed: {e}"))?;
+
+        // Extract the unmount receiver before we move the handle into MountHandle.
+        // We need it to spawn the Finder-eject watcher task below.
+        let unmount_rx = fskit_handle.unmount_rx.take();
 
         let id = prep.source_spec.id();
         let commit_sha = prep.snapshot.commit_sha.clone();
@@ -555,8 +574,28 @@ impl DaemonServer {
         };
 
         self.rt_handle.block_on(async {
-            let _ = self.mounts.write().await.insert(id, handle);
+            let _ = self.mounts.write().await.insert(id.clone(), handle);
         });
+
+        // Spawn a watcher task: when the FSKit filesystem calls unmount() (e.g.
+        // Finder eject), signal the daemon to run the full cleanup path so that
+        // symlinks and mounts.json stay in sync with kernel mount state.
+        if let Some(mut rx) = unmount_rx {
+            let server_clone = self.clone();
+            let mount_id = id.clone();
+            let _watcher = tokio::spawn(async move {
+                if rx.recv().await.is_some() {
+                    info!(
+                        "FSKit volume {mount_id} self-unmounted (Finder eject); running daemon cleanup"
+                    );
+                    if let Err(e) = server_clone.do_unmount_by_id(&mount_id).await {
+                        // The mount may have already been cleaned up via the CLI
+                        // unmount path — that is not an error.
+                        warn!("Finder-eject cleanup for {mount_id}: {e}");
+                    }
+                }
+            });
+        }
 
         Ok(info)
     }
@@ -624,6 +663,52 @@ impl DaemonServer {
     }
 }
 
+impl DaemonServer {
+    /// Perform full cleanup for a mount identified by its key (= `source_spec.id()`).
+    ///
+    /// Called from both the IPC `unmount` RPC (CLI path) and the Finder-eject
+    /// watcher task so the two paths share identical cleanup logic.
+    async fn do_unmount_by_id(&self, mount_id: &str) -> Result<(), String> {
+        let handle = {
+            let mut mounts = self.mounts.write().await;
+            mounts.remove(mount_id)
+        };
+
+        match handle {
+            Some(h) => {
+                let volume_path = h.info.volume_path.clone();
+
+                // FSKit: explicit async shutdown (can't await in Drop).
+                #[allow(clippy::used_underscore_binding)]
+                let fskit_opt = h._fskit;
+                #[allow(clippy::used_underscore_binding)]
+                let nfs_opt = h._nfs;
+                if let Some(fskit) = fskit_opt {
+                    fskit.shutdown().await;
+                }
+                drop(nfs_opt);
+
+                // Remove from mounts.json.
+                if let Some(vp) = volume_path.as_deref() {
+                    let state_file = crate::mount_state::MountStateFile::new(
+                        self.config
+                            .pid_file
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("/tmp")),
+                    );
+                    if let Err(e) = state_file.remove_volume(vp) {
+                        warn!("failed to remove mount state entry: {e}");
+                    }
+                }
+
+                info!("stopped mount {mount_id}");
+                Ok(())
+            }
+            None => Err(format!("mount not found: {mount_id}")),
+        }
+    }
+}
+
 impl CtxfsService for DaemonServer {
     async fn mount(
         self,
@@ -641,53 +726,22 @@ impl CtxfsService for DaemonServer {
 
     async fn unmount(self, _: tarpc::context::Context, target: String) -> Result<(), String> {
         info!("unmount request: {target}");
-        let mut mounts = self.mounts.write().await;
 
-        let key = mounts
-            .iter()
-            .find(|(_, h)| {
-                h.info.mount_point == target
-                    || h.info.id == target
-                    || h.info.volume_path.as_deref() == Some(&target)
-            })
-            .map(|(k, _)| k.clone());
+        // Resolve the target (mount_point, id, or volume_path) to the internal key.
+        let key = {
+            let mounts = self.mounts.read().await;
+            mounts
+                .iter()
+                .find(|(_, h)| {
+                    h.info.mount_point == target
+                        || h.info.id == target
+                        || h.info.volume_path.as_deref() == Some(&target)
+                })
+                .map(|(k, _)| k.clone())
+        };
 
         match key {
-            Some(k) => {
-                if let Some(handle) = mounts.remove(&k) {
-                    let volume_path = handle.info.volume_path.clone();
-
-                    // FSKit: explicit async shutdown (can't await in Drop).
-                    // The `_fskit`/`_nfs` prefix marks these as "lifetime-only"
-                    // at construction; here we deliberately consume them.
-                    #[allow(clippy::used_underscore_binding)]
-                    let fskit_opt = handle._fskit;
-                    #[allow(clippy::used_underscore_binding)]
-                    let nfs_opt = handle._nfs;
-                    if let Some(fskit) = fskit_opt {
-                        fskit.shutdown().await;
-                    }
-                    drop(nfs_opt);
-
-                    // Clean up mounts.json entry for FSKit mounts.
-                    if let Some(vp) = volume_path.as_deref() {
-                        let state_file = crate::mount_state::MountStateFile::new(
-                            self.config
-                                .pid_file
-                                .parent()
-                                .unwrap_or_else(|| std::path::Path::new("/tmp")),
-                        );
-                        if let Err(e) = state_file.remove_volume(vp) {
-                            warn!("failed to remove mount state entry: {e}");
-                        }
-                    }
-
-                    info!("stopped mount for {target}");
-                    Ok(())
-                } else {
-                    Err(format!("mount not found: {target}"))
-                }
-            }
+            Some(k) => self.do_unmount_by_id(&k).await,
             None => Err(format!("mount not found: {target}")),
         }
     }
@@ -758,6 +812,7 @@ impl CtxfsService for DaemonServer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use ctxfs_core::Backend;
 
     /// Verify that the FSKit mount path generates an auth token and stores it as a
@@ -808,5 +863,223 @@ mod tests {
         let t1 = ctxfs_fskit::AuthToken::generate().to_hex();
         let t2 = ctxfs_fskit::AuthToken::generate().to_hex();
         assert_ne!(t1, t2, "consecutive mounts must get distinct auth tokens");
+    }
+
+    // ─── Finder-eject / do_unmount_by_id tests ───────────────────────────────
+
+    /// Build a minimal `DaemonServer` backed by temp directories.
+    fn make_test_server(tmp: &tempfile::TempDir) -> DaemonServer {
+        use std::sync::Mutex;
+        let base = tmp.path();
+        let cache = Arc::new(
+            ctxfs_cache::BlobCache::new(base.join("cache"), 64 * 1024 * 1024)
+                .expect("BlobCache::new"),
+        );
+        let tree_cache = Arc::new(ctxfs_cache::TreeCache::new(
+            base.join("trees"),
+            64 * 1024 * 1024,
+        ));
+        let resolution_cache = ctxfs_cache::ResolutionCache::load(
+            base.join("resolutions.json"),
+            3600,
+        );
+        let mut config = ctxfs_core::config::Config::default();
+        config.pid_file = base.join("ctxfs.pid");
+        config.cache_dir = base.join("cache");
+
+        DaemonServer {
+            cache,
+            tree_cache,
+            resolution_cache: Arc::new(Mutex::new(resolution_cache)),
+            shared_tree_cache: None,
+            mounts: Arc::new(RwLock::new(HashMap::new())),
+            config,
+            rt_handle: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Build a minimal `MountInfo` for testing.
+    fn make_mount_info(id: &str) -> ctxfs_ipc::service::MountInfo {
+        ctxfs_ipc::service::MountInfo {
+            id: id.to_string(),
+            source: "github:owner/repo@main".to_string(),
+            mount_point: format!("/tmp/test-mount-{id}"),
+            commit_sha: "abc123".to_string(),
+            status: ctxfs_ipc::service::MountStatus::Ready,
+            mounted_at: chrono::Utc::now().to_rfc3339(),
+            nfs_port: None,
+            backend: Backend::FsKit,
+            volume_path: Some(format!("/Volumes/ctxfs/{id}")),
+            symlink_paths: vec![],
+        }
+    }
+
+    /// `do_unmount_by_id` removes the mount from the in-memory map and
+    /// cleans up the mounts.json state file.
+    #[tokio::test]
+    async fn finder_eject_cleanup_removes_mount_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        let mount_id = "test-mount-id";
+        let volume_path = format!("/Volumes/ctxfs/{mount_id}");
+
+        // Pre-populate the state file so we can verify it gets cleaned up.
+        let state_file = crate::mount_state::MountStateFile::new(tmp.path());
+        state_file
+            .add(crate::mount_state::MountStateEntry {
+                source: "github:owner/repo@main".to_string(),
+                volume_path: volume_path.clone(),
+                symlink_paths: vec!["/tmp/my-project/deps/repo".to_string()],
+                backend: Backend::FsKit,
+                tcp_port: None,
+                auth_token: None,
+            })
+            .unwrap();
+
+        // Insert a mock mount handle (no real FSKit session needed).
+        {
+            let mut mounts = server.mounts.write().await;
+            let _ = mounts.insert(
+                mount_id.to_string(),
+                MountHandle {
+                    info: make_mount_info(mount_id),
+                    backend: Backend::FsKit,
+                    _nfs: None,
+                    _fskit: None, // No real FSKit session in unit test.
+                },
+            );
+        }
+
+        // Simulate what happens when the FSKit unmount() callback fires and the
+        // watcher task calls do_unmount_by_id.
+        server
+            .do_unmount_by_id(mount_id)
+            .await
+            .expect("cleanup should succeed");
+
+        // The in-memory mount map must be empty.
+        assert!(
+            server.mounts.read().await.is_empty(),
+            "mount map must be empty after Finder-eject cleanup"
+        );
+
+        // The mounts.json entry must have been removed.
+        let entries = state_file.read();
+        assert!(
+            entries.is_empty(),
+            "mounts.json must be empty after Finder-eject cleanup"
+        );
+    }
+
+    /// A second call to `do_unmount_by_id` for the same mount ID (e.g. CLI
+    /// unmount racing with Finder eject) returns an error but does not panic.
+    #[tokio::test]
+    async fn finder_eject_double_cleanup_is_harmless() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        let mount_id = "double-cleanup-test";
+
+        {
+            let mut mounts = server.mounts.write().await;
+            let _ = mounts.insert(
+                mount_id.to_string(),
+                MountHandle {
+                    info: make_mount_info(mount_id),
+                    backend: Backend::FsKit,
+                    _nfs: None,
+                    _fskit: None,
+                },
+            );
+        }
+
+        // First cleanup succeeds.
+        server
+            .do_unmount_by_id(mount_id)
+            .await
+            .expect("first cleanup should succeed");
+
+        // Second cleanup (e.g. Finder eject arriving after CLI unmount) must
+        // return an error, not panic.
+        let result = server.do_unmount_by_id(mount_id).await;
+        assert!(
+            result.is_err(),
+            "second cleanup must return an error (mount already gone)"
+        );
+    }
+
+    /// Verify that `FilesystemAdapter::unmount()` fires the mpsc notifier so
+    /// the daemon's watcher task receives the signal.
+    #[tokio::test]
+    async fn fskit_adapter_unmount_fires_notifier() {
+        use async_trait::async_trait;
+        use ctxfs_core::{
+            error::CtxfsError,
+            provider::{Provider, SharedProvider},
+            Digest,
+        };
+        use ctxfs_fskit::FilesystemAdapter;
+        use ctxfs_manifest::Snapshot;
+        use ctxfs_vfs::VfsState;
+        use fskit_rs::Filesystem as _;
+        use tokio::sync::mpsc;
+
+        // Minimal no-op provider — `unmount()` never calls the provider so
+        // this just satisfies the type.
+        struct NullProvider;
+        #[async_trait]
+        impl Provider for NullProvider {
+            async fn fetch_snapshot(
+                &self,
+                _: &ctxfs_core::source::SourceSpec,
+            ) -> Result<Vec<u8>, CtxfsError> {
+                unimplemented!()
+            }
+            async fn fetch_directory(&self, _: &Digest) -> Result<Vec<u8>, CtxfsError> {
+                unimplemented!()
+            }
+            async fn fetch_blob(&self, _: &Digest) -> Result<Vec<u8>, CtxfsError> {
+                unimplemented!()
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            ctxfs_cache::BlobCache::new(tmp.path().join("cache"), 1024 * 1024)
+                .expect("BlobCache"),
+        );
+
+        let provider: SharedProvider = Arc::new(NullProvider);
+        let snapshot = Snapshot {
+            source: "github:owner/repo@main".to_string(),
+            commit_sha: "test".to_string(),
+            root_directory: ctxfs_core::Digest {
+                algorithm: ctxfs_core::digest::HashAlgorithm::Sha256,
+                hex: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            },
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let vfs = Arc::new(
+            VfsState::new(provider, cache, snapshot, None)
+                .await
+                .expect("VfsState::new"),
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let mut adapter =
+            FilesystemAdapter::new(vfs, "test-vol".to_string(), "Test Vol".to_string())
+                .with_unmount_notifier(tx);
+
+        // Calling unmount() must send to the channel — no real FSKit session needed.
+        adapter.unmount().await.expect("unmount must succeed");
+
+        // The receiver must have a pending message.
+        let signal = rx.try_recv();
+        assert!(
+            signal.is_ok(),
+            "notifier must fire when FilesystemAdapter::unmount() is called"
+        );
     }
 }

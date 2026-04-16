@@ -67,7 +67,14 @@ pub async fn start_fskit_mount(
             .await
             .map_err(|e| FsKitMountError::Vfs(e.to_string()))?,
     );
-    let adapter = FilesystemAdapter::new(vfs, slug.clone(), display);
+
+    // Create the channel before building the adapter so the sender can be
+    // embedded in it.  The receiver is returned inside `FsKitHandle` so the
+    // daemon can spawn a watcher task for Finder-eject cleanup.
+    let (unmount_tx, unmount_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    let adapter = FilesystemAdapter::new(vfs, slug.clone(), display)
+        .with_unmount_notifier(unmount_tx);
 
     let opts = MountOptions {
         fskit_id: bundle_id.to_string(),
@@ -85,7 +92,7 @@ pub async fn start_fskit_mount(
         .await
         .map_err(|e| FsKitMountError::Session(e.to_string()))?;
 
-    Ok(FsKitHandle::new(session, volume_path))
+    Ok(FsKitHandle::new(session, volume_path).with_unmount_rx(unmount_rx))
 }
 
 /// Ensure /Volumes/ctxfs/<slug> exists and nothing is already mounted on it.
