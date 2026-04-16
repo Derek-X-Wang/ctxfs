@@ -493,9 +493,6 @@ impl DaemonServer {
 
         let prep = self.prepare_mount(source_str)?;
 
-        let token = ctxfs_fskit::AuthToken::generate();
-        let token_hex = token.to_hex();
-
         let fskit_handle = self
             .rt_handle
             .block_on(crate::fskit_mount::start_fskit_mount(
@@ -505,8 +502,6 @@ impl DaemonServer {
                 prep.snapshot.clone(),
                 prep.subpath,
                 &bundle_id,
-                &token,
-                &token_hex,
             ))
             .map_err(|e| format!("fskit mount failed: {e}"))?;
 
@@ -546,7 +541,7 @@ impl DaemonServer {
             symlink_paths,
             backend: Backend::FsKit,
             tcp_port: None,
-            auth_token: Some(token_hex.clone()),
+            auth_token: None,
         };
         if let Err(e) = state_file.add(entry) {
             warn!("failed to persist mount state: {e}");

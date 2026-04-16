@@ -37,9 +37,12 @@ pub enum FsKitMountError {
 
 /// Start an FSKit mount. Returns a handle whose shutdown() unmounts on scope exit.
 ///
-/// `token_hex` is the hex-encoded form of `token`; it is forwarded to fskitd as
-/// `FSTaskOptions` so the appex can send it back as the first frame of every bridge
-/// TCP connection for authentication.
+/// Auth token enforcement is opt-in: the `SessionBuilder::with_auth_token` API
+/// and `AuthenticateRequest` proto variant exist in fskit-rs, but are not
+/// activated here. The security model for Phase 1.5 is localhost binding only
+/// (same as the NFS backend) — see spec Bridge Security section. When a reliable
+/// token delivery mechanism is available (e.g., App Group shared container in
+/// Phase 2a), enable auth by passing `auth_token: Some(token.bytes_vec())`.
 pub async fn start_fskit_mount(
     source: &SourceSpec,
     provider: SharedProvider,
@@ -47,8 +50,6 @@ pub async fn start_fskit_mount(
     snapshot: Snapshot,
     subpath: Option<String>,
     bundle_id: &str,
-    token: &ctxfs_fskit::AuthToken,
-    token_hex: &str,
 ) -> Result<FsKitHandle, FsKitMountError> {
     let parent = PathBuf::from("/Volumes/ctxfs");
     if !parent.exists() {
@@ -71,11 +72,11 @@ pub async fn start_fskit_mount(
         fskit_id: bundle_id.to_string(),
         mount_point: volume_path.clone(),
         force: true,
-        auth_token: Some(token.bytes_vec()),
-        task_options: vec![format!("token={token_hex}")],
+        auth_token: None,
+        task_options: vec![],
     };
     info!(
-        "starting FSKit mount at {} (bundle_id={}, auth=yes)",
+        "starting FSKit mount at {} (bundle_id={}, auth=localhost-only)",
         volume_path.display(),
         bundle_id
     );
