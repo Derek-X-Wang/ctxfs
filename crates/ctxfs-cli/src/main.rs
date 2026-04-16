@@ -105,6 +105,11 @@ enum SetupAction {
     Check,
     /// Install FSKit extension for macOS 26+ (no sudo, no FDA).
     InstallFskit,
+    /// Persistently set the default backend in ~/.ctxfs/config.toml
+    DefaultBackend {
+        /// Backend to use by default: "nfs" or "fskit"
+        backend: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -389,6 +394,9 @@ async fn main() -> Result<()> {
             }
             SetupAction::InstallFskit => {
                 setup::install_fskit().map_err(|e| anyhow::anyhow!(e))?;
+            }
+            SetupAction::DefaultBackend { backend } => {
+                setup::handle_default_backend(&backend)?;
             }
         },
 
