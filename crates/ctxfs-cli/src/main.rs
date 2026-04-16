@@ -1,5 +1,6 @@
 mod backend;
 mod deps;
+mod diag;
 mod setup;
 mod symlink;
 
@@ -90,6 +91,8 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Print runtime diagnostics for support
+    Diag,
 }
 
 #[derive(Subcommand)]
@@ -398,6 +401,10 @@ async fn main() -> Result<()> {
                 config_init()?;
             }
         },
+
+        Commands::Diag => {
+            diag::handle_diag(&config).await;
+        }
     }
 
     Ok(())
