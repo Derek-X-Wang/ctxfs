@@ -1,4 +1,4 @@
-# CtxfsFS — Swift FSKit Appex
+# ContextFS — Swift FSKit Appex
 
 Vendored from [FSKitBridge](https://github.com/KhaosT/FSKitBridge) at commit 76e4b32.
 Do not re-sync from upstream blindly — Phase 1.5 adds an auth handshake that
@@ -7,8 +7,10 @@ upstream does not have.
 ## Build
 
 ```bash
-xcodebuild -project FSKitBridge.xcodeproj -scheme FSKitBridge -configuration Release
+xcodebuild -project ContextFS.xcodeproj -scheme ContextFS -configuration Release
 ```
+
+(Until the Xcode GUI rename is done, the scheme/project is still named FSKitBridge.)
 
 ## Bundle IDs (locked)
 
