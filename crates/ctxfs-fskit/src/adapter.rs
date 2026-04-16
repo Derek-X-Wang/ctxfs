@@ -203,18 +203,25 @@ use tracing::debug;
 #[derive(Clone, Debug)]
 pub struct FilesystemAdapter {
     vfs: Arc<VfsState>,
+    /// Slug-based identifier, safe as a file-system path component.
     volume_name: String,
+    /// Stable opaque ID derived from the slug (used in `VolumeIdentifier.id`).
     volume_id: String,
+    /// Human-readable name shown in Finder sidebar (used in `VolumeIdentifier.name`).
+    display_name: String,
 }
 
 impl FilesystemAdapter {
     /// Create an adapter for a VFS whose root inode must be 1.
     ///
+    /// `volume_name` is the slug (safe for path use); `display_name` is the
+    /// human-readable string shown in the Finder sidebar.
+    ///
     /// # Panics (debug)
     /// Panics in debug builds if `vfs.root_id() != 1`. The inode bijection
     /// in `vfs_to_fskit_inode` assumes this.
     #[must_use]
-    pub fn new(vfs: Arc<VfsState>, volume_name: String) -> Self {
+    pub fn new(vfs: Arc<VfsState>, volume_name: String, display_name: String) -> Self {
         debug_assert_eq!(
             vfs.root_id(),
             1,
@@ -225,6 +232,7 @@ impl FilesystemAdapter {
             vfs,
             volume_name,
             volume_id,
+            display_name,
         }
     }
 }
@@ -242,8 +250,8 @@ impl Filesystem for FilesystemAdapter {
 
     async fn get_volume_identifier(&mut self) -> FsKitResult<VolumeIdentifier> {
         Ok(VolumeIdentifier {
-            id: Some(self.volume_id.clone()),
-            name: Some(self.volume_name.clone()),
+            id: Some(self.volume_id.clone()),        // "ctxfs-npm-react-19.1.0" (slug-based)
+            name: Some(self.display_name.clone()),   // "react 19.1.0" (human-readable)
         })
     }
 
