@@ -12,41 +12,24 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     private override init() {
         super.init()
-        do {
-            let port = try Bundle.main.getServerPort()
-            socket.initialize(host: "localhost", port: port)
-        } catch {
-            log.e("Failed to configure socket: \(error.localizedDescription)")
-        }
     }
 
     func probeResource(
         resource: FSResource,
         replyHandler: @escaping (FSProbeResult?, (any Error)?) -> Void
     ) {
-        log.d("probeResource")
-        do {
-            let response = try socket.send(
-                content: .getResourceIdentifier(Pb_GetResourceIdentifier())
-            )
-            if case .resourceIdentifier(let value) = response {
-                replyHandler(
-                    FSProbeResult.usable(
-                        name: value.name,
-                        containerID: FSContainerIdentifier(
-                            uuid: UUID(uuidString: value.containerID) ?? UUID()
-                        )
-                    ),
-                    nil
-                )
-                return
-            }
-        } catch {
-            log.e(
-                "probeResource: failure (error = \(error.localizedDescription))"
-            )
-        }
-        replyHandler(nil, nil)
+        // Return usable unconditionally — the ctxfs daemon is the one that
+        // initiates the mount via mounter::mount(), so probe always succeeds.
+        // The socket isn't configured until loadResource (where we receive the
+        // auth token via FSTaskOptions), so we can't query the daemon here.
+        log.d("probeResource: returning usable (auth token deferred to loadResource)")
+        replyHandler(
+            FSProbeResult.usable(
+                name: "ctxfs",
+                containerID: FSContainerIdentifier(uuid: UUID())
+            ),
+            nil
+        )
     }
 
     func loadResource(
@@ -56,6 +39,21 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     ) {
         log.d("loadResource")
         do {
+            let port = try Bundle.main.getServerPort()
+            var token: Data?
+            for opt in options.taskOptions {
+                if opt.hasPrefix("token=") {
+                    let hex = String(opt.dropFirst("token=".count))
+                    token = Data(hexString: hex)
+                }
+            }
+            guard let token else {
+                log.e("loadResource: missing auth token in task options")
+                replyHandler(nil, nil)
+                return
+            }
+            socket.initialize(host: "localhost", port: port, token: token)
+
             let response = try socket.send(
                 content: .getVolumeIdentifier(Pb_GetVolumeIdentifier())
             )

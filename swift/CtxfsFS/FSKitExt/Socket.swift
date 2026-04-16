@@ -11,6 +11,7 @@ final class Socket: @unchecked Sendable {
 
     private var host: String?
     private var port: Int?
+    private var authToken: Data?
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var channel: Channel?
     private var pendingPromises:
@@ -18,7 +19,7 @@ final class Socket: @unchecked Sendable {
     private let channelLock = NSLock()
     private let promiseLock = NSLock()
 
-    func initialize(host: String, port: Int) {
+    func initialize(host: String, port: Int, token: Data) {
         channelLock.lock()
         defer { channelLock.unlock() }
 
@@ -26,6 +27,7 @@ final class Socket: @unchecked Sendable {
 
         self.host = host
         self.port = port
+        self.authToken = token
 
         if let channel, channel.isActive {
             channel.close(mode: .all, promise: nil)
@@ -135,8 +137,64 @@ final class Socket: @unchecked Sendable {
                 }
             }
 
-        channel = try bootstrap.connect(host: host, port: port).wait()
+        let connected = try bootstrap.connect(host: host, port: port).wait()
         log.d("Connected to \(host):\(port)")
+
+        // Authenticate with the daemon before returning the channel.
+        guard let authToken else {
+            try? connected.close().wait()
+            throw SocketError.notConfigured
+        }
+
+        var authReq = Pb_Request()
+        authReq.id = UInt64.random(in: 1...UInt64.max)
+        var authContent = Pb_AuthenticateRequest()
+        authContent.token = authToken
+        authReq.content = .authenticate(authContent)
+
+        let authBuf = try encodeLengthDelimited(authReq, allocator: connected.allocator)
+
+        // Register a promise for the auth response.
+        let authPromise = connected.eventLoop.makePromise(of: Pb_Response.OneOf_Content.self)
+        let authID = authReq.id
+
+        promiseLock.lock()
+        pendingPromises[authID] = authPromise
+        promiseLock.unlock()
+
+        // Send the authenticate frame.
+        try connected.writeAndFlush(authBuf).wait()
+
+        // Wait for response with a short timeout.
+        let timeout = connected.eventLoop.scheduleTask(in: .seconds(5)) {
+            authPromise.fail(SocketError.responseTimedOut)
+        }
+
+        let authResp: Pb_Response.OneOf_Content
+        do {
+            authResp = try authPromise.futureResult.wait()
+            timeout.cancel()
+        } catch {
+            timeout.cancel()
+            try? connected.close().wait()
+            throw SocketError.authenticationFailed
+        }
+
+        // Check the response is Success.
+        switch authResp {
+        case .success:
+            log.d("Authentication successful")
+        case .posixError(let code):
+            log.e("Authentication failed: posix error \(code)")
+            try? connected.close().wait()
+            throw SocketError.authenticationFailed
+        default:
+            log.e("Authentication failed: unexpected response")
+            try? connected.close().wait()
+            throw SocketError.authenticationFailed
+        }
+
+        channel = connected
         return channel!
     }
 
@@ -176,6 +234,7 @@ enum SocketError: LocalizedError {
     case invalidVarint
     case responseTimedOut
     case missingContent
+    case authenticationFailed
 
     var errorDescription: String? {
         switch self {
@@ -189,6 +248,8 @@ enum SocketError: LocalizedError {
             return "Timed out waiting for a response."
         case .missingContent:
             return "Received a response without any payload."
+        case .authenticationFailed:
+            return "Bridge authentication handshake failed — token rejected by daemon."
         }
     }
 }
