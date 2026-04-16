@@ -214,13 +214,13 @@ pub fn is_macos_26_or_later() -> bool {
     }
 }
 
-/// Find the CtxfsFS.app bundle.
+/// Find the ContextFS.app bundle.
 ///
 /// Search order:
 /// 1. `CTXFS_FSKIT_APP_PATH` environment variable
 /// 2. Next to the current binary
-/// 3. `~/Applications/CtxfsFS.app`
-/// 4. `/Applications/CtxfsFS.app`
+/// 3. `~/Applications/ContextFS.app`
+/// 4. `/Applications/ContextFS.app`
 pub fn find_fskit_app() -> Option<std::path::PathBuf> {
     // 1. Environment override.
     if let Ok(env_path) = std::env::var("CTXFS_FSKIT_APP_PATH") {
@@ -233,23 +233,23 @@ pub fn find_fskit_app() -> Option<std::path::PathBuf> {
     // 2. Next to the current binary.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("CtxfsFS.app");
+            let candidate = dir.join("ContextFS.app");
             if candidate.exists() {
                 return Some(candidate);
             }
         }
     }
 
-    // 3. ~/Applications/CtxfsFS.app
+    // 3. ~/Applications/ContextFS.app
     if let Some(home) = dirs::home_dir() {
-        let candidate = home.join("Applications").join("CtxfsFS.app");
+        let candidate = home.join("Applications").join("ContextFS.app");
         if candidate.exists() {
             return Some(candidate);
         }
     }
 
-    // 4. /Applications/CtxfsFS.app
-    let system_path = std::path::PathBuf::from("/Applications/CtxfsFS.app");
+    // 4. /Applications/ContextFS.app
+    let system_path = std::path::PathBuf::from("/Applications/ContextFS.app");
     if system_path.exists() {
         return Some(system_path);
     }
@@ -259,8 +259,8 @@ pub fn find_fskit_app() -> Option<std::path::PathBuf> {
 
 /// Install the FSKit extension for macOS 26+.
 ///
-/// 1. Locates `CtxfsFS.app` via `find_fskit_app`.
-/// 2. Copies it to `~/Applications/CtxfsFS.app` (skips if already there).
+/// 1. Locates `ContextFS.app` via `find_fskit_app`.
+/// 2. Copies it to `~/Applications/ContextFS.app` (skips if already there).
 /// 3. Creates `/Volumes/ctxfs/` as the standard mount-point root (requires sudo once).
 /// 4. Prints instructions to enable the System Extension in System Settings and opens
 ///    the relevant pane on macOS.
@@ -268,7 +268,7 @@ pub fn install_fskit() -> Result<(), String> {
     // Step 1: find the app bundle.
     let app_src = find_fskit_app()
         .ok_or_else(|| {
-            "CtxfsFS.app not found. Make sure it is next to the ctxfs binary, in \
+            "ContextFS.app not found. Make sure it is next to the ctxfs binary, in \
              ~/Applications, or /Applications, or set CTXFS_FSKIT_APP_PATH."
                 .to_string()
         })?;
@@ -276,11 +276,11 @@ pub fn install_fskit() -> Result<(), String> {
     // Step 2: copy to ~/Applications if not already there.
     let home = dirs::home_dir()
         .ok_or_else(|| "could not determine home directory".to_string())?;
-    let dest = home.join("Applications").join("CtxfsFS.app");
+    let dest = home.join("Applications").join("ContextFS.app");
 
     if dest != app_src {
         if dest.exists() {
-            println!("CtxfsFS.app already installed at {}.", dest.display());
+            println!("ContextFS.app already installed at {}.", dest.display());
         } else {
             println!("Copying {} to {}...", app_src.display(), dest.display());
             std::fs::create_dir_all(home.join("Applications"))
@@ -297,7 +297,7 @@ pub fn install_fskit() -> Result<(), String> {
             println!("Copied.");
         }
     } else {
-        println!("CtxfsFS.app is already at the target location.");
+        println!("ContextFS.app is already at the target location.");
     }
 
     // Step 3: create /Volumes/ctxfs/ as mount-point root.

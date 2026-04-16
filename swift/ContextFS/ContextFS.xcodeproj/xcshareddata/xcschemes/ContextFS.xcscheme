@@ -17,9 +17,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "76A2B10A2E28555D00BCA3F9"
-               BuildableName = "FSKitBridge.app"
-               BlueprintName = "FSKitBridge"
-               ReferencedContainer = "container:FSKitBridge.xcodeproj">
+               BuildableName = "ContextFS.app"
+               BlueprintName = "ContextFS"
+               ReferencedContainer = "container:ContextFS.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -31,9 +31,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "76A2B1242E2857B200BCA3F9"
-               BuildableName = "FSKitExt.appex"
-               BlueprintName = "FSKitExt"
-               ReferencedContainer = "container:FSKitBridge.xcodeproj">
+               BuildableName = "ContextFSExt.appex"
+               BlueprintName = "ContextFSExt"
+               ReferencedContainer = "container:ContextFS.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -60,9 +60,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "76A2B10A2E28555D00BCA3F9"
-            BuildableName = "FSKitBridge.app"
-            BlueprintName = "FSKitBridge"
-            ReferencedContainer = "container:FSKitBridge.xcodeproj">
+            BuildableName = "ContextFS.app"
+            BlueprintName = "ContextFS"
+            ReferencedContainer = "container:ContextFS.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -77,9 +77,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "76A2B10A2E28555D00BCA3F9"
-            BuildableName = "FSKitBridge.app"
-            BlueprintName = "FSKitBridge"
-            ReferencedContainer = "container:FSKitBridge.xcodeproj">
+            BuildableName = "ContextFS.app"
+            BlueprintName = "ContextFS"
+            ReferencedContainer = "container:ContextFS.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

@@ -1,5 +1,6 @@
 mod backend;
 mod deps;
+mod diag;
 mod setup;
 mod symlink;
 
@@ -85,6 +86,13 @@ enum Commands {
         #[command(subcommand)]
         action: DepsAction,
     },
+    /// Config file management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Print runtime diagnostics for support
+    Diag,
 }
 
 #[derive(Subcommand)]
@@ -170,6 +178,12 @@ enum DepsAction {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Write a commented template to ~/.ctxfs/config.toml
+    Init,
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)] // CLI dispatch is naturally long
 async fn main() -> Result<()> {
@@ -181,7 +195,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = Config::from_env();
+    let config = Config::load();
 
     match cli.command {
         Commands::Mount {
@@ -381,8 +395,58 @@ async fn main() -> Result<()> {
         Commands::Deps { action } => {
             handle_deps(&config, action).await?;
         }
+
+        Commands::Config { action } => match action {
+            ConfigAction::Init => {
+                config_init()?;
+            }
+        },
+
+        Commands::Diag => {
+            diag::handle_diag(&config).await;
+        }
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config handler
+// ---------------------------------------------------------------------------
+
+const CONFIG_TEMPLATE: &str = r#"# ContextFS configuration
+# Env vars override these values (e.g. GITHUB_TOKEN overrides github_token)
+
+# github_token = "ghp_..."
+# log_level = "info"
+# cache_max_bytes = 536870912  # 512MB
+# backend = "auto"  # "nfs" | "fskit" | "auto"
+# fskit_bundle_id = "ai.ctxfs.fskitbridge.fskitext"
+"#;
+
+fn config_init() -> Result<()> {
+    let path = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join(".ctxfs")
+        .join("config.toml");
+
+    if path.exists() {
+        anyhow::bail!(
+            "{} already exists. Remove it first if you want to regenerate.",
+            path.display()
+        );
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    std::fs::write(&path, CONFIG_TEMPLATE)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    println!("Wrote config template to {}", path.display());
+    println!("Edit it to set your GitHub token, log level, etc.");
     Ok(())
 }
 

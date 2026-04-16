@@ -25,11 +25,11 @@ fn macos_version_26_or_later() -> bool {
     }
 }
 
-/// Check if CtxfsFS.app is installed.
+/// Check if ContextFS.app is installed.
 fn fskit_app_installed() -> bool {
     let candidates = [
-        dirs::home_dir().map(|h| h.join("Applications/CtxfsFS.app")),
-        Some(std::path::PathBuf::from("/Applications/CtxfsFS.app")),
+        dirs::home_dir().map(|h| h.join("Applications/ContextFS.app")),
+        Some(std::path::PathBuf::from("/Applications/ContextFS.app")),
     ];
     candidates.iter().any(|p| p.as_ref().is_some_and(|p| p.exists()))
 }
@@ -40,7 +40,7 @@ fn fskit_app_installed() -> bool {
 /// 1. Explicit `--backend` flag
 /// 2. `CTXFS_BACKEND` environment variable
 /// 3. Config file default
-/// 4. Auto-detect (macOS 26+ with CtxfsFS.app → FSKit, otherwise NFS)
+/// 4. Auto-detect (macOS 26+ with ContextFS.app → FSKit, otherwise NFS)
 pub fn detect_backend(flag: Option<Backend>, config_default: Option<Backend>) -> Backend {
     if let Some(b) = flag {
         return b;
