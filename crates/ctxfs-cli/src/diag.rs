@@ -105,7 +105,7 @@ fn check_extension(config: &Config) {
                     .fskit_bundle_id
                     .as_deref()
                     .unwrap_or("ai.ctxfs.fskitbridge.fskitext");
-                if stdout.contains("fskitbridge") {
+                if stdout.contains(bundle_id) {
                     println!("  Extension:  {bundle_id} (enabled)");
                 } else {
                     println!("  Extension:  not registered");
