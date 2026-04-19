@@ -142,3 +142,81 @@ fn helper_unknown_method_returns_error_response() {
     drop(stdin);
     let _ = child.wait();
 }
+
+#[test]
+fn set_cache_limits_errors_when_params_missing() {
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":1,"method":"set_cache_limits","params":{{}}}}"#).unwrap();
+    stdin.flush().unwrap();
+
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(
+        response.contains(r#""error""#),
+        "expected param validation error: {response}"
+    );
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn prune_blobs_errors_when_params_missing() {
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":1,"method":"prune_blobs","params":{{}}}}"#).unwrap();
+    stdin.flush().unwrap();
+
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(
+        response.contains(r#""error""#),
+        "expected param validation error: {response}"
+    );
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn cache_breakdown_errors_when_daemon_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("nonexistent.sock");
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .env("CTXFS_SOCKET", &socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":7,"method":"cache_breakdown"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(response.contains(r#""error""#));
+    assert!(response.contains(r#""id":7"#));
+    drop(stdin);
+    let _ = child.wait();
+}

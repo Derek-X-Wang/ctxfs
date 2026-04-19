@@ -78,6 +78,84 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             }
         }
 
+        "cache_breakdown" => match state.client().await {
+            Ok(client) => match client.cache_breakdown(tarpc::context::current()).await {
+                Ok(Ok(breakdown)) => Response::ok(req.id, breakdown),
+                Ok(Err(e)) => Response::err(req.id, e),
+                Err(e) => {
+                    state.reset_client().await;
+                    Response::err(req.id, format!("cache_breakdown rpc failed: {e}"))
+                }
+            },
+            Err(e) => Response::err(req.id, e),
+        },
+
+        "set_cache_limits" => {
+            #[derive(serde::Deserialize)]
+            struct Params {
+                max_bytes: u64,
+            }
+            let params: Params = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::err(
+                        req.id,
+                        format!("invalid params for set_cache_limits: {e}"),
+                    )
+                }
+            };
+            match state.client().await {
+                Ok(client) => {
+                    match client
+                        .set_cache_limits(tarpc::context::current(), params.max_bytes)
+                        .await
+                    {
+                        Ok(Ok(breakdown)) => Response::ok(req.id, breakdown),
+                        Ok(Err(e)) => Response::err(req.id, e),
+                        Err(e) => {
+                            state.reset_client().await;
+                            Response::err(req.id, format!("set_cache_limits rpc failed: {e}"))
+                        }
+                    }
+                }
+                Err(e) => Response::err(req.id, e),
+            }
+        }
+
+        "prune_blobs" => {
+            #[derive(serde::Deserialize)]
+            struct Params {
+                target_bytes: u64,
+            }
+            let params: Params = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::err(
+                        req.id,
+                        format!("invalid params for prune_blobs: {e}"),
+                    )
+                }
+            };
+            match state.client().await {
+                Ok(client) => {
+                    match client
+                        .prune_blobs(tarpc::context::current(), params.target_bytes)
+                        .await
+                    {
+                        Ok(Ok(bytes_freed)) => {
+                            Response::ok(req.id, serde_json::json!({"bytes_freed": bytes_freed}))
+                        }
+                        Ok(Err(e)) => Response::err(req.id, e),
+                        Err(e) => {
+                            state.reset_client().await;
+                            Response::err(req.id, format!("prune_blobs rpc failed: {e}"))
+                        }
+                    }
+                }
+                Err(e) => Response::err(req.id, e),
+            }
+        }
+
         other => Response::err(req.id, format!("unknown method: {other}")),
     }
 }
