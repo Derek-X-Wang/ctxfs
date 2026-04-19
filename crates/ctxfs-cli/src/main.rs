@@ -92,7 +92,11 @@ enum Commands {
         action: ConfigAction,
     },
     /// Print runtime diagnostics for support
-    Diag,
+    Diag {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,7 +129,11 @@ enum DaemonAction {
 #[derive(Subcommand)]
 enum CacheAction {
     /// Show cache statistics
-    Stats,
+    Stats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Prune cache to free space
     Prune {
         /// Maximum blob cache size (e.g., 500000000 for ~500MB)
@@ -197,6 +205,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -296,23 +305,31 @@ async fn main() -> Result<()> {
         },
 
         Commands::Cache { action } => match action {
-            CacheAction::Stats => {
+            CacheAction::Stats { json } => {
                 let client = connect(&config).await?;
-                let stats = client
-                    .cache_stats(tarpc::context::current())
-                    .await?
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                if json {
+                    let breakdown = client
+                        .cache_breakdown(tarpc::context::current())
+                        .await?
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    println!("{}", serde_json::to_string_pretty(&breakdown)?);
+                } else {
+                    let stats = client
+                        .cache_stats(tarpc::context::current())
+                        .await?
+                        .map_err(|e| anyhow::anyhow!(e))?;
 
-                println!("Cache statistics:");
-                println!(
-                    "  Blobs:        {} entries, {} bytes",
-                    stats.entry_count, stats.total_bytes
-                );
-                println!(
-                    "  Trees:        {} entries, {} bytes",
-                    stats.tree_count, stats.tree_bytes
-                );
-                println!("  Resolutions:  {} entries", stats.resolution_count);
+                    println!("Cache statistics:");
+                    println!(
+                        "  Blobs:        {} entries, {} bytes",
+                        stats.entry_count, stats.total_bytes
+                    );
+                    println!(
+                        "  Trees:        {} entries, {} bytes",
+                        stats.tree_count, stats.tree_bytes
+                    );
+                    println!("  Resolutions:  {} entries", stats.resolution_count);
+                }
             }
             CacheAction::Prune {
                 max_size,
@@ -410,8 +427,8 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Diag => {
-            diag::handle_diag(&config).await;
+        Commands::Diag { json } => {
+            diag::handle_diag(&config, json).await;
         }
     }
 
