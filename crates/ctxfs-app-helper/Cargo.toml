@@ -21,6 +21,8 @@ tracing-subscriber = { workspace = true }
 tarpc = { workspace = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-core = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"

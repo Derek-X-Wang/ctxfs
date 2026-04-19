@@ -261,3 +261,94 @@ fn cache_breakdown_errors_when_daemon_down() {
     drop(stdin);
     let _ = child.wait();
 }
+
+#[test]
+fn test_github_token_empty_returns_error() {
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(
+        stdin,
+        r#"{{"id":1,"method":"test_github_token","params":{{"token":""}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(
+        response.contains(r#""error""#),
+        "empty token should error: {response}"
+    );
+    assert!(response.contains("empty"), "error should mention 'empty': {response}");
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn test_github_token_missing_params_returns_error() {
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(
+        stdin,
+        r#"{{"id":1,"method":"test_github_token","params":{{}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(
+        response.contains(r#""error""#),
+        "missing token param should error: {response}"
+    );
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// Live network test — gated on env var to avoid flaky CI.
+#[test]
+#[ignore]
+fn test_github_token_validates_real_token() {
+    let token = std::env::var("GITHUB_TOKEN").expect("set GITHUB_TOKEN to run");
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    let req =
+        serde_json::json!({"id": 1, "method": "test_github_token", "params": {"token": token}});
+    writeln!(stdin, "{req}").unwrap();
+    stdin.flush().unwrap();
+
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    assert_eq!(parsed["result"]["valid"], true);
+    assert!(parsed["result"]["remaining"].is_u64());
+    drop(stdin);
+    let _ = child.wait();
+}

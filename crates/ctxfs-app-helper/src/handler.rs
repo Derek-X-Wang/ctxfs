@@ -235,6 +235,104 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             }
         }
 
+        "test_github_token" => {
+            #[derive(serde::Deserialize)]
+            struct Params {
+                token: String,
+            }
+
+            #[derive(serde::Serialize)]
+            struct TokenResult {
+                valid: bool,
+                user: Option<String>,
+                remaining: Option<u64>,
+                reset_at: Option<String>,
+            }
+
+            let params: Params = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::err(
+                        req.id,
+                        format!("invalid params for test_github_token: {e}"),
+                    )
+                }
+            };
+            if params.token.is_empty() {
+                return Response::err(req.id, "token is empty");
+            }
+
+            let client = reqwest::Client::new();
+            // Fetch /rate_limit and /user in parallel for a faster UI response.
+            let rate_limit_fut = client
+                .get("https://api.github.com/rate_limit")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", params.token),
+                )
+                .header(
+                    "User-Agent",
+                    concat!("ctxfs/", env!("CARGO_PKG_VERSION")),
+                )
+                .header("Accept", "application/vnd.github+json")
+                .send();
+            let user_fut = client
+                .get("https://api.github.com/user")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", params.token),
+                )
+                .header(
+                    "User-Agent",
+                    concat!("ctxfs/", env!("CARGO_PKG_VERSION")),
+                )
+                .header("Accept", "application/vnd.github+json")
+                .send();
+
+            let (rate_res, user_res) = tokio::join!(rate_limit_fut, user_fut);
+
+            let rate_resp = match rate_res {
+                Ok(r) => r,
+                Err(e) => return Response::err(req.id, format!("request failed: {e}")),
+            };
+            if !rate_resp.status().is_success() {
+                return Response::err(
+                    req.id,
+                    format!("GitHub returned {}", rate_resp.status()),
+                );
+            }
+            let rate_body: serde_json::Value = match rate_resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Response::err(req.id, format!("failed to parse rate_limit: {e}"))
+                }
+            };
+
+            let remaining = rate_body["resources"]["core"]["remaining"].as_u64();
+            let reset_at = rate_body["resources"]["core"]["reset"]
+                .as_i64()
+                .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
+                .map(|dt| dt.to_rfc3339());
+
+            let user = match user_res {
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                    Ok(body) => body["login"].as_str().map(std::string::ToString::to_string),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+
+            Response::ok(
+                req.id,
+                TokenResult {
+                    valid: true,
+                    user,
+                    remaining,
+                    reset_at,
+                },
+            )
+        }
+
         other => Response::err(req.id, format!("unknown method: {other}")),
     }
 }
