@@ -8,3 +8,6 @@ swift/**/DerivedData/
 swift/**/build/
 swift/**/*.xcuserdatad/
 swift/**/xcuserdata/
+
+# Brainstorming session mockups
+.superpowers/
