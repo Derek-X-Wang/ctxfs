@@ -333,6 +333,94 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             )
         }
 
+        "config_read" => {
+            let path = ctxfs_core::config::load_config_path();
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let snapshot_hash = ctxfs_core::config::ConfigSnapshot::read(&path)
+                .map(|s| s.hash().to_string())
+                .unwrap_or_default();
+            Response::ok(
+                req.id,
+                serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "content": content,
+                    "snapshot_hash": snapshot_hash,
+                }),
+            )
+        }
+
+        "config_set" => {
+            #[derive(serde::Deserialize)]
+            struct Params {
+                content: String,
+                snapshot_hash: String,
+            }
+            let params: Params = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::err(req.id, format!("invalid params for config_set: {e}"))
+                }
+            };
+            let path = ctxfs_core::config::load_config_path();
+            let snapshot = ctxfs_core::config::ConfigSnapshot::from_hash(params.snapshot_hash);
+            match snapshot.write_back(&path, &params.content) {
+                Ok(()) => Response::ok(req.id, serde_json::json!({"ok": true})),
+                Err(ctxfs_core::config::ConfigWriteError::ExternalEdit { expected, actual }) => {
+                    Response::err(
+                        req.id,
+                        format!(
+                            "config modified externally (expected hash {expected}, found {actual})"
+                        ),
+                    )
+                }
+                Err(e) => Response::err(req.id, format!("write failed: {e}")),
+            }
+        }
+
+        "config_set_value" => {
+            #[derive(serde::Deserialize)]
+            struct Params {
+                key: String,
+                value: serde_json::Value,
+            }
+            let params: Params = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::err(
+                        req.id,
+                        format!("invalid params for config_set_value: {e}"),
+                    )
+                }
+            };
+            let path = ctxfs_core::config::load_config_path();
+            // Convert serde_json::Value → toml_edit::Value
+            let toml_value = match params.value {
+                serde_json::Value::String(s) => toml_edit::Value::from(s),
+                serde_json::Value::Bool(b) => toml_edit::Value::from(b),
+                serde_json::Value::Number(ref n) if n.is_u64() => {
+                    toml_edit::Value::from(n.as_u64().unwrap() as i64)
+                }
+                serde_json::Value::Number(ref n) if n.is_i64() => {
+                    toml_edit::Value::from(n.as_i64().unwrap())
+                }
+                serde_json::Value::Number(ref n) if n.is_f64() => {
+                    toml_edit::Value::from(n.as_f64().unwrap())
+                }
+                other => {
+                    return Response::err(
+                        req.id,
+                        format!("unsupported value type for {}: {other}", params.key),
+                    )
+                }
+            };
+            match ctxfs_core::config::update_config_key(&path, &params.key, toml_value) {
+                Ok(()) => {
+                    Response::ok(req.id, serde_json::json!({"ok": true, "key": params.key}))
+                }
+                Err(e) => Response::err(req.id, format!("write failed: {e}")),
+            }
+        }
+
         other => Response::err(req.id, format!("unknown method: {other}")),
     }
 }

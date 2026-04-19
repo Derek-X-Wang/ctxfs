@@ -4,100 +4,10 @@
 //! current user to run `mount_nfs` and `umount` without a password prompt.
 
 use anyhow::{Context as _, Result};
-use sha2::Digest as _;
 use std::path::Path;
 
-// ---------------------------------------------------------------------------
-// Atomic write + external-edit detection
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur when writing the config file.
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigWriteError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("config file was modified externally (hash {expected} expected, found {actual})")]
-    ExternalEdit { expected: String, actual: String },
-}
-
-/// Atomically write `contents` to `path` using a temp+fsync+rename strategy.
-///
-/// - Creates the parent directory if it does not exist.
-/// - Writes to a sibling `.tmp.<pid>` file, calls `fsync`, then renames over the target.
-/// - On Unix, `rename` is atomic, so an interrupted write never leaves a half-written file.
-pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ConfigWriteError> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
-    })?;
-    std::fs::create_dir_all(parent)?;
-
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("config.toml");
-    let tmp_path = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
-
-    {
-        use std::io::Write as _;
-        let mut f = std::fs::File::create(&tmp_path)?;
-        f.write_all(contents)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
-}
-
-/// A snapshot of a config file's contents at the time it was read.
-///
-/// Used by the future Preferences GUI to detect external edits: take a snapshot
-/// when the window opens, re-check before saving. If the on-disk hash has
-/// changed, return [`ConfigWriteError::ExternalEdit`] so the GUI can show a
-/// non-destructive "reload or overwrite?" dialog.
-#[derive(Debug)]
-pub struct ConfigSnapshot {
-    /// SHA-256 hex of the file contents at read time.  Empty-file hash when
-    /// the file did not exist.
-    hash_at_read: String,
-}
-
-impl ConfigSnapshot {
-    /// Read the file at `path` and record its hash.
-    ///
-    /// If the file does not exist, records the hash of an empty byte slice so
-    /// that a subsequent [`write_back`](Self::write_back) will succeed when the
-    /// file is still missing.
-    pub fn read(path: &Path) -> Result<Self, ConfigWriteError> {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
-        Ok(Self {
-            hash_at_read: hex::encode(sha2::Sha256::digest(&bytes)),
-        })
-    }
-
-    /// Write `contents` to `path` atomically, but only if the file has not
-    /// been modified since this snapshot was taken.
-    ///
-    /// Returns [`ConfigWriteError::ExternalEdit`] if the current on-disk hash
-    /// differs from the hash recorded at read time.
-    pub fn write_back(&self, path: &Path, contents: &str) -> Result<(), ConfigWriteError> {
-        let current = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
-        let current_hash = hex::encode(sha2::Sha256::digest(&current));
-        if current_hash != self.hash_at_read {
-            return Err(ConfigWriteError::ExternalEdit {
-                expected: self.hash_at_read.clone(),
-                actual: current_hash,
-            });
-        }
-        atomic_write(path, contents.as_bytes())
-    }
-}
+// Import atomic_write from ctxfs-core (used in set_default_backend).
+use ctxfs_core::config::atomic_write;
 
 const SUDOERS_PATH: &str = "/etc/sudoers.d/ctxfs";
 
@@ -558,6 +468,7 @@ pub fn handle_default_backend(backend: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctxfs_core::config::{ConfigSnapshot, ConfigWriteError};
 
     #[test]
     fn generate_sudoers_contains_username() {
