@@ -446,7 +446,7 @@ const CONFIG_TEMPLATE: &str = r#"# ContextFS configuration
 # log_level = "info"
 # cache_max_bytes = 536870912  # 512MB
 # backend = "auto"  # "nfs" | "fskit" | "auto"
-# fskit_bundle_id = "ai.ctxfs.fskitbridge.fskitext"
+# fskit_bundle_id = "ai.ctxfs.companion.fskitext"
 "#;
 
 fn config_init() -> Result<()> {

@@ -12,7 +12,7 @@ xcodebuild -project ContextFS.xcodeproj -scheme ContextFS -configuration Release
 
 ## Bundle IDs (locked)
 
-- Host app: `ai.ctxfs.fskitbridge`
-- Extension: `ai.ctxfs.fskitbridge.fskitext`
+- Host app: `ai.ctxfs.companion`
+- Extension: `ai.ctxfs.companion.fskitext`
 
 See `/docs/superpowers/specs/2026-04-11-fskit-backend-design.md` for architecture.

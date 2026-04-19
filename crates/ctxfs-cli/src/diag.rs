@@ -182,7 +182,7 @@ fn query_extension_status(config: &Config) -> (bool, bool, Option<String>) {
     let bundle_id = config
         .fskit_bundle_id
         .as_deref()
-        .unwrap_or("ai.ctxfs.fskitbridge.fskitext");
+        .unwrap_or("ai.ctxfs.companion.fskitext");
     let info = ctxfs_core::query_fskit_extension_status(bundle_id);
     if info.platform_supported {
         (info.registered, info.enabled, Some(info.bundle_id))

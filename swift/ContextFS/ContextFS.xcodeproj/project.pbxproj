@@ -448,7 +448,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.fskitbridge;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.companion;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -484,7 +484,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.fskitbridge;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.companion;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -514,7 +514,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.fskitbridge.fskitext;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.companion.fskitext;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -544,7 +544,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.fskitbridge.fskitext;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.ctxfs.companion.fskitext;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;

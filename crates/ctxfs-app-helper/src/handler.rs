@@ -17,7 +17,7 @@ impl HandlerState {
         let config = ctxfs_core::config::Config::load();
         let bundle_id = config
             .fskit_bundle_id
-            .unwrap_or_else(|| "ai.ctxfs.fskitbridge.fskitext".to_string());
+            .unwrap_or_else(|| "ai.ctxfs.companion.fskitext".to_string());
         Self {
             client: Arc::new(Mutex::new(None)),
             socket_path,

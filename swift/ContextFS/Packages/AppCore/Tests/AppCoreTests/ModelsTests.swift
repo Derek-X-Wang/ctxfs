@@ -75,10 +75,10 @@ final class ModelsTests: XCTestCase {
 
     func testExtensionStatusDecode() throws {
         let json = """
-        {"bundle_id":"ai.ctxfs.fskitbridge.fskitext","registered":true,"enabled":true,"version":null,"platform_supported":true}
+        {"bundle_id":"ai.ctxfs.companion.fskitext","registered":true,"enabled":true,"version":null,"platform_supported":true}
         """
         let s = try JSONDecoder().decode(ExtensionStatus.self, from: json.data(using: .utf8)!)
-        XCTAssertEqual(s.bundleId, "ai.ctxfs.fskitbridge.fskitext")
+        XCTAssertEqual(s.bundleId, "ai.ctxfs.companion.fskitext")
         XCTAssertTrue(s.registered)
         XCTAssertTrue(s.enabled)
         XCTAssertNil(s.version)
@@ -87,7 +87,7 @@ final class ModelsTests: XCTestCase {
 
     func testExtensionStatusWithVersion() throws {
         let json = """
-        {"bundle_id":"ai.ctxfs.fskitbridge.fskitext","registered":true,"enabled":false,"version":"1.2.3","platform_supported":true}
+        {"bundle_id":"ai.ctxfs.companion.fskitext","registered":true,"enabled":false,"version":"1.2.3","platform_supported":true}
         """
         let s = try JSONDecoder().decode(ExtensionStatus.self, from: json.data(using: .utf8)!)
         XCTAssertEqual(s.version, "1.2.3")

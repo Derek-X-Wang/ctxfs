@@ -17,7 +17,7 @@ final class DaemonStateTests: XCTestCase {
         let state = DaemonState(client: MockHelperClient())
         state.daemonRunning = true
         state.extensionStatus = ExtensionStatus(
-            bundleId: "ai.ctxfs.fskitbridge.fskitext",
+            bundleId: "ai.ctxfs.companion.fskitext",
             registered: true, enabled: false, version: nil, platformSupported: true
         )
         state.mounts = [.stub]  // .stub uses backend "fskit"
@@ -30,7 +30,7 @@ final class DaemonStateTests: XCTestCase {
         let state = DaemonState(client: MockHelperClient())
         state.daemonRunning = true
         state.extensionStatus = ExtensionStatus(
-            bundleId: "ai.ctxfs.fskitbridge.fskitext",
+            bundleId: "ai.ctxfs.companion.fskitext",
             registered: true, enabled: false, version: nil, platformSupported: true
         )
         state.mounts = []
