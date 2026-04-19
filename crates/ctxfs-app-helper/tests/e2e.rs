@@ -323,6 +323,250 @@ fn test_github_token_missing_params_returns_error() {
     let _ = child.wait();
 }
 
+// ---------------------------------------------------------------------------
+// config_read tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_read_returns_content_and_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctxfs_dir = tmp.path().join(".ctxfs");
+    std::fs::create_dir_all(&ctxfs_dir).unwrap();
+    std::fs::write(ctxfs_dir.join("config.toml"), r#"github_token = "abc""#).unwrap();
+
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .env("HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":1,"method":"config_read"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    assert!(
+        parsed["result"]["content"].as_str().unwrap().contains("github_token"),
+        "expected content to contain github_token: {response}"
+    );
+    assert!(
+        parsed["result"]["snapshot_hash"].is_string(),
+        "snapshot_hash must be a string: {response}"
+    );
+    assert!(
+        !parsed["result"]["snapshot_hash"].as_str().unwrap().is_empty(),
+        "snapshot_hash must not be empty: {response}"
+    );
+    assert!(
+        parsed["result"]["path"].is_string(),
+        "path must be a string: {response}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn config_read_missing_file_returns_empty_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Don't create the .ctxfs dir or config.toml
+
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .env("HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":1,"method":"config_read"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    assert_eq!(
+        parsed["result"]["content"].as_str().unwrap(),
+        "",
+        "missing file must return empty content: {response}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// ---------------------------------------------------------------------------
+// config_set tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_set_writes_when_snapshot_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctxfs_dir = tmp.path().join(".ctxfs");
+    std::fs::create_dir_all(&ctxfs_dir).unwrap();
+    std::fs::write(ctxfs_dir.join("config.toml"), "original").unwrap();
+
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .env("HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // config_read first to get current hash
+    writeln!(stdin, r#"{{"id":1,"method":"config_read"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut read_response = String::new();
+    reader.read_line(&mut read_response).unwrap();
+    let read_parsed: serde_json::Value = serde_json::from_str(read_response.trim()).unwrap();
+    let hash = read_parsed["result"]["snapshot_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // config_set with matching hash
+    let req = serde_json::json!({
+        "id": 2,
+        "method": "config_set",
+        "params": { "content": "new content", "snapshot_hash": hash }
+    });
+    writeln!(stdin, "{req}").unwrap();
+    stdin.flush().unwrap();
+    let mut set_response = String::new();
+    reader.read_line(&mut set_response).unwrap();
+    assert!(
+        set_response.contains(r#""result""#),
+        "expected success: {set_response}"
+    );
+    assert!(
+        !set_response.contains(r#""error""#),
+        "unexpected error: {set_response}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+
+    // Verify file actually updated
+    let final_content = std::fs::read_to_string(ctxfs_dir.join("config.toml")).unwrap();
+    assert_eq!(final_content, "new content");
+}
+
+#[test]
+fn config_set_errors_on_stale_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctxfs_dir = tmp.path().join(".ctxfs");
+    std::fs::create_dir_all(&ctxfs_dir).unwrap();
+    std::fs::write(ctxfs_dir.join("config.toml"), "original").unwrap();
+
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .env("HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // Use a fake stale hash
+    let req = serde_json::json!({
+        "id": 1,
+        "method": "config_set",
+        "params": { "content": "new", "snapshot_hash": "deadbeef_fake_hash_value_that_doesnt_match" }
+    });
+    writeln!(stdin, "{req}").unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(
+        response.contains(r#""error""#),
+        "expected error for stale hash: {response}"
+    );
+    assert!(
+        response.contains("external") || response.contains("modified"),
+        "error message should mention external modification: {response}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// ---------------------------------------------------------------------------
+// config_set_value tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_set_value_updates_single_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctxfs_dir = tmp.path().join(".ctxfs");
+    std::fs::create_dir_all(&ctxfs_dir).unwrap();
+    let config_path = ctxfs_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "# header comment\ngithub_token = \"old\"\nlog_level = \"info\"\n",
+    )
+    .unwrap();
+
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .env("HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    let req = serde_json::json!({
+        "id": 1,
+        "method": "config_set_value",
+        "params": { "key": "github_token", "value": "new" }
+    });
+    writeln!(stdin, "{req}").unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    assert!(
+        response.contains(r#""ok":true"#),
+        "expected ok: {response}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+
+    let updated = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        updated.contains("github_token = \"new\""),
+        "github_token should be updated: {updated}"
+    );
+    assert!(
+        updated.contains("log_level = \"info\""),
+        "other keys must be preserved: {updated}"
+    );
+    assert!(
+        updated.contains("# header comment"),
+        "comments must be preserved: {updated}"
+    );
+}
+
 /// Full-lifecycle test. Requires a running ctxfs daemon.
 /// Run with: cargo test -p ctxfs-app-helper -- --ignored helper_persistent_session
 #[test]
