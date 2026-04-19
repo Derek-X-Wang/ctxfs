@@ -450,10 +450,7 @@ const CONFIG_TEMPLATE: &str = r#"# ContextFS configuration
 "#;
 
 fn config_init() -> Result<()> {
-    let path = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".ctxfs")
-        .join("config.toml");
+    let path = ctxfs_core::config::load_config_path();
 
     if path.exists() {
         anyhow::bail!(

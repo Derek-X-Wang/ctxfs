@@ -7,13 +7,21 @@ use tokio::sync::Mutex;
 pub struct HandlerState {
     client: Arc<Mutex<Option<CtxfsServiceClient>>>,
     socket_path: PathBuf,
+    /// Cached FSKit bundle ID — resolved once at init from Config, so
+    /// extension_status doesn't call Config::load() on every request.
+    pub bundle_id: String,
 }
 
 impl HandlerState {
     pub fn new(socket_path: PathBuf) -> Self {
+        let config = ctxfs_core::config::Config::load();
+        let bundle_id = config
+            .fskit_bundle_id
+            .unwrap_or_else(|| "ai.ctxfs.fskitbridge.fskitext".to_string());
         Self {
             client: Arc::new(Mutex::new(None)),
             socket_path,
+            bundle_id,
         }
     }
 
@@ -34,20 +42,45 @@ impl HandlerState {
     }
 }
 
+/// Call a daemon RPC via the persistent client; on transport error, reset the
+/// client so the next request reconnects.
+async fn dispatch_rpc<T, F, Fut>(
+    state: &HandlerState,
+    req_id: u64,
+    rpc_name: &str,
+    f: F,
+) -> Response
+where
+    F: FnOnce(CtxfsServiceClient) -> Fut,
+    Fut: std::future::Future<Output = Result<Result<T, String>, tarpc::client::RpcError>>,
+    T: serde::Serialize,
+{
+    match state.client().await {
+        Ok(client) => match f(client).await {
+            Ok(Ok(value)) => Response::ok(req_id, value),
+            Ok(Err(e)) => Response::err(req_id, e),
+            Err(e) => {
+                state.reset_client().await;
+                Response::err(req_id, format!("{rpc_name} rpc failed: {e}"))
+            }
+        },
+        Err(e) => Response::err(req_id, e),
+    }
+}
+
 pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
     match req.method.as_str() {
         "ping" => Response::ok(req.id, "pong"),
 
-        "list" => match state.client().await {
-            Ok(client) => match client.list(tarpc::context::current()).await {
-                Ok(infos) => Response::ok(req.id, infos),
-                Err(e) => {
-                    state.reset_client().await;
-                    Response::err(req.id, format!("list rpc failed: {e}"))
-                }
-            },
-            Err(e) => Response::err(req.id, e),
-        },
+        "list" => {
+            dispatch_rpc(state, req.id, "list", |client| async move {
+                client
+                    .list(tarpc::context::current())
+                    .await
+                    .map(Ok)
+            })
+            .await
+        }
 
         "unmount" => {
             #[derive(serde::Deserialize)]
@@ -60,35 +93,21 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                     return Response::err(req.id, format!("invalid params for unmount: {e}"))
                 }
             };
-            match state.client().await {
-                Ok(client) => {
-                    match client
-                        .unmount(tarpc::context::current(), params.target)
-                        .await
-                    {
-                        Ok(Ok(())) => Response::ok(req.id, serde_json::json!({"ok": true})),
-                        Ok(Err(e)) => Response::err(req.id, e),
-                        Err(e) => {
-                            state.reset_client().await;
-                            Response::err(req.id, format!("unmount rpc failed: {e}"))
-                        }
-                    }
-                }
-                Err(e) => Response::err(req.id, e),
-            }
+            dispatch_rpc(state, req.id, "unmount", |client| async move {
+                client
+                    .unmount(tarpc::context::current(), params.target)
+                    .await
+                    .map(|r| r.map(|()| serde_json::json!({"ok": true})))
+            })
+            .await
         }
 
-        "cache_breakdown" => match state.client().await {
-            Ok(client) => match client.cache_breakdown(tarpc::context::current()).await {
-                Ok(Ok(breakdown)) => Response::ok(req.id, breakdown),
-                Ok(Err(e)) => Response::err(req.id, e),
-                Err(e) => {
-                    state.reset_client().await;
-                    Response::err(req.id, format!("cache_breakdown rpc failed: {e}"))
-                }
-            },
-            Err(e) => Response::err(req.id, e),
-        },
+        "cache_breakdown" => {
+            dispatch_rpc(state, req.id, "cache_breakdown", |client| async move {
+                client.cache_breakdown(tarpc::context::current()).await
+            })
+            .await
+        }
 
         "set_cache_limits" => {
             #[derive(serde::Deserialize)]
@@ -104,22 +123,12 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                     )
                 }
             };
-            match state.client().await {
-                Ok(client) => {
-                    match client
-                        .set_cache_limits(tarpc::context::current(), params.max_bytes)
-                        .await
-                    {
-                        Ok(Ok(breakdown)) => Response::ok(req.id, breakdown),
-                        Ok(Err(e)) => Response::err(req.id, e),
-                        Err(e) => {
-                            state.reset_client().await;
-                            Response::err(req.id, format!("set_cache_limits rpc failed: {e}"))
-                        }
-                    }
-                }
-                Err(e) => Response::err(req.id, e),
-            }
+            dispatch_rpc(state, req.id, "set_cache_limits", |client| async move {
+                client
+                    .set_cache_limits(tarpc::context::current(), params.max_bytes)
+                    .await
+            })
+            .await
         }
 
         "prune_blobs" => {
@@ -136,24 +145,13 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                     )
                 }
             };
-            match state.client().await {
-                Ok(client) => {
-                    match client
-                        .prune_blobs(tarpc::context::current(), params.target_bytes)
-                        .await
-                    {
-                        Ok(Ok(bytes_freed)) => {
-                            Response::ok(req.id, serde_json::json!({"bytes_freed": bytes_freed}))
-                        }
-                        Ok(Err(e)) => Response::err(req.id, e),
-                        Err(e) => {
-                            state.reset_client().await;
-                            Response::err(req.id, format!("prune_blobs rpc failed: {e}"))
-                        }
-                    }
-                }
-                Err(e) => Response::err(req.id, e),
-            }
+            dispatch_rpc(state, req.id, "prune_blobs", |client| async move {
+                client
+                    .prune_blobs(tarpc::context::current(), params.target_bytes)
+                    .await
+                    .map(|r| r.map(|bytes_freed| serde_json::json!({"bytes_freed": bytes_freed})))
+            })
+            .await
         }
 
         "extension_status" => {
@@ -166,25 +164,27 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                 platform_supported: bool,
             }
 
-            let config = ctxfs_core::config::Config::load();
-            let bundle_id = config
-                .fskit_bundle_id
-                .unwrap_or_else(|| "ai.ctxfs.fskitbridge.fskitext".to_string());
+            // bundle_id is pre-cached in HandlerState — no Config::load() per-request.
+            let bundle_id = state.bundle_id.clone();
 
             #[cfg(target_os = "macos")]
             {
-                match std::process::Command::new("pluginkit")
-                    .args(["-m", "-p", "com.apple.fskit.fsmodule"])
-                    .output()
-                {
-                    Ok(output) => {
+                // Run the blocking pluginkit subprocess on the blocking thread pool
+                // so it doesn't stall the async executor.
+                let result = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("pluginkit")
+                        .args(["-m", "-p", "com.apple.fskit.fsmodule"])
+                        .output()
+                        .map(|output| (output, bundle_id))
+                })
+                .await;
+
+                match result {
+                    Ok(Ok((output, bid))) => {
                         let stdout = String::from_utf8_lossy(&output.stdout);
-                        let line = stdout.lines().find(|l| l.contains(&bundle_id));
+                        let line = stdout.lines().find(|l| l.contains(&bid));
                         let registered = line.is_some();
-                        // pluginkit prefixes enabled extensions with `+`
                         let enabled = line.is_some_and(|l| l.trim_start().starts_with('+'));
-                        // Try to parse version from "bundle_id(1.2.3)" format.
-                        // pluginkit may emit "bundle_id((null))" when no version is set.
                         let version = line.and_then(|l| {
                             let start = l.find('(')? + 1;
                             let end = l.rfind(')')?;
@@ -199,7 +199,7 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                         Response::ok(
                             req.id,
                             Status {
-                                bundle_id,
+                                bundle_id: bid,
                                 registered,
                                 enabled,
                                 version,
@@ -207,14 +207,14 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                             },
                         )
                     }
-                    Err(_) => Response::ok(
+                    Ok(Err(_)) | Err(_) => Response::ok(
                         req.id,
                         Status {
-                            bundle_id,
+                            bundle_id: state.bundle_id.clone(),
                             registered: false,
                             enabled: false,
                             version: None,
-                            platform_supported: true, // still macOS, just pluginkit unavailable
+                            platform_supported: true,
                         },
                     ),
                 }
@@ -263,7 +263,6 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             }
 
             let client = reqwest::Client::new();
-            // Fetch /rate_limit and /user in parallel for a faster UI response.
             let rate_limit_fut = client
                 .get("https://api.github.com/rate_limit")
                 .header(
@@ -334,11 +333,18 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
         }
 
         "config_read" => {
+            use sha2::{Digest, Sha256};
             let path = ctxfs_core::config::load_config_path();
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let snapshot_hash = ctxfs_core::config::ConfigSnapshot::read(&path)
-                .map(|s| s.hash().to_string())
-                .unwrap_or_default();
+            let (content, snapshot_hash) = match std::fs::read(&path) {
+                Ok(bytes) => (
+                    String::from_utf8_lossy(&bytes).to_string(),
+                    hex::encode(Sha256::digest(&bytes)),
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    (String::new(), String::new())
+                }
+                Err(e) => return Response::err(req.id, format!("config_read failed: {e}")),
+            };
             Response::ok(
                 req.id,
                 serde_json::json!({
@@ -393,7 +399,6 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                 }
             };
             let path = ctxfs_core::config::load_config_path();
-            // Convert serde_json::Value → toml_edit::Value
             let toml_value = match params.value {
                 serde_json::Value::String(s) => toml_edit::Value::from(s),
                 serde_json::Value::Bool(b) => toml_edit::Value::from(b),

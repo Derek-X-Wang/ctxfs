@@ -106,9 +106,6 @@ struct MenuContent: View {
     // MARK: - Actions
 
     private func openDiagnostics() {
-        // Placeholder — real diagnostics window is out of scope for 2b-B Task 6.
-        // For now: show a simple NSAlert with the diag fields from state.
-        // Task 7 wires this into the Preferences window or a dedicated sheet.
         let msg = """
         Daemon: \(state.daemonRunning ? "running" : "not running")
         Mounts: \(state.mounts.count)
@@ -226,12 +223,6 @@ private struct StatusDot: View {
     }
 
     private var dotColor: Color? {
-        switch state {
-        case .idle: return nil
-        case .active: return .green
-        case .setupNeeded: return .orange
-        case .error: return .red
-        case .busy: return .blue
-        }
+        state.statusDotColor
     }
 }

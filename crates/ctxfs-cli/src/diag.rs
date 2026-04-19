@@ -55,10 +55,7 @@ async fn collect_report(config: &Config) -> DiagReport {
         "auto-detected"
     };
 
-    let config_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".ctxfs")
-        .join("config.toml");
+    let config_path = ctxfs_core::config::load_config_path();
     let config_loaded = config_path.exists();
 
     let (daemon_running, daemon_pid) = check_daemon(config).await;

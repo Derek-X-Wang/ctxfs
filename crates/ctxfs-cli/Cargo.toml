@@ -28,6 +28,7 @@ serde = { workspace = true }
 futures = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
+toml_edit = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 

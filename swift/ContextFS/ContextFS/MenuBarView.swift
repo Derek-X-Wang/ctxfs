@@ -29,12 +29,6 @@ struct StatusIcon: View {
     }
 
     private var dotColor: Color? {
-        switch state {
-        case .idle:        return nil
-        case .active:      return .green
-        case .setupNeeded: return .orange
-        case .error:       return .red
-        case .busy:        return .blue
-        }
+        state.statusDotColor
     }
 }

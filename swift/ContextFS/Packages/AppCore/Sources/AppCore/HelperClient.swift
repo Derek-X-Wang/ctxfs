@@ -48,6 +48,9 @@ public actor HelperClient {
     private var stdoutReaderTask: Task<Void, Never>?
     // Stream continuation for the readability-handler → async bridge
     private var streamContinuation: AsyncStream<Data>.Continuation?
+    // Shared encoder/decoder — reused across requests to avoid per-call allocation.
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
 
     // MARK: Init
 
@@ -161,7 +164,7 @@ public actor HelperClient {
 
     private func dispatchLine(_ data: Data) {
         struct IDOnly: Decodable { let id: UInt64 }
-        guard let idOnly = try? JSONDecoder().decode(IDOnly.self, from: data) else { return }
+        guard let idOnly = try? decoder.decode(IDOnly.self, from: data) else { return }
         if let continuation = pending.removeValue(forKey: idOnly.id) {
             continuation.resume(returning: data)
         }
@@ -203,7 +206,7 @@ public actor HelperClient {
         nextID += 1
 
         let envelope = RequestEnvelope(id: id, method: method, params: params)
-        var lineData = try JSONEncoder().encode(envelope)
+        var lineData = try encoder.encode(envelope)
         lineData.append(UInt8(ascii: "\n"))
 
         guard let stdinHandle = stdinHandle else {
@@ -220,7 +223,7 @@ public actor HelperClient {
             }
         }
 
-        let env = try JSONDecoder().decode(ResponseEnvelope<R>.self, from: rawResponse)
+        let env = try decoder.decode(ResponseEnvelope<R>.self, from: rawResponse)
         if let errMsg = env.error {
             throw HelperClientError.rpcError(errMsg)
         }

@@ -1,6 +1,14 @@
 import SwiftUI
 import AppCore
 
+// MARK: - Constants
+
+/// Deep-link URL to the Login Items & Extensions pane in System Settings,
+/// filtered to show FSKit filesystem module extensions.
+private let fskitExtensionSettingsURL = URL(
+    string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?extensionPointIdentifier=com.apple.fskit.fsmodule"
+)!
+
 // MARK: - Step enum
 
 enum OnboardingStep: Equatable {
@@ -27,7 +35,7 @@ struct OnboardingView: View {
 
     @State private var step: OnboardingStep = .welcome
     @State private var githubToken: String = ""
-    @State private var defaultBackend: PreferencesView.BackendChoice = .auto
+    @State private var defaultBackend: BackendChoice = .auto
     @State private var cacheMaxMB: Double = 512
     @State private var launchAtLogin: Bool = false
 
@@ -112,7 +120,7 @@ struct OnboardingView: View {
     // MARK: - Completion
 
     private func finishAndDismiss() {
-        UserDefaults.standard.set(true, forKey: "onboarding_complete")
+        UserDefaults.standard.set(true, forKey: UserDefaultsKey.onboardingComplete)
         isPresented = false
     }
 
@@ -120,27 +128,26 @@ struct OnboardingView: View {
 
     private func persistToken() {
         guard !githubToken.isEmpty else { return }
-        Task { try? await state.configSetValue(key: "github_token", value: .string(githubToken)) }
+        Task { try? await state.configSetValue(key: ConfigKey.githubToken, value: .string(githubToken)) }
     }
 
     private func persistBackend() {
         Task {
-            try? await state.configSetValue(key: "backend", value: .string(defaultBackend.rawValue))
+            try? await state.configSetValue(key: ConfigKey.backend, value: .string(defaultBackend.rawValue))
         }
     }
 
     private func persistCacheSize() {
         let bytes = Int64(cacheMaxMB) * 1_024 * 1_024
         Task {
-            try? await state.configSetValue(key: "cache_max_bytes", value: .int(bytes))
+            try? await state.configSetValue(key: ConfigKey.cacheMaxBytes, value: .int(bytes))
             _ = try? await state.setCacheLimits(maxBytes: UInt64(bytes))
         }
     }
 
     private func persistLaunchAtLogin() {
-        Task {
-            try? await state.configSetValue(key: "launch_at_login", value: .bool(launchAtLogin))
-        }
+        // launch_at_login is SMAppService-only; not persisted in config.toml.
+        _ = LoginItem.setEnabled(launchAtLogin)
     }
 }
 
@@ -258,10 +265,7 @@ private struct ExtensionStep: View {
     }
 
     private func openSystemSettings() {
-        NSWorkspace.shared.open(
-            // swiftlint:disable:next force_unwrapping
-            URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?extensionPointIdentifier=com.apple.fskit.fsmodule")!
-        )
+        NSWorkspace.shared.open(fskitExtensionSettingsURL)
     }
 }
 
@@ -333,7 +337,7 @@ private struct TokenStep: View {
 // MARK: - BackendStep
 
 private struct BackendStep: View {
-    @Binding var backend: PreferencesView.BackendChoice
+    @Binding var backend: BackendChoice
     let onContinue: () -> Void
     let onBack: () -> Void
 
@@ -344,7 +348,7 @@ private struct BackendStep: View {
                 .foregroundStyle(.secondary)
 
             Picker("Backend", selection: $backend) {
-                ForEach(PreferencesView.BackendChoice.allCases) { choice in
+                ForEach(BackendChoice.allCases) { choice in
                     Text(choice.displayName).tag(choice)
                 }
             }

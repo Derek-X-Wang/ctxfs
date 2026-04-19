@@ -133,7 +133,7 @@ public struct MountInfo: Codable, Identifiable, Hashable {
 
 // MARK: - CacheBreakdown
 
-public struct CacheBreakdown: Codable {
+public struct CacheBreakdown: Codable, Equatable {
     public let blobBytes: UInt64
     public let blobCount: UInt64
     public let treeBytes: UInt64
@@ -159,7 +159,7 @@ public struct CacheBreakdown: Codable {
 
 // MARK: - ExtensionStatus
 
-public struct ExtensionStatus: Codable {
+public struct ExtensionStatus: Codable, Equatable {
     public let bundleId: String
     public let registered: Bool
     public let enabled: Bool
@@ -218,6 +218,20 @@ public struct ConfigSnapshot: Codable {
     enum CodingKeys: String, CodingKey {
         case path, content
         case snapshotHash = "snapshot_hash"
+    }
+}
+
+// MARK: - BackendChoice
+
+public enum BackendChoice: String, CaseIterable, Identifiable, Sendable {
+    case auto, fskit, nfs
+    public var id: String { rawValue }
+    public var displayName: String {
+        switch self {
+        case .auto:  return "Auto (FSKit on macOS 26+)"
+        case .fskit: return "FSKit"
+        case .nfs:   return "NFS"
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 /// Single source of truth for the app's view of the running daemon.
 ///
@@ -163,8 +164,26 @@ public final class DaemonState {
         async let extResult      = try? client.extensionStatus()
         async let cacheResult    = try? client.cacheBreakdown()
 
-        if let m = await mountsResult   { mounts           = m }
-        if let e = await extResult      { extensionStatus  = e }
-        if let c = await cacheResult    { cacheBreakdown   = c }
+        if let m = await mountsResult,   m != mounts           { mounts           = m }
+        if let e = await extResult,      e != extensionStatus  { extensionStatus  = e }
+        if let c = await cacheResult,    c != cacheBreakdown   { cacheBreakdown   = c }
+    }
+}
+
+// MARK: - IconState color helper
+
+public extension DaemonState.IconState {
+    /// Maps each icon state to its status-dot color (nil = no dot).
+    ///
+    /// Both `StatusIcon` (menu bar) and `StatusDot` (MenuContent header)
+    /// use this single source of truth.
+    var statusDotColor: Color? {
+        switch self {
+        case .idle:        return nil
+        case .active:      return .green
+        case .setupNeeded: return .orange
+        case .error:       return .red
+        case .busy:        return .blue
+        }
     }
 }

@@ -12,22 +12,10 @@ struct PreferencesView: View {
     @State private var cacheMaxMB: Double = 512
     @State private var tokenTestResult: TokenTestResult = .none
     @State private var isClearingCache: Bool = false
-    @State private var initialLoadDone: Bool = false
+    @State private var cacheDebounceTask: Task<Void, Never>?
     @State private var errorMessage: String?
 
     // MARK: - Nested types
-
-    enum BackendChoice: String, CaseIterable, Identifiable {
-        case auto, fskit, nfs
-        var id: String { rawValue }
-        var displayName: String {
-            switch self {
-            case .auto:  return "Auto (FSKit on macOS 26+)"
-            case .fskit: return "FSKit"
-            case .nfs:   return "NFS"
-            }
-        }
-    }
 
     enum TokenTestResult: Equatable {
         case none
@@ -82,7 +70,7 @@ struct PreferencesView: View {
                     }
                 }
                 .onChange(of: defaultBackend) { _, newValue in
-                    saveValue(key: "backend", value: .string(newValue.rawValue))
+                    saveValue(key: ConfigKey.backend, value: .string(newValue.rawValue))
                 }
             }
 
@@ -115,7 +103,12 @@ struct PreferencesView: View {
 
                     Slider(value: $cacheMaxMB, in: 256...8192, step: 64)
                         .onChange(of: cacheMaxMB) { _, newValue in
-                            Task { await applyCacheLimit(UInt64(newValue) * 1_024 * 1_024) }
+                            cacheDebounceTask?.cancel()
+                            cacheDebounceTask = Task {
+                                try? await Task.sleep(nanoseconds: 300_000_000) // 300ms idle
+                                guard !Task.isCancelled else { return }
+                                await applyCacheLimit(UInt64(newValue) * 1_024 * 1_024)
+                            }
                         }
 
                     if let breakdown = state.cacheBreakdown {
@@ -157,10 +150,7 @@ struct PreferencesView: View {
         .padding()
         .frame(width: 560, height: 540)
         .task {
-            if !initialLoadDone {
-                await loadInitialValues()
-                initialLoadDone = true
-            }
+            await loadInitialValues()
         }
     }
 
@@ -208,11 +198,11 @@ struct PreferencesView: View {
 
     private func applyKey(_ key: String, _ value: String) {
         switch key {
-        case "backend":
+        case ConfigKey.backend:
             defaultBackend = BackendChoice(rawValue: value) ?? .auto
-        case "github_token":
+        case ConfigKey.githubToken:
             githubToken = value
-        case "cache_max_bytes":
+        case ConfigKey.cacheMaxBytes:
             if let bytes = UInt64(value) {
                 cacheMaxMB = Double(bytes / 1_024 / 1_024)
             }
@@ -235,7 +225,7 @@ struct PreferencesView: View {
     }
 
     private func saveToken() {
-        saveValue(key: "github_token", value: .string(githubToken))
+        saveValue(key: ConfigKey.githubToken, value: .string(githubToken))
     }
 
     // MARK: - Actions
@@ -260,7 +250,7 @@ struct PreferencesView: View {
         do {
             try await state.setCacheLimits(maxBytes: maxBytes)
             // Also persist to config so the limit survives a daemon restart.
-            try await state.configSetValue(key: "cache_max_bytes", value: .int(Int64(maxBytes)))
+            try await state.configSetValue(key: ConfigKey.cacheMaxBytes, value: .int(Int64(maxBytes)))
             errorMessage = nil
         } catch {
             errorMessage = "Failed to update cache limit: \(error)"

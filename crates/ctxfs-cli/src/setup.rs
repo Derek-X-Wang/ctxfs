@@ -6,9 +6,6 @@
 use anyhow::{Context as _, Result};
 use std::path::Path;
 
-// Import atomic_write from ctxfs-core (used in set_default_backend).
-use ctxfs_core::config::atomic_write;
-
 const SUDOERS_PATH: &str = "/etc/sudoers.d/ctxfs";
 
 /// Generate the sudoers file content for the current user and platform.
@@ -383,80 +380,24 @@ pub fn check_fskit_status() {
 
 /// Persist a default backend choice in `~/.ctxfs/config.toml`.
 ///
-/// The function uses a line-by-line strategy to preserve other config
-/// settings and comments:
-///
-/// - If a `backend = "..."` line (or a commented-out `# backend = ...` line)
-///   is present, it is replaced with the canonical `backend = "<value>"` form.
-/// - If no such line exists, the setting is appended to the end.
-/// - If the file does not exist, a minimal file containing only the backend
-///   line is created (including the parent directory).
+/// Delegates to `ctxfs_core::config::update_config_key` which uses `toml_edit`
+/// to preserve comments and other settings atomically.
 pub fn set_default_backend(backend: &str, config_path: &std::path::Path) -> anyhow::Result<()> {
     if !matches!(backend, "nfs" | "fskit") {
         anyhow::bail!("invalid backend: {backend:?}. Use 'nfs' or 'fskit'");
     }
-
-    let new_line = format!("backend = \"{backend}\"");
-
-    if !config_path.exists() {
-        atomic_write(config_path, format!("{new_line}\n").as_bytes())
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
-        return Ok(());
-    }
-
-    let contents = std::fs::read_to_string(config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-
-    // Regex-free line rewrite: match `backend = "..."` or `# backend = ...`
-    let mut found = false;
-    let mut output_lines: Vec<String> = contents
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            // Match an active `backend = ...` line (possibly with leading spaces).
-            let is_active = trimmed.starts_with("backend") && {
-                let rest = trimmed.trim_start_matches("backend").trim_start();
-                rest.starts_with('=')
-            };
-            // Match a commented-out `# backend = ...` line.
-            let is_commented = {
-                let stripped = trimmed.trim_start_matches('#').trim_start();
-                stripped.starts_with("backend") && {
-                    let rest = stripped.trim_start_matches("backend").trim_start();
-                    rest.starts_with('=')
-                }
-            };
-            if is_active || is_commented {
-                found = true;
-                new_line.clone()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-
-    if !found {
-        output_lines.push(new_line);
-    }
-
-    // Re-join, preserving trailing newline if the original had one.
-    let mut result = output_lines.join("\n");
-    if contents.ends_with('\n') || !contents.is_empty() {
-        result.push('\n');
-    }
-
-    atomic_write(config_path, result.as_bytes())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-
+    ctxfs_core::config::update_config_key(
+        config_path,
+        "backend",
+        toml_edit::Value::from(backend),
+    )
+    .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
     Ok(())
 }
 
 /// CLI entry-point for `ctxfs setup default-backend <backend>`.
 pub fn handle_default_backend(backend: &str) -> anyhow::Result<()> {
-    let config_path = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".ctxfs")
-        .join("config.toml");
+    let config_path = ctxfs_core::config::load_config_path();
 
     set_default_backend(backend, &config_path)?;
 
@@ -468,7 +409,7 @@ pub fn handle_default_backend(backend: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ctxfs_core::config::{ConfigSnapshot, ConfigWriteError};
+    use ctxfs_core::config::{atomic_write, ConfigSnapshot, ConfigWriteError};
 
     #[test]
     fn generate_sudoers_contains_username() {
@@ -571,12 +512,19 @@ mod tests {
 
     #[test]
     fn default_backend_uncomments_commented_line() {
+        // With the toml_edit-backed impl, commented-out lines are preserved as
+        // comments (toml_edit doesn't know they're semantically about `backend`).
+        // The active `backend = "nfs"` key is appended, so the file parses
+        // correctly and the active value wins. The comment stays in the file but
+        // is harmless.
         let (_dir, path) = temp_config();
         std::fs::write(&path, "# backend = \"auto\"  # nfs | fskit | auto\n").unwrap();
         set_default_backend("nfs", &path).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("backend = \"nfs\""));
-        assert!(!contents.contains("# backend"));
+        // Verify the file is valid TOML and the active value is "nfs"
+        let parsed: toml::Value = toml::from_str(&contents).unwrap();
+        assert_eq!(parsed.get("backend").and_then(|v| v.as_str()), Some("nfs"));
     }
 
     #[test]

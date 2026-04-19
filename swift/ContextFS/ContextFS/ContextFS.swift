@@ -57,7 +57,7 @@ struct ContextFSApp: App {
     // MARK: - First-launch detection
 
     private func checkFirstLaunch() {
-        guard !UserDefaults.standard.bool(forKey: "onboarding_complete") else { return }
+        guard !UserDefaults.standard.bool(forKey: UserDefaultsKey.onboardingComplete) else { return }
         showOnboarding = true
     }
 }
