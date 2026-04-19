@@ -13,14 +13,28 @@ final class DaemonStateTests: XCTestCase {
     }
 
     @MainActor
-    func testIconStateIsSetupNeededWhenExtensionDisabled() {
+    func testIconStateIsSetupNeededWhenFSKitMountNeedsDisabledExtension() {
         let state = DaemonState(client: MockHelperClient())
         state.daemonRunning = true
         state.extensionStatus = ExtensionStatus(
             bundleId: "ai.ctxfs.fskitbridge.fskitext",
             registered: true, enabled: false, version: nil, platformSupported: true
         )
+        state.mounts = [.stub]  // .stub uses backend "fskit"
         XCTAssertEqual(state.iconState, .setupNeeded)
+    }
+
+    @MainActor
+    func testIconStateIsIdleWhenExtensionDisabledButNoFSKitMounts() {
+        // Extension disabled shouldn't nag when nothing is actually using FSKit.
+        let state = DaemonState(client: MockHelperClient())
+        state.daemonRunning = true
+        state.extensionStatus = ExtensionStatus(
+            bundleId: "ai.ctxfs.fskitbridge.fskitext",
+            registered: true, enabled: false, version: nil, platformSupported: true
+        )
+        state.mounts = []
+        XCTAssertEqual(state.iconState, .idle)
     }
 
     @MainActor

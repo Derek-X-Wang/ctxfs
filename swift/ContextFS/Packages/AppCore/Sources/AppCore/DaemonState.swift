@@ -39,8 +39,11 @@ public final class DaemonState {
     /// Computed from the current state; drives the menu bar status dot color.
     public var iconState: IconState {
         guard daemonRunning else { return .error }
-        // Only flag setupNeeded when FSKit is actually possible on this platform.
-        if let ext = extensionStatus, ext.platformSupported, !ext.enabled {
+        // Only flag setupNeeded when the user is actually trying to use FSKit
+        // (i.e. a mount is configured to use the fskit backend) but the extension
+        // isn't enabled. NFS mounts don't care about the extension status.
+        if let ext = extensionStatus, ext.platformSupported, !ext.enabled,
+           mounts.contains(where: { $0.backend == "fskit" }) {
             return .setupNeeded
         }
         if !mounts.isEmpty { return .active }

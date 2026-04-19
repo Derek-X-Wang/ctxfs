@@ -98,7 +98,7 @@ struct MenuContent: View {
                 openWindow(id: "preferences")
                 NSApp.activate(ignoringOtherApps: true)
             }
-            MenuActionButton("Quit ContextFS") {
+            MenuActionButton("Quit") {
                 NSApplication.shared.terminate(nil)
             }
         }
