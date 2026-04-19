@@ -160,6 +160,21 @@ impl BlobCache {
         self.state.lock().unwrap().total_bytes
     }
 
+    /// Prune blob cache entries until total usage fits within `target_bytes`.
+    /// Returns bytes freed. Does NOT touch the tree cache. Returns 0 if already
+    /// under the target.
+    pub fn prune_blobs(&self, target_bytes: u64) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        let initial = state.total_bytes;
+        while state.total_bytes > target_bytes {
+            match state.evict_oldest() {
+                Some((key, _size)) => self.remove_blob_file(&key),
+                None => break,
+            }
+        }
+        initial.saturating_sub(state.total_bytes)
+    }
+
     /// Update the maximum cache size at runtime. If `new_max` is smaller than
     /// the current usage, entries are evicted (oldest-first) until usage fits.
     pub fn set_max_bytes(&self, new_max: u64) {
@@ -436,6 +451,64 @@ mod tests {
         assert!(!cache.contains(&d1));
         assert!(!cache.contains(&d2));
         assert!(cache.contains(&d3));
+    }
+
+    #[test]
+    fn prune_blobs_shrinks_blob_cache_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(dir.path().to_path_buf(), 1024 * 1024).unwrap();
+
+        // Insert 5 blobs of 100 bytes each (500 bytes total)
+        let digests: Vec<Digest> = (0..5u8)
+            .map(|i| {
+                let d = Digest::sha256(&[i]);
+                cache.put(&d, &[i; 100]).unwrap();
+                d
+            })
+            .collect();
+
+        let (total_before, count_before) = cache.stats();
+        assert_eq!(total_before, 500);
+        assert_eq!(count_before, 5);
+
+        // Prune to 250 bytes — should evict oldest 3 blobs (300 bytes freed)
+        let freed = cache.prune_blobs(250);
+        assert!(freed >= 250, "expected at least 250 bytes freed, got {freed}");
+
+        let (total_after, count_after) = cache.stats();
+        assert!(
+            total_after <= 250,
+            "expected total_bytes <= 250, got {total_after}"
+        );
+        assert!(count_after < 5);
+
+        // Oldest blobs (digests[0], digests[1], digests[2]) should be evicted from disk
+        for (i, d) in digests.iter().enumerate() {
+            let on_disk = cache.get(d).is_some();
+            if i < 3 {
+                // evicted
+                assert!(
+                    !on_disk,
+                    "blob {i} should have been evicted from disk but was not"
+                );
+            } else {
+                // retained
+                assert!(on_disk, "blob {i} should be retained but was evicted");
+            }
+        }
+    }
+
+    #[test]
+    fn prune_blobs_noop_when_already_under_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
+
+        let d = Digest::sha256(b"small");
+        cache.put(&d, b"tiny").unwrap();
+
+        let freed = cache.prune_blobs(1024);
+        assert_eq!(freed, 0);
+        assert!(cache.contains(&d));
     }
 
     #[test]
