@@ -4,6 +4,7 @@ import AppCore
 struct MenuContent: View {
     @Bindable var state: DaemonState
     @Binding var showPreferences: Bool
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -94,7 +95,8 @@ struct MenuContent: View {
     private var footerSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuActionButton("Preferences…") {
-                showPreferences = true
+                openWindow(id: "preferences")
+                NSApp.activate(ignoringOtherApps: true)
             }
             MenuActionButton("Quit ContextFS") {
                 NSApplication.shared.terminate(nil)

@@ -6,9 +6,6 @@ struct ContextFSApp: App {
     @State private var daemonState: DaemonState
 
     init() {
-        // HelperClient resolves the binary path itself (bundle → env var → /usr/local/bin).
-        // If the helper isn't present we fall back to NoopHelperClient so the app still
-        // launches and shows the error dot rather than crashing.
         let client: any HelperClientProtocol
         do {
             client = try HelperClient()
@@ -16,28 +13,32 @@ struct ContextFSApp: App {
             client = NoopHelperClient(error: error)
         }
 
-        _daemonState = State(initialValue: DaemonState(client: client))
+        let state = DaemonState(client: client)
+        _daemonState = State(initialValue: state)
+
+        if !LaunchdAgent.isInstalled {
+            do {
+                try LaunchdAgent.install()
+            } catch {
+                NSLog("ContextFS: LaunchdAgent install failed: \(error)")
+            }
+        }
+        state.start()
     }
 
     @State private var showPreferences: Bool = false
     @State private var showOnboarding: Bool = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra {
             MenuContent(state: daemonState, showPreferences: $showPreferences)
                 .task {
-                    // Install launchd agent on first launch
-                    if !LaunchdAgent.isInstalled {
-                        do {
-                            try LaunchdAgent.install()
-                        } catch {
-                            // Non-fatal: app still works, user just has to start daemon manually
-                            print("LaunchdAgent install failed: \(error)")
-                        }
+                    if !UserDefaults.standard.bool(forKey: UserDefaultsKey.onboardingComplete) {
+                        openWindow(id: "onboarding")
+                        NSApp.activate(ignoringOtherApps: true)
                     }
-                    daemonState.start()
                 }
-                .task { checkFirstLaunch() }
         } label: {
             StatusIcon(state: daemonState.iconState)
         }
@@ -52,13 +53,6 @@ struct ContextFSApp: App {
             PreferencesView(state: daemonState)
         }
         .windowResizability(.contentSize)
-    }
-
-    // MARK: - First-launch detection
-
-    private func checkFirstLaunch() {
-        guard !UserDefaults.standard.bool(forKey: UserDefaultsKey.onboardingComplete) else { return }
-        showOnboarding = true
     }
 }
 

@@ -169,7 +169,7 @@
 			packageProductDependencies = (
 				76CORE0022E00000000000002 /* AppCore */,
 			);
-			productName = FSKitBridge;
+			productName = ContextFS;
 			productReference = 76A2B10B2E28555D00BCA3F9 /* ContextFS.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -505,7 +505,7 @@
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ContextFSExt/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = fskitbridge;
+				INFOPLIST_KEY_CFBundleDisplayName = contextfs;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -535,7 +535,7 @@
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ContextFSExt/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = fskitbridge;
+				INFOPLIST_KEY_CFBundleDisplayName = contextfs;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

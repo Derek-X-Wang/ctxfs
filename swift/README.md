@@ -10,8 +10,6 @@ upstream does not have.
 xcodebuild -project ContextFS.xcodeproj -scheme ContextFS -configuration Release
 ```
 
-(Until the Xcode GUI rename is done, the scheme/project is still named FSKitBridge.)
-
 ## Bundle IDs (locked)
 
 - Host app: `ai.ctxfs.fskitbridge`

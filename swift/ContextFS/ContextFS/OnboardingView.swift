@@ -32,6 +32,7 @@ enum OnboardingStep: Equatable {
 struct OnboardingView: View {
     @Bindable var state: DaemonState
     @Binding var isPresented: Bool
+    @Environment(\.dismissWindow) private var dismissWindow
 
     @State private var step: OnboardingStep = .welcome
     @State private var githubToken: String = ""
@@ -122,6 +123,7 @@ struct OnboardingView: View {
     private func finishAndDismiss() {
         UserDefaults.standard.set(true, forKey: UserDefaultsKey.onboardingComplete)
         isPresented = false
+        dismissWindow(id: "onboarding")
     }
 
     // MARK: - Persist helpers
@@ -432,7 +434,7 @@ private struct DoneStep: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             Spacer()
-            Button("Get started", action: onFinish).buttonStyle(.borderedProminent)
+            Button("Done", action: onFinish).buttonStyle(.borderedProminent)
         }
     }
 }
