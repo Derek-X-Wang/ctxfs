@@ -4,7 +4,7 @@ use ctxfs_core::config::Config;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::source::{ProviderType, SourceSpec};
 use ctxfs_core::Backend;
-use ctxfs_ipc::service::{CacheStats, CtxfsService, MountInfo, MountStatus};
+use ctxfs_ipc::service::{CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountStatus};
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
@@ -805,6 +805,34 @@ impl CtxfsService for DaemonServer {
         })
     }
 
+    async fn cache_breakdown(self, _: tarpc::context::Context) -> Result<CacheBreakdown, String> {
+        let (tree_count, tree_bytes) = self.tree_cache.stats();
+        Ok(CacheBreakdown {
+            blob_bytes: self.cache.total_bytes(),
+            blob_count: self.cache.count(),
+            tree_bytes,
+            tree_count: tree_count as u64,
+            max_bytes: self.cache.max_bytes(),
+        })
+    }
+
+    async fn set_cache_limits(
+        self,
+        ctx: tarpc::context::Context,
+        max_bytes: u64,
+    ) -> Result<CacheBreakdown, String> {
+        self.cache.set_max_bytes(max_bytes);
+        self.cache_breakdown(ctx).await
+    }
+
+    async fn prune_blobs(
+        self,
+        _: tarpc::context::Context,
+        target_bytes: u64,
+    ) -> Result<u64, String> {
+        Ok(self.cache.prune_blobs(target_bytes))
+    }
+
     async fn ping(self, _: tarpc::context::Context) -> String {
         "pong".to_string()
     }
@@ -883,9 +911,11 @@ mod tests {
             base.join("resolutions.json"),
             3600,
         );
-        let mut config = ctxfs_core::config::Config::default();
-        config.pid_file = base.join("ctxfs.pid");
-        config.cache_dir = base.join("cache");
+        let config = ctxfs_core::config::Config {
+            pid_file: base.join("ctxfs.pid"),
+            cache_dir: base.join("cache"),
+            ..ctxfs_core::config::Config::default()
+        };
 
         DaemonServer {
             cache,
@@ -969,6 +999,86 @@ mod tests {
         assert!(
             entries.is_empty(),
             "mounts.json must be empty after Finder-eject cleanup"
+        );
+    }
+
+    // ─── cache_breakdown / set_cache_limits / prune_blobs RPC tests ─────────
+
+    #[tokio::test]
+    async fn cache_breakdown_returns_structured_stats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        // Put one blob so the breakdown reflects non-zero values.
+        let digest = ctxfs_core::Digest::sha256(b"rpc-test-data");
+        server.cache.put(&digest, b"rpc-test-data").unwrap();
+
+        let ctx = tarpc::context::current();
+        let bd = server
+            .cache_breakdown(ctx)
+            .await
+            .expect("cache_breakdown must succeed");
+
+        assert!(bd.blob_bytes > 0, "blob_bytes must be positive after a put");
+        assert_eq!(bd.blob_count, 1, "blob_count must be 1");
+        assert_eq!(bd.max_bytes, 64 * 1024 * 1024, "max_bytes must match config");
+        // tree and resolution counts are 0 in a fresh cache — just ensure no panic.
+        let _ = bd.tree_bytes;
+        let _ = bd.tree_count;
+    }
+
+    #[tokio::test]
+    async fn set_cache_limits_updates_max_and_triggers_eviction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        // Fill with 5 blobs of 100 bytes each.
+        for i in 0..5u8 {
+            let d = ctxfs_core::Digest::sha256(&[i; 100]);
+            server.cache.put(&d, &[i; 100]).unwrap();
+        }
+        assert_eq!(server.cache.total_bytes(), 500);
+
+        // Shrink limit to 200 bytes — must evict until under limit.
+        let ctx = tarpc::context::current();
+        let bd = server
+            .set_cache_limits(ctx, 200)
+            .await
+            .expect("set_cache_limits must succeed");
+
+        assert_eq!(bd.max_bytes, 200, "max_bytes must reflect the new limit");
+        assert!(
+            bd.blob_bytes <= 200,
+            "blob_bytes must be <= new limit after eviction, got {}",
+            bd.blob_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_blobs_rpc_returns_bytes_freed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        // Put 5 blobs of 100 bytes each (500 bytes total).
+        for i in 0..5u8 {
+            let d = ctxfs_core::Digest::sha256(&[i; 100]);
+            server.cache.put(&d, &[i; 100]).unwrap();
+        }
+
+        // Save a handle to the cache before the RPC call consumes `server`.
+        let cache = server.cache.clone();
+
+        let ctx = tarpc::context::current();
+        let freed = server
+            .prune_blobs(ctx, 100)
+            .await
+            .expect("prune_blobs must succeed");
+
+        assert!(freed > 0, "must have freed some bytes, got {freed}");
+        assert!(
+            cache.total_bytes() <= 100,
+            "remaining bytes must be <= target, got {}",
+            cache.total_bytes()
         );
     }
 

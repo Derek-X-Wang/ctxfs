@@ -155,6 +155,11 @@ impl BlobCache {
         self.max_bytes.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of blob entries currently tracked in the cache.
+    pub fn count(&self) -> u64 {
+        self.state.lock().unwrap().entries.len() as u64
+    }
+
     /// Returns the total bytes currently stored in the cache.
     pub fn total_bytes(&self) -> u64 {
         self.state.lock().unwrap().total_bytes

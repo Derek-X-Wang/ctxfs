@@ -58,6 +58,16 @@ pub struct CacheStats {
     pub resolution_count: usize,
 }
 
+/// Structured breakdown of blob and tree cache state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheBreakdown {
+    pub blob_bytes: u64,
+    pub blob_count: u64,
+    pub tree_bytes: u64,
+    pub tree_count: u64,
+    pub max_bytes: u64,
+}
+
 /// tarpc service definition.
 #[tarpc::service]
 pub trait CtxfsService {
@@ -71,6 +81,14 @@ pub trait CtxfsService {
     async fn status(mount_id: String) -> Result<MountInfo, String>;
     async fn cache_stats() -> Result<CacheStats, String>;
     async fn cache_prune(max_bytes: Option<u64>) -> Result<CacheStats, String>;
+    /// Returns a structured breakdown of blob/tree bytes, counts, and current max.
+    async fn cache_breakdown() -> Result<CacheBreakdown, String>;
+    /// Updates `BlobCache.max_bytes` at runtime (triggers eviction if needed).
+    /// Returns a fresh `CacheBreakdown` after the limit change.
+    async fn set_cache_limits(max_bytes: u64) -> Result<CacheBreakdown, String>;
+    /// Prune blob cache only until usage fits within `target_bytes`.
+    /// Returns bytes freed.
+    async fn prune_blobs(target_bytes: u64) -> Result<u64, String>;
     async fn ping() -> String;
 }
 

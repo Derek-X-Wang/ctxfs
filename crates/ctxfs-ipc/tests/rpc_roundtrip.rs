@@ -4,7 +4,7 @@
 //! Spins up a real tarpc server implementing `CtxfsService`, connects a client,
 //! and verifies all RPC methods work end-to-end through the actual transport layer.
 
-use ctxfs_ipc::service::{CacheStats, CtxfsService, MountInfo, MountStatus};
+use ctxfs_ipc::service::{CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountStatus};
 use ctxfs_ipc::transport;
 use futures::StreamExt;
 use std::sync::Arc;
@@ -94,6 +94,41 @@ impl CtxfsService for MockServer {
             tree_bytes: 0,
             resolution_count: 0,
         })
+    }
+
+    async fn cache_breakdown(
+        self,
+        _: tarpc::context::Context,
+    ) -> Result<CacheBreakdown, String> {
+        Ok(CacheBreakdown {
+            blob_bytes: 1024,
+            blob_count: 5,
+            tree_bytes: 0,
+            tree_count: 0,
+            max_bytes: 512 * 1024 * 1024,
+        })
+    }
+
+    async fn set_cache_limits(
+        self,
+        _: tarpc::context::Context,
+        max_bytes: u64,
+    ) -> Result<CacheBreakdown, String> {
+        Ok(CacheBreakdown {
+            blob_bytes: 0,
+            blob_count: 0,
+            tree_bytes: 0,
+            tree_count: 0,
+            max_bytes,
+        })
+    }
+
+    async fn prune_blobs(
+        self,
+        _: tarpc::context::Context,
+        _target_bytes: u64,
+    ) -> Result<u64, String> {
+        Ok(512)
     }
 
     async fn ping(self, _: tarpc::context::Context) -> String {
