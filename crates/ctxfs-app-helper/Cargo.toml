@@ -1,0 +1,25 @@
+[package]
+name = "ctxfs-app-helper"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ctxfs-app-helper"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ctxfs-ipc = { workspace = true }
+ctxfs-core = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"

@@ -15,6 +15,7 @@ members = [
     "crates/ctxfs-cache-redis",
     "crates/ctxfs-vfs",
     "crates/ctxfs-fskit",
+    "crates/ctxfs-app-helper",
     "crates/fskit-rs",
 ]
 exclude = [
