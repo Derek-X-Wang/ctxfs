@@ -66,9 +66,14 @@ struct PreferencesView: View {
             Section("General") {
                 Toggle("Launch ContextFS at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
-                        // Real wiring arrives in Task 9 via SMAppService.
-                        // For now we persist the preference to config.toml.
-                        saveValue(key: "launch_at_login", value: .bool(newValue))
+                        switch LoginItem.setEnabled(newValue) {
+                        case .success:
+                            errorMessage = nil
+                        case .failure(let error):
+                            errorMessage = "Login item error: \(error.localizedDescription)"
+                            // Revert the toggle to match actual state
+                            launchAtLogin = LoginItem.isEnabled
+                        }
                     }
 
                 Picker("Default backend", selection: $defaultBackend) {
@@ -162,6 +167,9 @@ struct PreferencesView: View {
     // MARK: - Load
 
     private func loadInitialValues() async {
+        // Seed launch-at-login from the macOS login-items database, not config.toml.
+        launchAtLogin = LoginItem.isEnabled
+
         do {
             let snapshot = try await state.configRead()
             // Line-based TOML parser — no Swift TOML library needed for 5 known keys.
@@ -200,8 +208,6 @@ struct PreferencesView: View {
 
     private func applyKey(_ key: String, _ value: String) {
         switch key {
-        case "launch_at_login":
-            launchAtLogin = (value == "true")
         case "backend":
             defaultBackend = BackendChoice(rawValue: value) ?? .auto
         case "github_token":

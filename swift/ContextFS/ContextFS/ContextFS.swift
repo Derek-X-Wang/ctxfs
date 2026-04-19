@@ -25,7 +25,18 @@ struct ContextFSApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuContent(state: daemonState, showPreferences: $showPreferences)
-                .task { daemonState.start() }
+                .task {
+                    // Install launchd agent on first launch
+                    if !LaunchdAgent.isInstalled {
+                        do {
+                            try LaunchdAgent.install()
+                        } catch {
+                            // Non-fatal: app still works, user just has to start daemon manually
+                            print("LaunchdAgent install failed: \(error)")
+                        }
+                    }
+                    daemonState.start()
+                }
                 .task { checkFirstLaunch() }
         } label: {
             StatusIcon(state: daemonState.iconState)
