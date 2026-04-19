@@ -12,7 +12,8 @@ use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Entry in the LRU tracking state.
 struct CacheEntry {
@@ -24,9 +25,21 @@ struct LruState {
     total_bytes: u64,
 }
 
+impl LruState {
+    /// Evict the oldest (least-recently-used) entry. Returns `true` if an
+    /// entry was evicted, `false` if the cache was already empty.
+    /// NOTE: does NOT remove the on-disk file; callers must do that themselves.
+    fn evict_oldest(&mut self) -> Option<(String, u64)> {
+        self.entries.pop_front().map(|(key, entry)| {
+            self.total_bytes -= entry.size;
+            (key, entry.size)
+        })
+    }
+}
+
 pub struct BlobCache {
     root: PathBuf,
-    max_bytes: u64,
+    max_bytes: Arc<AtomicU64>,
     state: Mutex<LruState>,
 }
 
@@ -34,7 +47,7 @@ impl std::fmt::Debug for BlobCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlobCache")
             .field("root", &self.root)
-            .field("max_bytes", &self.max_bytes)
+            .field("max_bytes", &self.max_bytes.load(Ordering::Relaxed))
             .field("state", &"<locked>")
             .finish()
     }
@@ -47,7 +60,7 @@ impl BlobCache {
 
         let cache = Self {
             root,
-            max_bytes,
+            max_bytes: Arc::new(AtomicU64::new(max_bytes)),
             state: Mutex::new(LruState {
                 entries: LinkedHashMap::new(),
                 total_bytes: 0,
@@ -102,9 +115,9 @@ impl BlobCache {
         state.total_bytes += size;
 
         // Evict if over limit
-        while state.total_bytes > self.max_bytes && !state.entries.is_empty() {
-            if let Some((evicted_key, evicted_entry)) = state.entries.pop_front() {
-                state.total_bytes -= evicted_entry.size;
+        let limit = self.max_bytes.load(Ordering::Relaxed);
+        while state.total_bytes > limit && !state.entries.is_empty() {
+            if let Some((evicted_key, _)) = state.evict_oldest() {
                 self.remove_blob_file(&evicted_key);
             }
         }
@@ -118,14 +131,13 @@ impl BlobCache {
     }
 
     pub fn prune(&self, max_bytes: Option<u64>) -> Result<u64, CtxfsError> {
-        let limit = max_bytes.unwrap_or(self.max_bytes);
+        let limit = max_bytes.unwrap_or_else(|| self.max_bytes.load(Ordering::Relaxed));
         let mut state = self.state.lock().unwrap();
         let mut freed = 0u64;
 
         while state.total_bytes > limit && !state.entries.is_empty() {
-            if let Some((evicted_key, evicted_entry)) = state.entries.pop_front() {
-                state.total_bytes -= evicted_entry.size;
-                freed += evicted_entry.size;
+            if let Some((evicted_key, evicted_size)) = state.evict_oldest() {
+                freed += evicted_size;
                 self.remove_blob_file(&evicted_key);
             }
         }
@@ -136,6 +148,50 @@ impl BlobCache {
     pub fn stats(&self) -> (u64, usize) {
         let state = self.state.lock().unwrap();
         (state.total_bytes, state.entries.len())
+    }
+
+    /// Returns the current maximum cache size in bytes.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of blob entries currently tracked in the cache.
+    pub fn count(&self) -> u64 {
+        self.state.lock().unwrap().entries.len() as u64
+    }
+
+    /// Returns the total bytes currently stored in the cache.
+    pub fn total_bytes(&self) -> u64 {
+        self.state.lock().unwrap().total_bytes
+    }
+
+    /// Prune blob cache entries until total usage fits within `target_bytes`.
+    /// Returns bytes freed. Does NOT touch the tree cache. Returns 0 if already
+    /// under the target.
+    pub fn prune_blobs(&self, target_bytes: u64) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        let initial = state.total_bytes;
+        while state.total_bytes > target_bytes {
+            match state.evict_oldest() {
+                Some((key, _size)) => self.remove_blob_file(&key),
+                None => break,
+            }
+        }
+        initial.saturating_sub(state.total_bytes)
+    }
+
+    /// Update the maximum cache size at runtime. If `new_max` is smaller than
+    /// the current usage, entries are evicted (oldest-first) until usage fits.
+    pub fn set_max_bytes(&self, new_max: u64) {
+        self.max_bytes.store(new_max, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        while state.total_bytes > new_max {
+            if let Some((evicted_key, _)) = state.evict_oldest() {
+                self.remove_blob_file(&evicted_key);
+            } else {
+                break; // nothing left to evict
+            }
+        }
     }
 
     /// Rebuild the LRU index by scanning the cache directory.
@@ -403,11 +459,100 @@ mod tests {
     }
 
     #[test]
+    fn prune_blobs_shrinks_blob_cache_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(dir.path().to_path_buf(), 1024 * 1024).unwrap();
+
+        // Insert 5 blobs of 100 bytes each (500 bytes total)
+        let digests: Vec<Digest> = (0..5u8)
+            .map(|i| {
+                let d = Digest::sha256(&[i]);
+                cache.put(&d, &[i; 100]).unwrap();
+                d
+            })
+            .collect();
+
+        let (total_before, count_before) = cache.stats();
+        assert_eq!(total_before, 500);
+        assert_eq!(count_before, 5);
+
+        // Prune to 250 bytes — should evict oldest 3 blobs (300 bytes freed)
+        let freed = cache.prune_blobs(250);
+        assert!(freed >= 250, "expected at least 250 bytes freed, got {freed}");
+
+        let (total_after, count_after) = cache.stats();
+        assert!(
+            total_after <= 250,
+            "expected total_bytes <= 250, got {total_after}"
+        );
+        assert!(count_after < 5);
+
+        // Oldest blobs (digests[0], digests[1], digests[2]) should be evicted from disk
+        for (i, d) in digests.iter().enumerate() {
+            let on_disk = cache.get(d).is_some();
+            if i < 3 {
+                // evicted
+                assert!(
+                    !on_disk,
+                    "blob {i} should have been evicted from disk but was not"
+                );
+            } else {
+                // retained
+                assert!(on_disk, "blob {i} should be retained but was evicted");
+            }
+        }
+    }
+
+    #[test]
+    fn prune_blobs_noop_when_already_under_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
+
+        let d = Digest::sha256(b"small");
+        cache.put(&d, b"tiny").unwrap();
+
+        let freed = cache.prune_blobs(1024);
+        assert_eq!(freed, 0);
+        assert!(cache.contains(&d));
+    }
+
+    #[test]
     fn debug_impl() {
         let dir = tempfile::tempdir().unwrap();
         let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
         let debug = format!("{cache:?}");
         assert!(debug.contains("BlobCache"));
         assert!(debug.contains("max_bytes"));
+    }
+
+    #[test]
+    fn set_max_bytes_updates_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(tmp.path().to_path_buf(), 1024).unwrap();
+        assert_eq!(cache.max_bytes(), 1024);
+
+        cache.set_max_bytes(2048);
+        assert_eq!(cache.max_bytes(), 2048);
+    }
+
+    #[test]
+    fn set_max_bytes_smaller_triggers_eviction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(tmp.path().to_path_buf(), 10_000).unwrap();
+
+        // Put 3 blobs of ~2KB each (total ~6KB)
+        for i in 0..3u8 {
+            let digest = ctxfs_core::digest::Digest::sha256(&[i; 2048]);
+            cache.put(&digest, &[i; 2048]).unwrap();
+        }
+        assert_eq!(cache.total_bytes(), 6144);
+
+        // Shrink to 4KB — must evict at least one blob
+        cache.set_max_bytes(4096);
+        assert!(
+            cache.total_bytes() <= 4096,
+            "expected eviction down to 4KB, got {}",
+            cache.total_bytes()
+        );
     }
 }

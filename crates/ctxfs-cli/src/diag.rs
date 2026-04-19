@@ -1,23 +1,51 @@
 use ctxfs_core::config::Config;
+use serde::Serialize;
+use std::path::PathBuf;
+
+/// Structured diagnostics report. Serialized to JSON with `--json`; rendered
+/// as human-readable text otherwise. All fields that appear in text output are
+/// present here — JSON is a superset, not a subset.
+#[derive(Debug, Serialize)]
+pub struct DiagReport {
+    pub product: &'static str,
+    pub version: &'static str,
+    pub bundle_id: Option<String>,
+    pub backend: String,
+    pub backend_source: String,
+    pub config_path: PathBuf,
+    pub config_loaded: bool,
+    pub daemon_running: bool,
+    pub daemon_pid: Option<i32>,
+    pub extension_registered: bool,
+    pub extension_enabled: bool,
+    pub extension_bundle_id: Option<String>,
+    /// macOS product version string (e.g., "15.3.1"). `None` on non-macOS.
+    pub macos_version: Option<String>,
+    /// macOS product name (e.g., "macOS"). `None` on non-macOS.
+    pub macos_name: Option<String>,
+    /// Number of active mounts. `None` if daemon is not running or RPC failed.
+    pub mount_count: Option<usize>,
+}
 
 /// Print runtime diagnostic information for support.
 ///
 /// Every check degrades gracefully: a failed daemon connection, a missing
 /// `pluginkit`, or a non-macOS host all produce informative fallback text
 /// instead of errors.
-pub async fn handle_diag(config: &Config) {
-    println!("ContextFS Diagnostics");
-    println!("  Product:    ContextFS");
-    println!("  Version:    {}", env!("CARGO_PKG_VERSION"));
-    println!(
-        "  Bundle ID:  {}",
-        config
-            .fskit_bundle_id
-            .as_deref()
-            .unwrap_or("not set")
-    );
+pub async fn handle_diag(config: &Config, json: bool) {
+    let report = collect_report(config).await;
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => eprintln!("failed to serialize diag report: {e}"),
+        }
+    } else {
+        print_human_readable(&report);
+    }
+}
 
-    // Backend
+/// Collect all diagnostic data into a `DiagReport`.
+async fn collect_report(config: &Config) -> DiagReport {
     let backend = crate::backend::detect_backend(None, config.default_backend);
     let backend_source = if std::env::var("CTXFS_BACKEND").is_ok() {
         "env"
@@ -26,26 +54,67 @@ pub async fn handle_diag(config: &Config) {
     } else {
         "auto-detected"
     };
-    println!("  Backend:    {backend} ({backend_source})");
 
-    // Config file
     let config_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".ctxfs")
         .join("config.toml");
-    if config_path.exists() {
-        println!("  Config:     {} (loaded)", config_path.display());
+    let config_loaded = config_path.exists();
+
+    let (daemon_running, daemon_pid) = check_daemon(config).await;
+
+    let (extension_registered, extension_enabled, extension_bundle_id) =
+        query_extension_status(config);
+
+    let (macos_version, macos_name) = query_macos_version();
+
+    let mount_count = if daemon_running {
+        query_mount_count(config).await
+    } else {
+        None
+    };
+
+    DiagReport {
+        product: "ContextFS",
+        version: env!("CARGO_PKG_VERSION"),
+        bundle_id: config.fskit_bundle_id.clone(),
+        backend: backend.to_string(),
+        backend_source: backend_source.to_string(),
+        config_path,
+        config_loaded,
+        daemon_running,
+        daemon_pid,
+        extension_registered,
+        extension_enabled,
+        extension_bundle_id,
+        macos_version,
+        macos_name,
+        mount_count,
+    }
+}
+
+/// Render a `DiagReport` as human-readable text (the original format).
+fn print_human_readable(r: &DiagReport) {
+    println!("ContextFS Diagnostics");
+    println!("  Product:    {}", r.product);
+    println!("  Version:    {}", r.version);
+    println!(
+        "  Bundle ID:  {}",
+        r.bundle_id.as_deref().unwrap_or("not set")
+    );
+    println!("  Backend:    {} ({})", r.backend, r.backend_source);
+
+    if r.config_loaded {
+        println!("  Config:     {} (loaded)", r.config_path.display());
     } else {
         println!(
             "  Config:     {} (not found — using defaults + env)",
-            config_path.display()
+            r.config_path.display()
         );
     }
 
-    // Daemon status — try to ping
-    let (daemon_running, daemon_pid) = check_daemon(config).await;
-    if daemon_running {
-        if let Some(pid) = daemon_pid {
+    if r.daemon_running {
+        if let Some(pid) = r.daemon_pid {
             println!("  Daemon:     running (PID {pid})");
         } else {
             println!("  Daemon:     running");
@@ -54,27 +123,46 @@ pub async fn handle_diag(config: &Config) {
         println!("  Daemon:     not running");
     }
 
-    // Extension status (macOS only)
-    check_extension(config);
-
-    // macOS version (macOS only)
-    check_macos_version();
-
-    // Mount count — try list RPC
-    if daemon_running {
-        let mount_count = query_mount_count(config).await;
-        match mount_count {
-            Some(n) => println!("  Mounts:     {n} active"),
-            None => println!("  Mounts:     unknown (RPC error)"),
+    // Extension (macOS only)
+    if let Some(bundle_id) = &r.extension_bundle_id {
+        if r.extension_registered {
+            println!("  Extension:  {bundle_id} (enabled)");
+        } else {
+            println!("  Extension:  not registered");
+        }
+    } else if cfg!(target_os = "macos") {
+        if r.extension_registered {
+            println!("  Extension:  registered");
+        } else {
+            println!("  Extension:  not registered");
         }
     } else {
-        println!("  Mounts:     unknown (daemon not running)");
+        println!("  Extension:  not checked (not macOS)");
+    }
+
+    // macOS version (macOS only)
+    match (&r.macos_version, &r.macos_name) {
+        (Some(v), Some(n)) => println!("  macOS:      {v} ({n})"),
+        (Some(v), None) => println!("  macOS:      {v}"),
+        _ => {
+            #[cfg(target_os = "macos")]
+            println!("  macOS:      unknown");
+        }
+    }
+
+    match r.mount_count {
+        Some(n) => println!("  Mounts:     {n} active"),
+        None if r.daemon_running => println!("  Mounts:     unknown (RPC error)"),
+        None => println!("  Mounts:     unknown (daemon not running)"),
     }
 }
 
+// ---------------------------------------------------------------------------
+// Data-gathering helpers
+// ---------------------------------------------------------------------------
+
 /// Try to connect and ping the daemon. Returns (is_running, pid_if_known).
 async fn check_daemon(config: &Config) -> (bool, Option<i32>) {
-    // Read PID from pid file first (best-effort).
     let pid = config
         .pid_file
         .exists()
@@ -91,40 +179,44 @@ async fn check_daemon(config: &Config) -> (bool, Option<i32>) {
     }
 }
 
-/// Run `pluginkit` to check FSKit extension registration (macOS only).
-fn check_extension(config: &Config) {
+/// Query FSKit extension registration status.
+/// Returns `(registered, enabled, bundle_id_if_checked)`.
+fn query_extension_status(config: &Config) -> (bool, bool, Option<String>) {
     #[cfg(target_os = "macos")]
     {
+        let bundle_id = config
+            .fskit_bundle_id
+            .as_deref()
+            .unwrap_or("ai.ctxfs.fskitbridge.fskitext")
+            .to_string();
+
         match std::process::Command::new("pluginkit")
             .args(["-m", "-p", "com.apple.fskit.fsmodule"])
             .output()
         {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let bundle_id = config
-                    .fskit_bundle_id
-                    .as_deref()
-                    .unwrap_or("ai.ctxfs.fskitbridge.fskitext");
-                if stdout.contains(bundle_id) {
-                    println!("  Extension:  {bundle_id} (enabled)");
-                } else {
-                    println!("  Extension:  not registered");
-                }
+                let line = stdout.lines().find(|l| l.contains(&bundle_id));
+                let registered = line.is_some();
+                // `pluginkit -m` prefixes enabled extensions with `+`.
+                let enabled = line.is_some_and(|l| l.trim_start().starts_with('+'));
+                (registered, enabled, Some(bundle_id))
             }
             Err(_) => {
-                println!("  Extension:  not checked (pluginkit unavailable)");
+                // pluginkit unavailable (e.g., very old macOS or test env)
+                (false, false, Some(bundle_id))
             }
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = config; // suppress unused warning
-        println!("  Extension:  not checked (not macOS)");
+        let _ = config;
+        (false, false, None)
     }
 }
 
-/// Run `sw_vers` to get the macOS version (macOS only).
-fn check_macos_version() {
+/// Query macOS product version and name via `sw_vers`. Returns `(version, name)`.
+fn query_macos_version() -> (Option<String>, Option<String>) {
     #[cfg(target_os = "macos")]
     {
         let version = std::process::Command::new("sw_vers")
@@ -141,14 +233,12 @@ fn check_macos_version() {
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string());
 
-        match (version, name) {
-            (Some(v), Some(n)) => println!("  macOS:      {v} ({n})"),
-            (Some(v), None) => println!("  macOS:      {v}"),
-            _ => println!("  macOS:      unknown"),
-        }
+        (version, name)
     }
     #[cfg(not(target_os = "macos"))]
-    {}
+    {
+        (None, None)
+    }
 }
 
 /// Query the daemon for the active mount count via the list RPC.
