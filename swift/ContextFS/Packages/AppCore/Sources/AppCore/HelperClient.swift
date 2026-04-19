@@ -1,5 +1,23 @@
 import Foundation
 
+// MARK: - Protocol
+
+/// Abstraction over the concrete `HelperClient` that allows tests to inject a
+/// mock without spawning a real subprocess.
+public protocol HelperClientProtocol: Sendable {
+    func ping() async throws -> String
+    func list() async throws -> [MountInfo]
+    func unmount(target: String) async throws
+    func cacheBreakdown() async throws -> CacheBreakdown
+    func setCacheLimits(maxBytes: UInt64) async throws -> CacheBreakdown
+    func pruneBlobs(targetBytes: UInt64) async throws -> UInt64
+    func extensionStatus() async throws -> ExtensionStatus
+    func testGitHubToken(token: String) async throws -> TokenValidation
+    func configRead() async throws -> ConfigSnapshot
+    func configSet(content: String, snapshotHash: String) async throws
+    func configSetValue(key: String, value: JSONValue) async throws
+}
+
 // MARK: - Error types
 
 public enum HelperClientError: Error, Equatable {
@@ -327,3 +345,10 @@ public actor HelperClient {
         failAllPending(error: HelperClientError.helperCrashed(code: -1))
     }
 }
+
+// MARK: - HelperClientProtocol conformance
+
+// `HelperClient` is an actor; all its public methods are already `async throws`.
+// The protocol signatures match exactly, so conformance is automatic — we just
+// declare it here in an extension to keep it explicit.
+extension HelperClient: HelperClientProtocol {}
