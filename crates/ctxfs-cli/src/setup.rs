@@ -4,7 +4,100 @@
 //! current user to run `mount_nfs` and `umount` without a password prompt.
 
 use anyhow::{Context as _, Result};
+use sha2::Digest as _;
 use std::path::Path;
+
+// ---------------------------------------------------------------------------
+// Atomic write + external-edit detection
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur when writing the config file.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigWriteError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("config file was modified externally (hash {expected} expected, found {actual})")]
+    ExternalEdit { expected: String, actual: String },
+}
+
+/// Atomically write `contents` to `path` using a temp+fsync+rename strategy.
+///
+/// - Creates the parent directory if it does not exist.
+/// - Writes to a sibling `.tmp.<pid>` file, calls `fsync`, then renames over the target.
+/// - On Unix, `rename` is atomic, so an interrupted write never leaves a half-written file.
+pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ConfigWriteError> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config.toml");
+    let tmp_path = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// A snapshot of a config file's contents at the time it was read.
+///
+/// Used by the future Preferences GUI to detect external edits: take a snapshot
+/// when the window opens, re-check before saving. If the on-disk hash has
+/// changed, return [`ConfigWriteError::ExternalEdit`] so the GUI can show a
+/// non-destructive "reload or overwrite?" dialog.
+#[derive(Debug)]
+pub struct ConfigSnapshot {
+    /// SHA-256 hex of the file contents at read time.  Empty-file hash when
+    /// the file did not exist.
+    hash_at_read: String,
+}
+
+impl ConfigSnapshot {
+    /// Read the file at `path` and record its hash.
+    ///
+    /// If the file does not exist, records the hash of an empty byte slice so
+    /// that a subsequent [`write_back`](Self::write_back) will succeed when the
+    /// file is still missing.
+    pub fn read(path: &Path) -> Result<Self, ConfigWriteError> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self {
+            hash_at_read: hex::encode(sha2::Sha256::digest(&bytes)),
+        })
+    }
+
+    /// Write `contents` to `path` atomically, but only if the file has not
+    /// been modified since this snapshot was taken.
+    ///
+    /// Returns [`ConfigWriteError::ExternalEdit`] if the current on-disk hash
+    /// differs from the hash recorded at read time.
+    pub fn write_back(&self, path: &Path, contents: &str) -> Result<(), ConfigWriteError> {
+        let current = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let current_hash = hex::encode(sha2::Sha256::digest(&current));
+        if current_hash != self.hash_at_read {
+            return Err(ConfigWriteError::ExternalEdit {
+                expected: self.hash_at_read.clone(),
+                actual: current_hash,
+            });
+        }
+        atomic_write(path, contents.as_bytes())
+    }
+}
 
 const SUDOERS_PATH: &str = "/etc/sudoers.d/ctxfs";
 
@@ -396,12 +489,7 @@ pub fn set_default_backend(backend: &str, config_path: &std::path::Path) -> anyh
     let new_line = format!("backend = \"{backend}\"");
 
     if !config_path.exists() {
-        // Create parent directory if needed.
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        std::fs::write(config_path, format!("{new_line}\n"))
+        atomic_write(config_path, format!("{new_line}\n").as_bytes())
             .with_context(|| format!("failed to write {}", config_path.display()))?;
         return Ok(());
     }
@@ -447,7 +535,7 @@ pub fn set_default_backend(backend: &str, config_path: &std::path::Path) -> anyh
         result.push('\n');
     }
 
-    std::fs::write(config_path, result)
+    atomic_write(config_path, result.as_bytes())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     Ok(())
@@ -597,5 +685,89 @@ mod tests {
         let (_dir, path) = temp_config();
         let err = set_default_backend("auto", &path).unwrap_err();
         assert!(err.to_string().contains("invalid backend"));
+    }
+
+    // -----------------------------------------------------------------------
+    // atomic_write tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn atomic_write_creates_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        atomic_write(&path, b"github_token = \"x\"\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "github_token = \"x\"\n"
+        );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        atomic_write(&path, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        atomic_write(&path, b"content").unwrap();
+        // Only config.toml should exist
+        let mut entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, vec!["config.toml"]);
+    }
+
+    #[test]
+    fn snapshot_detects_external_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "original").unwrap();
+
+        let snap = ConfigSnapshot::read(&path).unwrap();
+
+        // Simulate external editor saving different content
+        std::fs::write(&path, "external edit").unwrap();
+
+        let result = snap.write_back(&path, "gui edit");
+        assert!(
+            matches!(result, Err(ConfigWriteError::ExternalEdit { .. })),
+            "expected ExternalEdit error, got {result:?}"
+        );
+        // File should still have external content
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "external edit"
+        );
+    }
+
+    #[test]
+    fn snapshot_allows_write_when_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "original").unwrap();
+
+        let snap = ConfigSnapshot::read(&path).unwrap();
+
+        snap.write_back(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn snapshot_read_missing_file_produces_empty_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        // File doesn't exist yet
+        let snap = ConfigSnapshot::read(&path).unwrap();
+        // write_back should succeed when the file is still missing
+        snap.write_back(&path, "new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
     }
 }

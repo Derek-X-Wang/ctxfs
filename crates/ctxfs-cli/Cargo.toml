@@ -27,6 +27,9 @@ toml = { workspace = true }
 serde = { workspace = true }
 futures = { workspace = true }
 dirs = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"
