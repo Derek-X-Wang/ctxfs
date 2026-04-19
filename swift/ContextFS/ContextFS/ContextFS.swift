@@ -19,54 +19,22 @@ struct ContextFSApp: App {
         _daemonState = State(initialValue: DaemonState(client: client))
     }
 
+    @State private var showPreferences: Bool = false
+
     var body: some Scene {
         MenuBarExtra {
-            MenuBarContent(state: daemonState)
-                .task {
-                    daemonState.start()
-                }
+            MenuContent(state: daemonState, showPreferences: $showPreferences)
+                .task { daemonState.start() }
         } label: {
             StatusIcon(state: daemonState.iconState)
         }
         .menuBarExtraStyle(.window)
-    }
-}
 
-// MARK: - Placeholder menu content (Task 6 fills this in)
-
-/// Minimal dropdown shown until Task 6 wires in the full menu content.
-struct MenuBarContent: View {
-    @Bindable var state: DaemonState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("ContextFS")
-                .font(.headline)
-                .padding(.top, 6)
-                .padding(.horizontal)
-
-            if state.daemonRunning {
-                Text("\(state.mounts.count) active mounts")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
-            } else {
-                Text("Daemon not running")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal)
-            }
-
-            Divider()
-
-            Button("Quit ContextFS") {
-                NSApplication.shared.terminate(nil)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal)
-            .padding(.bottom, 6)
+        // Placeholder for future Preferences window — real one lands in Task 7
+        Window("ContextFS Preferences", id: "preferences") {
+            Text("Preferences coming soon")
+                .frame(width: 560, height: 200)
         }
-        .frame(width: 260)
     }
 }
 

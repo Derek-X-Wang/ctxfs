@@ -80,6 +80,27 @@ public final class DaemonState {
         pollTask = nil
     }
 
+    // MARK: - Unmount actions
+
+    /// Unmount a single mount point and immediately refresh state.
+    public func unmount(_ target: String) async {
+        do {
+            try await client.unmount(target: target)
+            await pollOnce()
+        } catch {
+            lastError = "unmount failed: \(error)"
+        }
+    }
+
+    /// Unmount all active mounts and immediately refresh state.
+    public func unmountAll() async {
+        let targets = mounts.map(\.mountPoint)
+        for t in targets {
+            try? await client.unmount(target: t)
+        }
+        await pollOnce()
+    }
+
     // MARK: - Private poll
 
     private func pollOnce() async {
