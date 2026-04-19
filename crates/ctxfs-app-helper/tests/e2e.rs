@@ -323,6 +323,87 @@ fn test_github_token_missing_params_returns_error() {
     let _ = child.wait();
 }
 
+/// Full-lifecycle test. Requires a running ctxfs daemon.
+/// Run with: cargo test -p ctxfs-app-helper -- --ignored helper_persistent_session
+#[test]
+#[ignore]
+fn helper_persistent_session_across_multiple_requests() {
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn helper");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // 1. Five pings — proves the dispatch loop is persistent.
+    for id in 1..=5 {
+        writeln!(stdin, r#"{{"id":{id},"method":"ping"}}"#).unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(
+            line.contains(&format!(r#""id":{id}"#)),
+            "ping {id} failed: {line}"
+        );
+        assert!(line.contains(r#""result":"pong""#));
+    }
+
+    // 2. cache_breakdown — requires daemon.
+    writeln!(stdin, r#"{{"id":10,"method":"cache_breakdown"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(line.trim())
+        .unwrap_or_else(|e| panic!("invalid JSON for cache_breakdown: {e}\nline: {line}"));
+    assert_eq!(parsed["id"], 10);
+    assert!(
+        parsed.get("error").is_none(),
+        "cache_breakdown errored — is daemon running? {line}"
+    );
+    let result = &parsed["result"];
+    assert!(result["blob_bytes"].is_u64(), "missing blob_bytes: {result}");
+    assert!(result["blob_count"].is_u64());
+    assert!(result["tree_bytes"].is_u64());
+    assert!(result["tree_count"].is_u64());
+    assert!(result["max_bytes"].is_u64());
+
+    // 3. list — returns an array even if empty.
+    writeln!(stdin, r#"{{"id":20,"method":"list"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(parsed["id"], 20);
+    assert!(parsed.get("error").is_none(), "list errored: {line}");
+    assert!(
+        parsed["result"].is_array(),
+        "list result must be array: {parsed}"
+    );
+
+    // 4. extension_status — no daemon required, must always work.
+    writeln!(stdin, r#"{{"id":30,"method":"extension_status"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(parsed["id"], 30);
+    let result = &parsed["result"];
+    assert!(result["bundle_id"].is_string());
+    assert!(result["registered"].is_boolean());
+    assert!(result["enabled"].is_boolean());
+    assert!(result["platform_supported"].is_boolean());
+
+    // 5. Close stdin — helper exits cleanly.
+    drop(stdin);
+    let status = child.wait().expect("wait");
+    assert!(status.success(), "helper exited non-zero: {status:?}");
+}
+
 // Live network test — gated on env var to avoid flaky CI.
 #[test]
 #[ignore]
