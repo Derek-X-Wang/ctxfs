@@ -20,20 +20,34 @@ struct ContextFSApp: App {
     }
 
     @State private var showPreferences: Bool = false
+    @State private var showOnboarding: Bool = false
 
     var body: some Scene {
         MenuBarExtra {
             MenuContent(state: daemonState, showPreferences: $showPreferences)
                 .task { daemonState.start() }
+                .task { checkFirstLaunch() }
         } label: {
             StatusIcon(state: daemonState.iconState)
         }
         .menuBarExtraStyle(.window)
 
+        Window("ContextFS Setup", id: "onboarding") {
+            OnboardingView(state: daemonState, isPresented: $showOnboarding)
+        }
+        .windowResizability(.contentSize)
+
         Window("ContextFS Preferences", id: "preferences") {
             PreferencesView(state: daemonState)
         }
         .windowResizability(.contentSize)
+    }
+
+    // MARK: - First-launch detection
+
+    private func checkFirstLaunch() {
+        guard !UserDefaults.standard.bool(forKey: "onboarding_complete") else { return }
+        showOnboarding = true
     }
 }
 
