@@ -156,6 +156,85 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             }
         }
 
+        "extension_status" => {
+            #[derive(serde::Serialize)]
+            struct Status {
+                bundle_id: String,
+                registered: bool,
+                enabled: bool,
+                version: Option<String>,
+                platform_supported: bool,
+            }
+
+            let config = ctxfs_core::config::Config::load();
+            let bundle_id = config
+                .fskit_bundle_id
+                .unwrap_or_else(|| "ai.ctxfs.fskitbridge.fskitext".to_string());
+
+            #[cfg(target_os = "macos")]
+            {
+                match std::process::Command::new("pluginkit")
+                    .args(["-m", "-p", "com.apple.fskit.fsmodule"])
+                    .output()
+                {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let line = stdout.lines().find(|l| l.contains(&bundle_id));
+                        let registered = line.is_some();
+                        // pluginkit prefixes enabled extensions with `+`
+                        let enabled = line.is_some_and(|l| l.trim_start().starts_with('+'));
+                        // Try to parse version from "bundle_id(1.2.3)" format.
+                        // pluginkit may emit "bundle_id((null))" when no version is set.
+                        let version = line.and_then(|l| {
+                            let start = l.find('(')? + 1;
+                            let end = l.rfind(')')?;
+                            if end > start {
+                                let v = l[start..end].trim_matches('(').trim_matches(')');
+                                if v != "null" && !v.is_empty() {
+                                    return Some(v.to_string());
+                                }
+                            }
+                            None
+                        });
+                        Response::ok(
+                            req.id,
+                            Status {
+                                bundle_id,
+                                registered,
+                                enabled,
+                                version,
+                                platform_supported: true,
+                            },
+                        )
+                    }
+                    Err(_) => Response::ok(
+                        req.id,
+                        Status {
+                            bundle_id,
+                            registered: false,
+                            enabled: false,
+                            version: None,
+                            platform_supported: true, // still macOS, just pluginkit unavailable
+                        },
+                    ),
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                Response::ok(
+                    req.id,
+                    Status {
+                        bundle_id,
+                        registered: false,
+                        enabled: false,
+                        version: None,
+                        platform_supported: false,
+                    },
+                )
+            }
+        }
+
         other => Response::err(req.id, format!("unknown method: {other}")),
     }
 }

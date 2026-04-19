@@ -196,6 +196,47 @@ fn prune_blobs_errors_when_params_missing() {
 }
 
 #[test]
+fn extension_status_returns_structured_response() {
+    let mut child = Command::cargo_bin("ctxfs-app-helper")
+        .unwrap()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":1,"method":"extension_status"}}"#).unwrap();
+    stdin.flush().unwrap();
+
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    // Must have result (not error) — this method shouldn't fail even on non-macOS
+    assert!(
+        response.contains(r#""result""#),
+        "expected result, got: {response}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    let result = &parsed["result"];
+    // Schema check
+    assert!(result["bundle_id"].is_string());
+    assert!(result["registered"].is_boolean());
+    assert!(result["enabled"].is_boolean());
+    assert!(result["platform_supported"].is_boolean());
+
+    #[cfg(target_os = "macos")]
+    assert_eq!(result["platform_supported"], true);
+
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(result["platform_supported"], false);
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
 fn cache_breakdown_errors_when_daemon_down() {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("nonexistent.sock");
