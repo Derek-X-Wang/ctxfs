@@ -30,11 +30,10 @@ struct ContextFSApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        // Placeholder for future Preferences window — real one lands in Task 7
         Window("ContextFS Preferences", id: "preferences") {
-            Text("Preferences coming soon")
-                .frame(width: 560, height: 200)
+            PreferencesView(state: daemonState)
         }
+        .windowResizability(.contentSize)
     }
 }
 

@@ -101,6 +101,41 @@ public final class DaemonState {
         await pollOnce()
     }
 
+    // MARK: - Config pass-throughs
+
+    /// Read the current config file and its snapshot hash.
+    public func configRead() async throws -> ConfigSnapshot {
+        try await client.configRead()
+    }
+
+    /// Update a single config key in-place (atomic + comment-preserving on the Rust side).
+    public func configSetValue(key: String, value: JSONValue) async throws {
+        try await client.configSetValue(key: key, value: value)
+    }
+
+    /// Validate a GitHub personal access token; returns rate-limit info.
+    public func testGitHubToken(token: String) async throws -> TokenValidation {
+        try await client.testGitHubToken(token: token)
+    }
+
+    /// Update the blob cache max size at runtime; returns fresh breakdown and updates `cacheBreakdown`.
+    @discardableResult
+    public func setCacheLimits(maxBytes: UInt64) async throws -> CacheBreakdown {
+        let result = try await client.setCacheLimits(maxBytes: maxBytes)
+        cacheBreakdown = result
+        return result
+    }
+
+    /// Prune blob cache to `targetBytes`; refreshes `cacheBreakdown` and returns bytes freed.
+    @discardableResult
+    public func pruneBlobs(targetBytes: UInt64) async throws -> UInt64 {
+        let freed = try await client.pruneBlobs(targetBytes: targetBytes)
+        if let b = try? await client.cacheBreakdown() {
+            cacheBreakdown = b
+        }
+        return freed
+    }
+
     // MARK: - Private poll
 
     private func pollOnce() async {
