@@ -56,6 +56,9 @@ struct OnboardingView: View {
                     onContinue: {
                         step = (step == .quickExtension) ? .quickToken : .customToken
                     },
+                    onSkip: {
+                        step = (step == .quickExtension) ? .quickToken : .customToken
+                    },
                     onBack: { step = (step == .quickExtension) ? .welcome : .customBackend }
                 )
                 .onChange(of: state.extensionStatus?.enabled) { _, newValue in
@@ -224,6 +227,7 @@ private struct WelcomeStep: View {
 private struct ExtensionStep: View {
     let state: DaemonState
     let onContinue: () -> Void
+    let onSkip: () -> Void
     let onBack: () -> Void
 
     private var enabled: Bool {
@@ -257,6 +261,7 @@ private struct ExtensionStep: View {
 
             HStack {
                 Button("Back", action: onBack)
+                Button("Skip (use NFS)", action: onSkip)
                 Spacer()
                 Button("Open System Settings", action: openSystemSettings)
                 Button("Continue", action: onContinue)
