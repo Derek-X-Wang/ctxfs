@@ -334,6 +334,17 @@ public actor HelperClient {
         )
     }
 
+    // MARK: Deallocation
+
+    deinit {
+        stdoutReaderTask?.cancel()
+        streamContinuation?.finish()
+        if let p = process, p.isRunning {
+            p.terminate()
+        }
+        stdinHandle = nil
+    }
+
     // MARK: Shutdown
 
     /// Terminate the subprocess cleanly and cancel the reader task.

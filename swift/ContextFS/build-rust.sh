@@ -35,7 +35,7 @@ DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS"
 mkdir -p "$DEST"
 
 # Copy + preserve mtimes. cp -f overwrites any stale copy.
-cp -f "$TARGET_DIR/ctxfs" "$DEST/ctxfs"
-cp -f "$TARGET_DIR/ctxfs-app-helper" "$DEST/ctxfs-app-helper"
+cp -f "$REPO_ROOT/$TARGET_DIR/ctxfs" "$DEST/ctxfs"
+cp -f "$REPO_ROOT/$TARGET_DIR/ctxfs-app-helper" "$DEST/ctxfs-app-helper"
 
 echo "[build-rust.sh] bundled ctxfs + ctxfs-app-helper into $DEST"
