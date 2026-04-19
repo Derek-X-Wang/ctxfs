@@ -18,8 +18,10 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tarpc = { workspace = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-core = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"
+tempfile = "3"

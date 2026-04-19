@@ -17,6 +17,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
+    let config = ctxfs_core::config::Config::load();
+    let state = handler::HandlerState::new(config.socket_path);
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -37,7 +40,7 @@ async fn async_main() -> anyhow::Result<()> {
             }
         };
 
-        let response = handler::dispatch(&request).await;
+        let response = handler::dispatch(&state, &request).await;
         serde_json::to_writer(&mut writer, &response)?;
         writeln!(&mut writer)?;
         writer.flush()?;
