@@ -806,10 +806,11 @@ impl CtxfsService for DaemonServer {
     }
 
     async fn cache_breakdown(self, _: tarpc::context::Context) -> Result<CacheBreakdown, String> {
+        let (blob_bytes, blob_count) = self.cache.stats();
         let (tree_count, tree_bytes) = self.tree_cache.stats();
         Ok(CacheBreakdown {
-            blob_bytes: self.cache.total_bytes(),
-            blob_count: self.cache.count(),
+            blob_bytes,
+            blob_count: blob_count as u64,
             tree_bytes,
             tree_count: tree_count as u64,
             max_bytes: self.cache.max_bytes(),

@@ -179,35 +179,14 @@ async fn check_daemon(config: &Config) -> (bool, Option<i32>) {
 /// Query FSKit extension registration status.
 /// Returns `(registered, enabled, bundle_id_if_checked)`.
 fn query_extension_status(config: &Config) -> (bool, bool, Option<String>) {
-    #[cfg(target_os = "macos")]
-    {
-        let bundle_id = config
-            .fskit_bundle_id
-            .as_deref()
-            .unwrap_or("ai.ctxfs.fskitbridge.fskitext")
-            .to_string();
-
-        match std::process::Command::new("pluginkit")
-            .args(["-m", "-p", "com.apple.fskit.fsmodule"])
-            .output()
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let line = stdout.lines().find(|l| l.contains(&bundle_id));
-                let registered = line.is_some();
-                // `pluginkit -m` prefixes enabled extensions with `+`.
-                let enabled = line.is_some_and(|l| l.trim_start().starts_with('+'));
-                (registered, enabled, Some(bundle_id))
-            }
-            Err(_) => {
-                // pluginkit unavailable (e.g., very old macOS or test env)
-                (false, false, Some(bundle_id))
-            }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = config;
+    let bundle_id = config
+        .fskit_bundle_id
+        .as_deref()
+        .unwrap_or("ai.ctxfs.fskitbridge.fskitext");
+    let info = ctxfs_core::query_fskit_extension_status(bundle_id);
+    if info.platform_supported {
+        (info.registered, info.enabled, Some(info.bundle_id))
+    } else {
         (false, false, None)
     }
 }

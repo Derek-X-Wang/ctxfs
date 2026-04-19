@@ -155,98 +155,30 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
         }
 
         "extension_status" => {
-            #[derive(serde::Serialize)]
-            struct Status {
-                bundle_id: String,
-                registered: bool,
-                enabled: bool,
-                version: Option<String>,
-                platform_supported: bool,
-            }
-
             // bundle_id is pre-cached in HandlerState — no Config::load() per-request.
             let bundle_id = state.bundle_id.clone();
 
-            #[cfg(target_os = "macos")]
-            {
-                // Run the blocking pluginkit subprocess on the blocking thread pool
-                // so it doesn't stall the async executor.
-                let result = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("pluginkit")
-                        .args(["-m", "-p", "com.apple.fskit.fsmodule"])
-                        .output()
-                        .map(|output| (output, bundle_id))
-                })
-                .await;
+            // Run the blocking pluginkit subprocess on the blocking thread pool
+            // so it doesn't stall the async executor.
+            let info = tokio::task::spawn_blocking(move || {
+                ctxfs_core::query_fskit_extension_status(&bundle_id)
+            })
+            .await
+            .unwrap_or_else(|_| ctxfs_core::ExtensionInfo {
+                bundle_id: state.bundle_id.clone(),
+                registered: false,
+                enabled: false,
+                version: None,
+                platform_supported: cfg!(target_os = "macos"),
+            });
 
-                match result {
-                    Ok(Ok((output, bid))) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let line = stdout.lines().find(|l| l.contains(&bid));
-                        let registered = line.is_some();
-                        let enabled = line.is_some_and(|l| l.trim_start().starts_with('+'));
-                        let version = line.and_then(|l| {
-                            let start = l.find('(')? + 1;
-                            let end = l.rfind(')')?;
-                            if end > start {
-                                let v = l[start..end].trim_matches('(').trim_matches(')');
-                                if v != "null" && !v.is_empty() {
-                                    return Some(v.to_string());
-                                }
-                            }
-                            None
-                        });
-                        Response::ok(
-                            req.id,
-                            Status {
-                                bundle_id: bid,
-                                registered,
-                                enabled,
-                                version,
-                                platform_supported: true,
-                            },
-                        )
-                    }
-                    Ok(Err(_)) | Err(_) => Response::ok(
-                        req.id,
-                        Status {
-                            bundle_id: state.bundle_id.clone(),
-                            registered: false,
-                            enabled: false,
-                            version: None,
-                            platform_supported: true,
-                        },
-                    ),
-                }
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                Response::ok(
-                    req.id,
-                    Status {
-                        bundle_id,
-                        registered: false,
-                        enabled: false,
-                        version: None,
-                        platform_supported: false,
-                    },
-                )
-            }
+            Response::ok(req.id, info)
         }
 
         "test_github_token" => {
             #[derive(serde::Deserialize)]
             struct Params {
                 token: String,
-            }
-
-            #[derive(serde::Serialize)]
-            struct TokenResult {
-                valid: bool,
-                user: Option<String>,
-                remaining: Option<u64>,
-                reset_at: Option<String>,
             }
 
             let params: Params = match serde_json::from_value(req.params.clone()) {
@@ -258,78 +190,10 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                     )
                 }
             };
-            if params.token.is_empty() {
-                return Response::err(req.id, "token is empty");
+            match ctxfs_provider_git::validate_github_token(&params.token).await {
+                Ok(info) => Response::ok(req.id, info),
+                Err(e) => Response::err(req.id, e),
             }
-
-            let client = reqwest::Client::new();
-            let rate_limit_fut = client
-                .get("https://api.github.com/rate_limit")
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", params.token),
-                )
-                .header(
-                    "User-Agent",
-                    concat!("ctxfs/", env!("CARGO_PKG_VERSION")),
-                )
-                .header("Accept", "application/vnd.github+json")
-                .send();
-            let user_fut = client
-                .get("https://api.github.com/user")
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", params.token),
-                )
-                .header(
-                    "User-Agent",
-                    concat!("ctxfs/", env!("CARGO_PKG_VERSION")),
-                )
-                .header("Accept", "application/vnd.github+json")
-                .send();
-
-            let (rate_res, user_res) = tokio::join!(rate_limit_fut, user_fut);
-
-            let rate_resp = match rate_res {
-                Ok(r) => r,
-                Err(e) => return Response::err(req.id, format!("request failed: {e}")),
-            };
-            if !rate_resp.status().is_success() {
-                return Response::err(
-                    req.id,
-                    format!("GitHub returned {}", rate_resp.status()),
-                );
-            }
-            let rate_body: serde_json::Value = match rate_resp.json().await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Response::err(req.id, format!("failed to parse rate_limit: {e}"))
-                }
-            };
-
-            let remaining = rate_body["resources"]["core"]["remaining"].as_u64();
-            let reset_at = rate_body["resources"]["core"]["reset"]
-                .as_i64()
-                .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
-                .map(|dt| dt.to_rfc3339());
-
-            let user = match user_res {
-                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-                    Ok(body) => body["login"].as_str().map(std::string::ToString::to_string),
-                    Err(_) => None,
-                },
-                _ => None,
-            };
-
-            Response::ok(
-                req.id,
-                TokenResult {
-                    valid: true,
-                    user,
-                    remaining,
-                    reset_at,
-                },
-            )
         }
 
         "config_read" => {

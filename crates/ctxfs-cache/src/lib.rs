@@ -107,19 +107,25 @@ impl BlobCache {
 
         let size = data.len() as u64;
         let key = digest.hex.clone();
-        let mut state = self.state.lock().unwrap();
-        if let Some(existing) = state.entries.get(&key) {
-            state.total_bytes -= existing.size;
-        }
-        let _ = state.entries.insert(key, CacheEntry { size });
-        state.total_bytes += size;
-
-        // Evict if over limit
-        let limit = self.max_bytes.load(Ordering::Relaxed);
-        while state.total_bytes > limit && !state.entries.is_empty() {
-            if let Some((evicted_key, _)) = state.evict_oldest() {
-                self.remove_blob_file(&evicted_key);
+        let mut evicted = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Some(existing) = state.entries.get(&key) {
+                state.total_bytes -= existing.size;
             }
+            let _ = state.entries.insert(key, CacheEntry { size });
+            state.total_bytes += size;
+
+            // Collect eviction candidates while holding the lock, then delete after.
+            let limit = self.max_bytes.load(Ordering::Relaxed);
+            while state.total_bytes > limit && !state.entries.is_empty() {
+                if let Some(entry) = state.evict_oldest() {
+                    evicted.push(entry);
+                }
+            }
+        }
+        for (evicted_key, _) in evicted {
+            self.remove_blob_file(&evicted_key);
         }
 
         Ok(())
@@ -132,16 +138,19 @@ impl BlobCache {
 
     pub fn prune(&self, max_bytes: Option<u64>) -> Result<u64, CtxfsError> {
         let limit = max_bytes.unwrap_or_else(|| self.max_bytes.load(Ordering::Relaxed));
-        let mut state = self.state.lock().unwrap();
-        let mut freed = 0u64;
-
-        while state.total_bytes > limit && !state.entries.is_empty() {
-            if let Some((evicted_key, evicted_size)) = state.evict_oldest() {
-                freed += evicted_size;
-                self.remove_blob_file(&evicted_key);
+        let mut evicted = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            while state.total_bytes > limit && !state.entries.is_empty() {
+                if let Some(entry) = state.evict_oldest() {
+                    evicted.push(entry);
+                }
             }
         }
-
+        let freed = evicted.iter().map(|(_, size)| size).sum();
+        for (key, _) in evicted {
+            self.remove_blob_file(&key);
+        }
         Ok(freed)
     }
 
@@ -169,28 +178,42 @@ impl BlobCache {
     /// Returns bytes freed. Does NOT touch the tree cache. Returns 0 if already
     /// under the target.
     pub fn prune_blobs(&self, target_bytes: u64) -> u64 {
-        let mut state = self.state.lock().unwrap();
-        let initial = state.total_bytes;
-        while state.total_bytes > target_bytes {
-            match state.evict_oldest() {
-                Some((key, _size)) => self.remove_blob_file(&key),
-                None => break,
+        let mut evicted = Vec::new();
+        let initial;
+        {
+            let mut state = self.state.lock().unwrap();
+            initial = state.total_bytes;
+            while state.total_bytes > target_bytes {
+                match state.evict_oldest() {
+                    Some(entry) => evicted.push(entry),
+                    None => break,
+                }
             }
         }
-        initial.saturating_sub(state.total_bytes)
+        for (key, _) in evicted {
+            self.remove_blob_file(&key);
+        }
+        let freed = self.state.lock().unwrap().total_bytes;
+        initial.saturating_sub(freed)
     }
 
     /// Update the maximum cache size at runtime. If `new_max` is smaller than
     /// the current usage, entries are evicted (oldest-first) until usage fits.
     pub fn set_max_bytes(&self, new_max: u64) {
         self.max_bytes.store(new_max, Ordering::Relaxed);
-        let mut state = self.state.lock().unwrap();
-        while state.total_bytes > new_max {
-            if let Some((evicted_key, _)) = state.evict_oldest() {
-                self.remove_blob_file(&evicted_key);
-            } else {
-                break; // nothing left to evict
+        let mut evicted = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            while state.total_bytes > new_max {
+                if let Some(entry) = state.evict_oldest() {
+                    evicted.push(entry);
+                } else {
+                    break;
+                }
             }
+        }
+        for (key, _) in evicted {
+            self.remove_blob_file(&key);
         }
     }
 

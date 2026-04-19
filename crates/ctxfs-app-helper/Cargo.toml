@@ -21,6 +21,7 @@ tracing-subscriber = { workspace = true }
 tarpc = { workspace = true }
 ctxfs-ipc = { workspace = true }
 ctxfs-core = { workspace = true }
+ctxfs-provider-git = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
 toml_edit = { workspace = true }

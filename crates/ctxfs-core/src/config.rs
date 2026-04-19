@@ -260,8 +260,10 @@ pub enum ConfigWriteError {
 /// Atomically write `contents` to `path` using a temp+fsync+rename strategy.
 ///
 /// - Creates the parent directory if it does not exist.
-/// - Writes to a sibling `.tmp.<pid>` file, calls `fsync`, then renames over the target.
+/// - Writes to a sibling `.tmp` file, calls `fsync`, then renames over the target.
 /// - On Unix, `rename` is atomic, so an interrupted write never leaves a half-written file.
+/// - Concurrent writes to the same config file are serialized at a higher level;
+///   multi-process writers to the same user config are not a supported use-case.
 pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<(), ConfigWriteError> {
     use std::io::Write as _;
     let parent = path.parent().ok_or_else(|| {
@@ -273,7 +275,7 @@ pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<(), Confi
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("config.toml");
-    let tmp_path = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    let tmp_path = parent.join(format!(".{file_name}.tmp"));
 
     {
         let mut f = std::fs::File::create(&tmp_path)?;
