@@ -15,36 +15,45 @@ pub struct ExtensionInfo {
 ///
 /// On non-macOS hosts `platform_supported` is `false` and all other fields
 /// carry their zero/`None` values.
+///
+/// ## Enablement caveat
+///
+/// On macOS 26+ the Login Items & Extensions toggle state for `ExtensionKit`
+/// `FSKit` modules is not reliably exposed by `pluginkit`. We therefore treat
+/// `enabled == registered`: if the extension is discoverable in the system's
+/// extension database, we consider it available to `FSKit`. The real
+/// enablement check happens when `fskit-rs` attempts to start a session —
+/// a mount against a toggled-off extension surfaces the failure there.
 #[must_use]
 pub fn query_fskit_extension_status(bundle_id: &str) -> ExtensionInfo {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        match Command::new("pluginkit")
-            .args(["-m", "-p", "com.apple.fskit.fsmodule"])
+        // `pluginkit -m -i <id> --raw` is what fskit-rs itself uses to locate
+        // a registered extension. Exit code is always 0; the signal is
+        // whether the bundle identifier shows up in the raw plist dump.
+        let (registered, version) = match Command::new("pluginkit")
+            .args(["-m", "-i", bundle_id, "--raw"])
             .output()
         {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let line = stdout.lines().find(|l| l.contains(bundle_id));
-                let registered = line.is_some();
-                let enabled = line.is_some_and(|l| l.trim_start().starts_with('+'));
-                let version = line.and_then(parse_version);
-                ExtensionInfo {
-                    bundle_id: bundle_id.to_string(),
-                    registered,
-                    enabled,
-                    version,
-                    platform_supported: true,
+                let needle = format!("CFBundleIdentifier = \"{bundle_id}\"");
+                if stdout.contains(&needle) {
+                    (true, parse_version_from_raw(&stdout))
+                } else {
+                    (false, None)
                 }
             }
-            Err(_) => ExtensionInfo {
-                bundle_id: bundle_id.to_string(),
-                registered: false,
-                enabled: false,
-                version: None,
-                platform_supported: true,
-            },
+            Err(_) => (false, None),
+        };
+
+        ExtensionInfo {
+            bundle_id: bundle_id.to_string(),
+            registered,
+            enabled: registered,
+            version,
+            platform_supported: true,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -59,16 +68,12 @@ pub fn query_fskit_extension_status(bundle_id: &str) -> ExtensionInfo {
     }
 }
 
+/// Pull `CFBundleShortVersionString = "…";` out of `pluginkit --raw` output.
 #[cfg(target_os = "macos")]
-fn parse_version(line: &str) -> Option<String> {
-    let start = line.find('(')? + 1;
-    let end = line.rfind(')')?;
-    if end <= start {
-        return None;
-    }
-    let v = &line[start..end];
-    if v.is_empty() || v == "null" || v == "(null)" {
-        return None;
-    }
-    Some(v.to_string())
+fn parse_version_from_raw(raw: &str) -> Option<String> {
+    let key = "CFBundleShortVersionString = \"";
+    let start = raw.find(key)? + key.len();
+    let end = start + raw[start..].find('"')?;
+    let v = &raw[start..end];
+    if v.is_empty() { None } else { Some(v.to_string()) }
 }
