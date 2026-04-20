@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! `ctxfs update` subcommand — self-update the CLI binary from GitHub Releases.
 //!
 //! Two modes:
@@ -47,9 +45,36 @@ fn run_check() -> Result<()> {
     Ok(())
 }
 
-/// Placeholder for Task 4.
+/// `ctxfs update` — full download + swap flow. Refuses if the running binary
+/// is package-manager-managed.
 fn run_apply() -> Result<()> {
-    bail!("not yet implemented — filled in by Task 4");
+    require_proceed_or_bail()?;
+
+    // self_update does the heavy lifting — GitHub API call, download matching
+    // platform archive, untar, SHA-256 verify, atomic rename.
+    //
+    // The `bin_name` must match the binary inside the tarball; the `target`
+    // is the triple Cargo uses (which matches our CI artifact naming per
+    // Phase 3 spec Section 2: `ctxfs-X.Y.Z-darwin-{arm64,x86_64}.tar.gz`).
+    let target = target_triple()?;
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name("ctxfs")
+        .show_download_progress(true)
+        .current_version(cargo_crate_version!())
+        .target(&target)
+        .build()
+        .context("failed to configure self_update")?
+        .update()
+        .context("self_update failed")?;
+
+    if status.updated() {
+        println!("Updated to {}. Restart any open ctxfs shell sessions.", status.version());
+    } else {
+        println!("Already on the latest version ({}).", cargo_crate_version!());
+    }
+    Ok(())
 }
 
 /// Query the latest release tag from GitHub. Returns `None` if the repo has
@@ -75,9 +100,25 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     self_update::version::bump_is_greater(current, candidate).unwrap_or_default()
 }
 
-// Decision is consumed by run_apply (Task 4); suppress dead-code warning until then.
-#[allow(dead_code)]
-fn _require_proceed() -> Result<()> {
+/// Resolve the Rust target-triple string for the current binary. Used by
+/// `self_update` to pick the right platform-specific archive out of the
+/// Release assets. We ship two darwin triples; reject other hosts.
+fn target_triple() -> Result<String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin".to_string()),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin".to_string()),
+        (os, arch) => bail!(
+            "ctxfs update does not ship a binary for {os}/{arch}. \
+             Phase 3 targets macOS only — install from source with \
+             'cargo install --git https://github.com/Derek-X-Wang/ctxfs' \
+             until Phase 3.5 adds Linux binaries."
+        ),
+    }
+}
+
+/// Consults `install_path::classify` and bails with a user-friendly message
+/// if the running binary is package-manager-managed.
+fn require_proceed_or_bail() -> Result<()> {
     let path = install_path::current_canonical_exe()
         .context("failed to resolve current executable path")?;
     let prefix = install_path::brew_prefix();
@@ -123,5 +164,17 @@ mod tests {
         // Malformed inputs should fail safe — don't trigger spurious update
         // prompts if GitHub returns an unexpected tag shape.
         assert!(!is_newer("not-a-version", "0.1.0"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn target_triple_is_aarch64_on_apple_silicon() {
+        assert_eq!(target_triple().unwrap(), "aarch64-apple-darwin");
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    fn target_triple_is_x86_64_on_intel_mac() {
+        assert_eq!(target_triple().unwrap(), "x86_64-apple-darwin");
     }
 }
