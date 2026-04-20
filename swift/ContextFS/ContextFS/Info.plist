@@ -4,5 +4,15 @@
 <dict>
 	<key>NSSystemExtensionUsageDescriptionKey</key>
 	<string>Activate FS Extension</string>
+	<key>SUFeedURL</key>
+	<string>https://derek-x-wang.github.io/ctxfs/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>WUlpGGW6BOEK5wrpaXmx/PsS5l/ldtxOrGzS/w2QYKQ=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
 </dict>
 </plist>
