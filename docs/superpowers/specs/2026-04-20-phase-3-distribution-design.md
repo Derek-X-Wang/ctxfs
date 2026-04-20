@@ -90,7 +90,10 @@ Users install via:
 ### Sparkle integration
 
 - **Framework**: Sparkle 2.x via Swift Package Manager, added to the `ContextFS` target
-- **Keys**: generate one EdDSA keypair with `generate_keys` (ships with Sparkle). Private key stored in macOS Keychain **and** as GitHub Actions secret `SPARKLE_PRIVATE_KEY`. Public key embedded in `Info.plist` as `SUPublicEDKey`
+- **Keys**: generate one EdDSA keypair with `generate_keys` (ships with Sparkle). Public key embedded in `Info.plist` as `SUPublicEDKey`. Private key lives in **two places**:
+  - Derek's macOS Keychain (source of truth — used for emergency manual signing from a laptop)
+  - GitHub Actions secret `SPARKLE_PRIVATE_KEY` (operational copy — used by CI for routine releases)
+- **Blast radius:** if `SPARKLE_PRIVATE_KEY` leaks (e.g., a compromised GHA workflow), an attacker could publish updates that look legitimate to existing installs until we rotate. Acceptable risk given the Phase 3 threat model (solo dev, soft launch, ~dozens of users initially) but we name it explicitly, and Section 6 documents the key rotation runbook. If Phase 4+ brings thousands of users, this deserves a revisit — typical mitigation is a hardware key + manual release signing, or moving CI signing to a separate workload with short-lived credentials.
 - **Info.plist additions**:
   - `SUFeedURL = https://derek-x-wang.github.io/ctxfs/appcast.xml`
   - `SUEnableAutomaticChecks = YES`
@@ -120,7 +123,15 @@ Key directives:
 - `app "ContextFS.app"` — drag-install
 - `binary "#{appdir}/ContextFS.app/Contents/MacOS/ctxfs"` — symlink the bundled CLI into `$HOMEBREW_PREFIX/bin/ctxfs` so `ctxfs` on PATH picks up the cask's binary
 - `zap` stanza — on uninstall, remove `~/.ctxfs/`, `~/Library/LaunchAgents/ai.ctxfs.daemon.plist`, stale System Settings extension entries
-- `conflicts_with formula: "contextfs"` — forbid side-by-side install with the CLI-only formula (both would symlink `ctxfs`)
+- `conflicts_with formula: "contextfs"` — forbid side-by-side brew install with the CLI-only formula (both would symlink `ctxfs`)
+
+**The cask-and-formula-and-DMG tri-state:** `conflicts_with` only covers the two-brew-install case. A user who drag-installs the DMG *and then* runs `brew install contextfs` would end up with the formula's `ctxfs` shadowing the cask's. Mitigations:
+
+1. Cask install-time script checks for a prior non-brew `/Applications/ContextFS.app` and refuses until the user removes it (cask-managed vs. direct installs are distinguishable by the presence of `$(brew --prefix)/Caskroom/contextfs/`)
+2. `ctxfs update` (running from either source) detects the brew formula's bin path via the canonicalization logic in Section 2 and refuses to self-update, directing the user to `brew upgrade`
+3. The Preferences window in the companion app shows the running CLI path (`which ctxfs` equivalent) so users can see which copy is on PATH if they ask "why didn't the update land?"
+
+Belt-and-suspenders. The normal path — either `brew install --cask contextfs` *or* DMG, plus optionally `brew install contextfs` for CLI on a headless Mac — Just Works.
 
 ### Notarization flow
 
@@ -139,9 +150,18 @@ Key directives:
 ### GitHub Releases tarball (source of truth for non-cask CLI installs)
 
 - Per-release: `ctxfs-X.Y.Z-darwin-arm64.tar.gz` and `ctxfs-X.Y.Z-darwin-x86_64.tar.gz`
-- Ad-hoc signed — bare CLIs don't need Developer ID; Gatekeeper only gates `.app` bundles
-- Tarball contents: `ctxfs` binary + `LICENSE` + minimal `README.md`. No man pages in Phase 3.
-- `checksums.txt` alongside with SHA-256 of each tarball; `minisign`-signed for `ctxfs update` to verify
+- **Signed with Developer ID Application** + hardened runtime, `--options runtime --timestamp`. Not notarized — bare CLIs don't produce a notarizable archive format that Apple will staple to; Developer ID signing alone satisfies Gatekeeper *once the quarantine attribute is cleared*.
+- Tarball contents: `ctxfs` binary + `LICENSE` + `README.md` with a "Direct download quarantine note" (see below). No man pages in Phase 3.
+- `checksums.txt` alongside with SHA-256 of each tarball and every other Release artifact. `ctxfs update` verifies SHA-256 only. No `minisign` layer in Phase 3 — TLS + GitHub API authentication + SHA-256 is a strictly sufficient trust chain for the threat model, and managing an extra key without a clear threat it blocks is premature. If a future threat model ever calls for code-signed tarballs (e.g., offline verification), add `minisign` then with proper key lifecycle design.
+
+### Quarantine handling for direct browser downloads
+
+macOS attaches a `com.apple.quarantine` xattr to anything downloaded via a browser. For a Developer ID-signed but *not notarized* CLI, first-run prompts with "cannot verify developer." Two clean mitigations:
+
+1. **Recommend Homebrew or `ctxfs update`** as the primary non-app install paths — neither adds a quarantine xattr.
+2. **Document the one-time workaround** in the tarball README and the GitHub Release notes template: `xattr -d com.apple.quarantine ctxfs` after extracting. This is standard on the macOS-CLI-from-GitHub-Releases route (ripgrep, fd, bat users are all familiar).
+
+Not a Phase 3 blocker — it's an expected trait of the direct-download channel for signed-but-not-notarized CLIs.
 
 ### Homebrew formula
 
@@ -161,9 +181,15 @@ Location: `Derek-X-Wang/homebrew-ctxfs/Formula/contextfs.rb`
   3. Atomically swap `$(which ctxfs)` → new binary
   4. Print release notes snippet + "updated to vX.Y.Z; restart your shell sessions"
 - `ctxfs update --check` exits 0 if up-to-date, 1 if newer available — for scripting
-- **Install-path detection (safety rail)**: before self-updating, walk the parent dirs of `_NSGetExecutablePath()`. If any ancestor is `Cellar/`, `Caskroom/`, or `ContextFS.app`, refuse and print:
-  - Homebrew formula/cask: `Run 'brew upgrade contextfs' instead`
-  - Cask's bundled CLI: `This ctxfs is managed by ContextFS.app — update the app instead`
+- **Install-path detection (safety rail)**: before self-updating, resolve the running binary's path deterministically:
+  1. Call `_NSGetExecutablePath` to get the invocation path
+  2. `std::fs::canonicalize` it — resolves `/opt/homebrew/bin/ctxfs` (symlink) to `/opt/homebrew/Cellar/contextfs/<ver>/bin/ctxfs` (real file), and also resolves the cask's `$HOMEBREW_PREFIX/bin/ctxfs` symlink into the real `/Applications/ContextFS.app/Contents/MacOS/ctxfs`
+  3. Check in order of specificity:
+     a. **Cask-managed (bundled with app):** canonical path contains `/Applications/ContextFS.app/Contents/MacOS/` — refuse with `This ctxfs is managed by ContextFS.app — use the app's 'Check for Updates…' menu item, or 'brew upgrade --cask contextfs'`
+     b. **Homebrew formula:** canonical path contains `$(brew --prefix)/Cellar/contextfs/` (shell out to `brew --prefix` once, or read `HOMEBREW_PREFIX` env var if set) — refuse with `Run 'brew upgrade contextfs' instead`
+     c. **Neither:** proceed with self-update
+
+The `canonicalize` + `$(brew --prefix)` pair handles both Apple Silicon (`/opt/homebrew`) and Intel (`/usr/local`) prefixes deterministically, avoids the "symlink masks manager ownership" trap Codex flagged, and doesn't rely on parent-directory name matching.
 
 This prevents users from accidentally desyncing their package manager's view of the binary.
 
@@ -171,71 +197,192 @@ This prevents users from accidentally desyncing their package manager's view of 
 
 ## Section 3 — GitHub Actions pipeline
 
+### Design principles (driving decisions below)
+
+1. **Sign once, deterministically, inside Xcode.** No "dev-sign then re-sign" dance — that's where nested-binary signing goes wrong. Use `CODE_SIGN_STYLE=Manual` with Developer ID Application cert + explicit provisioning profiles for both targets. Xcode handles ordering correctly when given the inputs it expects.
+2. **Explicit nested-signing pass after Xcode, as a verification sweep.** Xcode signs in the right order; we re-verify + sign anything Xcode missed (Rust helpers embedded by the pre-build script, Sparkle framework resources) with `--options runtime --timestamp` before the outer-app hash is computed. `codesign --deep` is deprecated (per Apple); we walk the bundle explicitly.
+3. **Universal build is produced before Xcode runs.** `build-rust.sh` is modified to respect a `CTXFS_PREBUILT_RUST_DIR` env var — if set, it copies from that dir instead of invoking cargo. CI builds universal Rust binaries first, sets the env var, then runs xcodebuild. Dev builds (no env var) keep compiling normally.
+4. **Every artifact consumed by Job 2 is a Release asset or Release body field.** No implicit "file on the runner" handoff. Job 2 downloads what it needs via `gh release download` from the same `tag_name`.
+
+### Pinned tooling
+
+Pinned with explicit versions so builds are reproducible. Upgraded deliberately via PR, not silently:
+
+| Tool | Version | Install command |
+|---|---|---|
+| macOS runner image | `macos-14` (not `macos-latest`) | runs-on: macos-14 |
+| Xcode | 17.x via `xcode-select` | `sudo xcode-select -s /Applications/Xcode_17.app` |
+| Rust | `rust-toolchain.toml` at repo root | auto-selected by rustup |
+| `create-dmg` | `1.2.x` pinned | `brew install create-dmg` with a post-check `brew info --json create-dmg` asserting major version |
+| Sparkle tools (`sign_update`, `generate_appcast`) | Sparkle `2.7.x` | Downloaded from `github.com/sparkle-project/Sparkle/releases` to a cache-keyed runner dir; SHA-256 pinned in the workflow file |
+| `gh` CLI | pre-installed on runner | no action |
+| `ditto`, `codesign`, `notarytool`, `stapler`, `lipo` | Xcode-bundled | no action |
+
+Tool cache hit-rate is a bonus; pinning is the requirement.
+
 ### Job 1: `build-and-sign`
 
 Trigger: `on: push: tags: 'v*.*.*'` — semver tags only.
 
-Runner: `macos-latest`.
+Runner: `macos-14`.
 
-Steps:
-1. Checkout
-2. Install Rust toolchain with `aarch64-apple-darwin` + `x86_64-apple-darwin` targets
-3. Read `VERSION` file → `$VERSION` env var
-4. Assert `v$VERSION == $GITHUB_REF_NAME` (the tag, including `v` prefix) — abort on mismatch
-5. `cargo build --release` for each target
-6. `lipo -create -output ctxfs-universal …` for the .app embed; keep per-arch for tarballs
-7. Import Developer ID cert from `DEVELOPER_ID_P12_BASE64` into a temp keychain (random unlock password, cleanup on job exit)
-8. `xcodebuild -project ContextFS.xcodeproj -scheme ContextFS -configuration Release -allowProvisioningUpdates DEVELOPMENT_TEAM=RDQSC33B2X`
-9. Re-sign `.app` + `.appex` with Developer ID (overrides Xcode's Apple Development sig)
-10. `ditto -c -k --sequesterRsrc --keepParent ContextFS.app _notary_upload.zip` (intermediate zip for notarization upload — notarytool wants a zip, not a bare bundle)
-11. `notarytool submit _notary_upload.zip --wait --timeout 30m`
-12. `xcrun stapler staple ContextFS.app` (staple the app itself, not the zip; delete the intermediate zip)
-13. Build DMG from stapled `.app` via `create-dmg` → `ContextFS-X.Y.Z.dmg`
-14. Notarize + staple the DMG (same notarytool flow)
-15. Create final `ContextFS-X.Y.Z.zip` (zip of the stapled `.app`, for Sparkle)
-16. Package CLI tarballs, produce `checksums.txt`
-17. `sparkle sign_update ContextFS-X.Y.Z.zip` → EdDSA signature written to a sidecar file
-18. Pre-release validation (see below)
-19. `gh release create --draft vX.Y.Z ContextFS-X.Y.Z.dmg ContextFS-X.Y.Z.zip ctxfs-X.Y.Z-darwin-arm64.tar.gz ctxfs-X.Y.Z-darwin-x86_64.tar.gz checksums.txt`
+Permissions:
+```yaml
+permissions:
+  contents: write   # for gh release create
+```
+
+Tokens used:
+- `GITHUB_TOKEN` (auto) — for `gh release create` against this repo
+
+Steps (step numbers are meaningful — they're referenced in the error table):
+
+1. `actions/checkout@v4` with `fetch-depth: 0` (needed for `git rev-list --count HEAD` in Section 4)
+2. `sudo xcode-select -s /Applications/Xcode_17.app`
+3. `dtolnay/rust-toolchain@stable` with targets: `aarch64-apple-darwin, x86_64-apple-darwin`
+4. Install + version-pin `create-dmg` via brew; download Sparkle tool bundle, verify SHA-256 against workflow-pinned value
+5. Read `VERSION` file → `$VERSION` env var; assert `v$VERSION == $GITHUB_REF_NAME` (abort on mismatch)
+6. Import Developer ID cert:
+   - `echo "$DEVELOPER_ID_P12_BASE64" | base64 -d > /tmp/cert.p12`
+   - `security create-keychain -p $(openssl rand -hex 16) build.keychain`
+   - `security default-keychain -s build.keychain`
+   - `security unlock-keychain -p $KEYCHAIN_PW build.keychain`
+   - `security import /tmp/cert.p12 -k build.keychain -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild`
+   - `security set-key-partition-list -S apple-tool:,apple: -s -k $KEYCHAIN_PW build.keychain`
+   - `rm /tmp/cert.p12`
+   - Register a cleanup trap to delete the keychain on job exit regardless of success
+7. Install provisioning profiles:
+   - `echo "$DEVELOPER_ID_APP_PROFILE_BASE64" | base64 -d > ~/Library/MobileDevice/Provisioning\ Profiles/contextfs_app.provisionprofile`
+   - `echo "$DEVELOPER_ID_EXT_PROFILE_BASE64" | base64 -d > ~/Library/MobileDevice/Provisioning\ Profiles/contextfs_ext.provisionprofile`
+   - Each profile embeds the FSKit Module capability (exported once manually during bootstrap — see Section 6)
+8. Build universal Rust:
+   - `cargo build --release --target aarch64-apple-darwin -p ctxfs -p ctxfs-app-helper`
+   - `cargo build --release --target x86_64-apple-darwin -p ctxfs -p ctxfs-app-helper`
+   - `lipo -create …arm64/ctxfs …x86_64/ctxfs -output /tmp/universal/ctxfs`
+   - `lipo -create …arm64/ctxfs-app-helper …x86_64/ctxfs-app-helper -output /tmp/universal/ctxfs-app-helper`
+9. Export `CTXFS_PREBUILT_RUST_DIR=/tmp/universal` — `build-rust.sh` will pick this up and skip its own `cargo build`, copying these universal binaries instead.
+10. xcodebuild (deterministic signing — no `-allowProvisioningUpdates`):
+    ```
+    xcodebuild -project swift/ContextFS/ContextFS.xcodeproj \
+      -scheme ContextFS -configuration Release \
+      -derivedDataPath /tmp/ctxfs-build \
+      CODE_SIGN_STYLE=Manual \
+      DEVELOPMENT_TEAM=RDQSC33B2X \
+      CODE_SIGN_IDENTITY="Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
+      PROVISIONING_PROFILE_SPECIFIER="ContextFS Distribution" \
+      PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]="ContextFS Distribution" \
+      PROVISIONING_PROFILE_SPECIFIER_ContextFSExt="ContextFS Extension Distribution" \
+      OTHER_CODE_SIGN_FLAGS="--options runtime --timestamp"
+    ```
+    (Profile specifier names come from the `name` field embedded in the `.provisionprofile` files — exact names set during bootstrap in Section 6.)
+11. Verify Xcode's signing handled everything, and add explicit sigs to any nested Rust binaries that may have been embedded post-sign:
+    - For each in [`Contents/MacOS/ctxfs`, `Contents/MacOS/ctxfs-app-helper`]: `codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" --options runtime --timestamp --identifier ai.ctxfs.companion.$(basename) "$f"`
+    - Re-sign the outer `.app` with `--force` so the outer hash covers the new nested signatures
+    - Run `codesign --verify --strict --verbose=4 ContextFS.app` — fail on any "invalid signature" output
+12. Notarize the app:
+    - `ditto -c -k --sequesterRsrc --keepParent ContextFS.app /tmp/_notary_app.zip`
+    - `xcrun notarytool submit /tmp/_notary_app.zip --wait --timeout 30m --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID"`
+    - `xcrun stapler staple ContextFS.app`
+    - `rm /tmp/_notary_app.zip`
+13. Build DMG from the stapled `.app`:
+    - `create-dmg --volname "ContextFS" --background swift/ContextFS/resources/dmg-bg.png --window-size 500 300 --icon "ContextFS.app" 125 150 --app-drop-link 375 150 ContextFS-$VERSION.dmg ContextFS.app`
+14. Sign the DMG with Developer ID, then notarize + staple:
+    - `codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" --options runtime --timestamp ContextFS-$VERSION.dmg`
+    - Same notarytool + stapler flow as step 12
+15. Create the Sparkle update archive (zip of stapled .app — this is what auto-update downloads):
+    - `ditto -c -k --sequesterRsrc --keepParent ContextFS.app ContextFS-$VERSION.zip`
+16. Sign + package CLI binaries:
+    - For each arch in [arm64, x86_64]: `codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" --options runtime --timestamp target/<arch>-apple-darwin/release/ctxfs`
+    - Create `ctxfs-$VERSION-darwin-arm64.tar.gz` + `ctxfs-$VERSION-darwin-x86_64.tar.gz` with binary + LICENSE + minimal README
+    - CLI tarballs are **not** notarized — bare CLIs don't produce a notarizable bundle format, and Developer ID signing alone satisfies Gatekeeper *after the quarantine attribute is cleared*. See Section 2 for how we handle browser-download quarantine.
+17. Compute checksums:
+    - `cd release-artifacts && shasum -a 256 *.tar.gz *.dmg *.zip > checksums.txt`
+18. Sign the Sparkle update zip:
+    - `sign_update ContextFS-$VERSION.zip --ed-key-file <(echo "$SPARKLE_PRIVATE_KEY") > ContextFS-$VERSION.zip.sig`
+    - The `.sig` file is a **first-class release asset** — Job 2 downloads it by this filename, no implicit handoff
+19. Pre-release validation (see subsection below). Fails the job on any red check.
+20. Create draft GitHub Release:
+    - `gh release create vX.Y.Z --draft --title "v$VERSION" --notes-file release-notes-$VERSION.md ContextFS-$VERSION.dmg ContextFS-$VERSION.zip ContextFS-$VERSION.zip.sig ctxfs-$VERSION-darwin-arm64.tar.gz ctxfs-$VERSION-darwin-x86_64.tar.gz checksums.txt`
+    - Release notes file is committed to the repo at `.github/release-notes/vX.Y.Z.md` before tagging — Derek writes it during the version bump. CI fails if the file is absent.
 
 ### Job 2: `publish-metadata`
 
-Trigger: `on: release: types: [published]`.
+Triggers (both supported — second is for recovery):
+```yaml
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to reconcile (e.g. v0.1.0)"
+        required: true
+```
 
-Runner: `ubuntu-latest` (just file edits + Git).
+Runner: `ubuntu-latest`.
+
+Permissions:
+```yaml
+permissions:
+  contents: write   # for gh-pages push
+```
+
+Tokens used:
+- `GITHUB_TOKEN` (auto) — for `gh release download` + gh-pages commit on this repo
+- `HOMEBREW_TAP_PAT` (secret) — for pushing a branch + opening a PR on the `homebrew-ctxfs` cross-repo
 
 Steps:
-1. Checkout `gh-pages` branch
-2. Generate new `<item>` XML block from the Release body + artifact URLs + EdDSA sig
-3. Append to `appcast.xml`, commit, push to `gh-pages`
-4. Clone `Derek-X-Wang/homebrew-ctxfs` using `HOMEBREW_TAP_PAT`
-5. Rewrite `Casks/contextfs.rb` + `Formula/contextfs.rb` with new version, URLs, SHA-256s
-6. `gh pr create` — one-click mergeable PR
+1. Resolve tag: either `${{ github.event.release.tag_name }}` or `${{ github.event.inputs.tag }}`
+2. `gh release download $TAG --pattern 'ContextFS-*.zip.sig' --pattern 'ContextFS-*.dmg' --pattern 'ctxfs-*.tar.gz' --pattern 'checksums.txt'`
+3. Parse `.sig` file to extract the EdDSA signature + length
+4. Parse `checksums.txt` to get SHA-256 of each artifact
+5. Generate new `<item>` XML block: version, shortVersionString, enclosure URL (pointing at `github.com/Derek-X-Wang/ctxfs/releases/download/$TAG/…`), EdDSA sig in `sparkle:edSignature`, release notes HTML from the tagged release body (escaped via `xmlstarlet` or Python's `xml.sax.saxutils.escape` — not raw string concat)
+6. Checkout `gh-pages` branch (orphan-safe with `--depth=1`)
+7. Validate existing appcast.xml is well-formed (`xmllint --noout`); if the file doesn't exist, initialize it from the Phase 3 bootstrap template (see Section 6)
+8. Insert new `<item>` at the top of `<channel>` (newest first, per Sparkle convention), re-validate, commit, push to `gh-pages`
+9. Clone `Derek-X-Wang/homebrew-ctxfs` using `HOMEBREW_TAP_PAT`, create a branch `bump-v$VERSION`
+10. Rewrite `Casks/contextfs.rb` + `Formula/contextfs.rb` — version string, 3 URLs (DMG, arm64 tarball, x86_64 tarball), 3 SHA-256s. Regenerate using a Python script in the repo at `scripts/render-homebrew.py` so the edits are deterministic
+11. Push the branch; `gh pr create --repo Derek-X-Wang/homebrew-ctxfs --head bump-v$VERSION --title "Bump contextfs to v$VERSION" --body-file …`
+12. On any failure in steps 9–11 (PAT expired, merge conflict, etc.): open a GitHub Issue on this repo (`gh issue create --repo Derek-X-Wang/ctxfs --title "Tap bump failed for v$VERSION" --body "$GITHUB_JOB_URL"`) so Derek isn't silently left out-of-sync. Tap sync being slow isn't user-facing (Sparkle is the faster path), but we want a visible backlog, not a silent one.
 
 ### Why draft → manual publish → Job 2
 
-The gap lets Derek download the draft DMG, install on a second Mac, sanity-check before anything reaches users. Mis-notarized or broken builds never reach the appcast or Homebrew.
+The gap lets Derek download the draft DMG, install on a second Mac, sanity-check before anything reaches users. Mis-notarized or broken builds never reach the appcast or Homebrew. If Job 2 itself fails after publish (rare but possible), `workflow_dispatch` replay path makes recovery a one-click operation rather than a code edit.
 
-### Pre-release validation (in Job 1)
+### Pre-release validation (in Job 1, between steps 18 and 20)
 
 1. `cargo clippy --all-targets --tests` — no warnings (inherits the `-D warnings` flag)
 2. `cargo test` — all green
-3. `./target/release/ctxfs --version` output matches `VERSION` file
+3. `./target/aarch64-apple-darwin/release/ctxfs --version` and `./target/x86_64-apple-darwin/release/ctxfs --version` both match `VERSION` file
 4. `spctl -a -vv ContextFS.app` — Gatekeeper accepts
-5. `codesign --verify --strict --deep ContextFS.app` — clean
-6. `sparkle sign_update --verify` — EdDSA signature re-checks
-7. Smoke test: unzip notarized `.app`, run `Contents/MacOS/ctxfs --version`, assert exit 0
+5. `spctl -a -vv --type install ContextFS-$VERSION.dmg` — DMG also accepts
+6. `codesign --verify --strict --verbose=4 ContextFS.app` — clean (no `--deep`; deprecated)
+7. For each nested binary in `ContextFS.app/Contents/MacOS/` and `ContextFS.app/Contents/Extensions/*.appex`: `codesign -dvvv` showing Developer ID Application identity and a hardened runtime flag
+8. `sign_update --verify ContextFS-$VERSION.zip ContextFS-$VERSION.zip.sig` — signature round-trips
+9. Smoke test: unzip notarized `.app` to `/tmp/`, run `/tmp/ContextFS.app/Contents/MacOS/ctxfs --version`, assert exit 0 and output matches `VERSION`
 
 ### Secrets required
 
 Set via repo Settings → Secrets:
+
+**Apple signing/notarization:**
 - `DEVELOPER_ID_P12_BASE64` — Developer ID Application cert exported as .p12, base64'd
 - `DEVELOPER_ID_P12_PASSWORD` — export password for the .p12
+- `DEVELOPER_ID_APP_PROFILE_BASE64` — `ai.ctxfs.companion` provisioning profile (with FSKit Module capability), base64'd
+- `DEVELOPER_ID_EXT_PROFILE_BASE64` — `ai.ctxfs.companion.fskitext` provisioning profile (with FSKit Module capability), base64'd
 - `APPLE_ID` — Derek's Apple ID email
 - `APPLE_ID_PASSWORD` — app-specific password (appleid.apple.com → Sign-In and Security → App-Specific Passwords)
 - `APPLE_TEAM_ID` — `RDQSC33B2X`
-- `SPARKLE_PRIVATE_KEY` — EdDSA private key from `generate_keys`
-- `HOMEBREW_TAP_PAT` — fine-grained Personal Access Token scoped to `homebrew-ctxfs` repo with `contents: write` + `pull-requests: write`
+
+**Sparkle:**
+- `SPARKLE_PRIVATE_KEY` — EdDSA private key from Sparkle's `generate_keys` tool. See Section 6 for rotation & emergency procedures.
+
+**Cross-repo:**
+- `HOMEBREW_TAP_PAT` — fine-grained Personal Access Token scoped to `homebrew-ctxfs` repo with `contents: write` + `pull-requests: write`. 90-day expiry reminder in Derek's calendar.
+
+**Variables (not secrets — non-sensitive config):**
+- `vars.PROVISIONING_PROFILE_APP_NAME` — e.g. `"ContextFS Distribution"` (must match the profile's embedded `name` field)
+- `vars.PROVISIONING_PROFILE_EXT_NAME` — e.g. `"ContextFS Extension Distribution"`
 
 ---
 
@@ -255,7 +402,7 @@ New script `scripts/release.sh X.Y.Z`:
 4. Updates `swift/ContextFS/ContextFS.xcodeproj/project.pbxproj`:
    - `MARKETING_VERSION` → `X.Y.Z`
    - `CURRENT_PROJECT_VERSION` → `$(git rev-list --count HEAD)` at the time of bump. Monotonic, offline-computable, standard pattern.
-5. Runs `cargo check` to update `Cargo.lock`
+5. Runs `cargo generate-lockfile --offline` (or falls back to `cargo update -p <each workspace crate>` if the version bump changes path deps) to refresh `Cargo.lock` deterministically. Plain `cargo check` is not a reliable lockfile-refresh mechanism — it only touches the lock if something triggers resolution, which a version-string bump on path deps may not.
 6. `git commit -am "chore: release vX.Y.Z"`
 7. `git tag vX.Y.Z`
 
@@ -281,14 +428,157 @@ After Job 1 completes:
 
 | Failure | Behavior |
 |---|---|
-| Notarization rejects | Job 1 fails; notarytool log uploaded as workflow artifact; Derek debugs locally |
-| Gatekeeper rejects stapled build (step 4 of pre-release) | Job 1 fails; usually means a nested binary wasn't re-signed — inspect with `codesign -dvvv` on each embedded binary |
-| EdDSA signature verification fails | Job 1 fails; key misconfiguration — regenerate keys, re-run |
-| Homebrew tap PR fails (merge conflict, permission denied) | Job 2 comments on the published Release with manual bump command; not blocking for Sparkle users |
-| Appcast regeneration merge conflict on `gh-pages` | Job 2 retries once with `git pull --rebase origin gh-pages`; if still failing, fails loudly and Derek rebases manually |
-| `VERSION` file doesn't match git tag | Job 1 aborts at step 4; user fixes mismatch and re-tags |
-| Second-Mac sanity test surfaces a bug | Draft release is discarded; release script bumps patch version; re-releases |
-| Sparkle private key in GitHub secrets gets leaked | Revoke via `generate_keys --revoke`, create new keypair, bump minor version (0.2.0), ship update with new `SUPublicEDKey`. Old installs auto-update one more time via old key, then are pinned to new key. Document in runbook. |
+| `VERSION` vs tag mismatch (Job 1 step 5) | Job aborts before any expensive work; Derek re-runs the release script cleanly |
+| Keychain import (step 6) or profile import (step 7) fails | Job aborts; usually a secret/base64 encoding issue — validate the exported `.p12` and `.provisionprofile` locally, rotate as needed |
+| Rust universal build (step 8) fails on either target | Job aborts; rust-toolchain targets may be out of sync with MSRV — update `rust-toolchain.toml` |
+| xcodebuild (step 10) rejects the provisioning profile | Job aborts; most likely the profile specifier name doesn't match the embedded name, or the profile expired — re-export from developer.apple.com (Section 6 bootstrap doc) |
+| Nested-binary verification (step 11) reports "invalid signature" | Job aborts; indicates a binary was embedded after Xcode signed the outer — usually `build-rust.sh` misbehaving (check that `CTXFS_PREBUILT_RUST_DIR` was read) |
+| Notarization (step 12 or 14) rejects | Job fails; notarytool log URL printed in workflow output + uploaded as workflow artifact; Derek debugs locally (usually entitlement mismatch or timestamp server timeout) |
+| Gatekeeper (`spctl`) rejects stapled build (pre-release step 4 or 5) | Job fails; inspect every nested binary with `codesign -dvvv` for missing hardened runtime or untrusted certs |
+| Sparkle signature round-trip (pre-release step 8) fails | Job fails; `SPARKLE_PRIVATE_KEY` secret is corrupted or mismatched with embedded public key — regenerate pair (see Section 6 rotation runbook) |
+| `gh release create` (step 20) fails | Job fails; most likely `GITHUB_TOKEN` permissions missing `contents: write` — verify workflow `permissions:` block |
+| Appcast validation (Job 2 step 7) fails | Job fails; existing `appcast.xml` on gh-pages is malformed — manual rebase/fix, then `workflow_dispatch` replay |
+| Homebrew tap PR (Job 2 steps 9–11) fails | Job 2 opens a GitHub Issue on the main ctxfs repo with the failed tag and workflow run URL. Sparkle users already got their update via Job 2 steps 6–8; Homebrew users will just see the update one release cycle late, which is fine. Derek fixes the tap manually. |
+| Second-Mac sanity test (manual) surfaces a bug | Draft release is discarded; release script bumps patch version; re-releases. Never publish a draft you don't trust. |
+| Sparkle private key leak | See Section 6 rotation runbook. Summary: revoke, generate new keypair, ship a `v0.X+1.0` update signed with the **old** key that also embeds the new `SUPublicEDKey`, then future updates use the new key. Existing installs auto-update once via the old key and are then pinned to the new. |
+| Job 2 needs re-running (appcast got stuck, tap PR conflict resolved manually, etc.) | `workflow_dispatch` trigger with the tag as input re-runs Job 2 idempotently — dedupes by tag, doesn't create duplicate appcast items, upserts the tap PR |
+
+---
+
+---
+
+## Section 6 — One-time bootstrap (pre-first-release)
+
+Done once, by Derek, before `v0.1.0` ships. Committed as `docs/phase3-bootstrap-runbook.md` in the repo so it's reproducible if the laptop disappears.
+
+### 6.1 Apple Developer portal setup
+
+1. Sign in at `developer.apple.com/account`, confirm team `RDQSC33B2X` is active.
+2. Register App IDs (Certificates, Identifiers & Profiles):
+   - `ai.ctxfs.companion` with capability: App Groups (optional), Hardened Runtime. No FSKit Module on the host.
+   - `ai.ctxfs.companion.fskitext` with capability: **FSKit Module**, Hardened Runtime.
+3. Create provisioning profiles (both Developer ID Distribution type, not development):
+   - `ContextFS Distribution` → App ID `ai.ctxfs.companion`, cert = Developer ID Application
+   - `ContextFS Extension Distribution` → App ID `ai.ctxfs.companion.fskitext`, cert = Developer ID Application, includes FSKit Module capability
+4. Download both `.provisionprofile` files. **Record the exact `name` field of each profile** — those strings feed into the `vars.PROVISIONING_PROFILE_*_NAME` workflow variables.
+
+### 6.2 Export secrets into GitHub Actions
+
+One shell script `scripts/bootstrap-secrets.sh` that Derek runs locally. Prompts for inputs, emits `gh secret set` commands (doesn't execute them — Derek reviews + runs manually).
+
+```bash
+# Outputs the commands Derek runs to populate GitHub secrets
+./scripts/bootstrap-secrets.sh \
+  --p12 ~/Downloads/developer-id.p12 \
+  --p12-password-stdin \
+  --app-profile ~/Downloads/ContextFS_Distribution.provisionprofile \
+  --ext-profile ~/Downloads/ContextFS_Extension_Distribution.provisionprofile \
+  --apple-id derek@... \
+  --team-id RDQSC33B2X
+```
+
+Script does: base64-encodes each file, emits `gh secret set DEVELOPER_ID_P12_BASE64 < file.base64` commands to stdout. Derek pipes to a file, reviews, executes.
+
+Renewal reminder: `.provisionprofile` files expire after ~1 year. Add a calendar reminder.
+
+### 6.3 Sparkle key generation
+
+```bash
+cd /tmp && curl -L -o Sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.7.x/Sparkle-2.7.x.tar.xz
+tar xf Sparkle.tar.xz
+./bin/generate_keys  # writes private key to ~/Library/Application Support/Sparkle, prints public key
+```
+
+- Private key stays in macOS Keychain (sourced from Sparkle's default location — don't copy it elsewhere unnecessarily)
+- Public key goes into `Info.plist` as `SUPublicEDKey` during Phase 3 Task 2
+- Private key also gets written to GitHub Actions secret `SPARKLE_PRIVATE_KEY`:
+  ```bash
+  # generate_keys writes to ~/Library/Application Support/Sparkle/ed25519
+  security find-generic-password -a ed_private_key -s https://sparkle-project.org -w | gh secret set SPARKLE_PRIVATE_KEY
+  ```
+
+### 6.4 Homebrew tap repo
+
+1. Create `Derek-X-Wang/homebrew-ctxfs` on GitHub (public repo)
+2. Seed with stub `Casks/contextfs.rb` and `Formula/contextfs.rb` pointing at a non-existent `v0.0.0` — replaced by Job 2's first PR
+3. Add README explaining tap usage: `brew tap Derek-X-Wang/ctxfs && brew install --cask contextfs`
+4. Create `HOMEBREW_TAP_PAT` at `github.com/settings/tokens?type=beta`:
+   - Resource owner: Derek-X-Wang
+   - Repositories: `Derek-X-Wang/homebrew-ctxfs` only
+   - Permissions: Contents: Read & Write, Pull Requests: Read & Write
+   - Expiration: 90 days; set a calendar reminder to rotate
+
+### 6.5 gh-pages branch seed
+
+```bash
+cd ctxfs && git checkout --orphan gh-pages
+git rm -rf .
+cat > appcast.xml <<EOF
+<?xml version="1.0" standalone="yes"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>ContextFS Updates</title>
+    <link>https://derek-x-wang.github.io/ctxfs/appcast.xml</link>
+    <description>Updates for ContextFS.app</description>
+    <language>en</language>
+    <!-- items appended by CI Job 2; newest first -->
+  </channel>
+</rss>
+EOF
+cat > index.html <<EOF
+<!doctype html>
+<html><body><h1>ContextFS</h1><p>See <a href="https://github.com/Derek-X-Wang/ctxfs">the repo</a>.</p></body></html>
+EOF
+git add appcast.xml index.html
+git commit -m "chore: seed gh-pages for Sparkle appcast"
+git push -u origin gh-pages
+```
+
+Then in repo Settings → Pages: source = `gh-pages` branch, `/` root. First deploy completes in ~1 minute. Confirm `https://derek-x-wang.github.io/ctxfs/appcast.xml` loads.
+
+### 6.6 Modify `build-rust.sh`
+
+Add env-var fast-path so CI can inject prebuilt universal binaries:
+
+```bash
+# Inserted near top of build-rust.sh
+if [ -n "${CTXFS_PREBUILT_RUST_DIR:-}" ]; then
+    echo "[build-rust.sh] using prebuilt Rust from $CTXFS_PREBUILT_RUST_DIR (CI mode)"
+    DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/MacOS"
+    mkdir -p "$DEST"
+    cp -f "$CTXFS_PREBUILT_RUST_DIR/ctxfs" "$DEST/ctxfs"
+    cp -f "$CTXFS_PREBUILT_RUST_DIR/ctxfs-app-helper" "$DEST/ctxfs-app-helper"
+    exit 0
+fi
+# Existing cargo build logic follows...
+```
+
+Dev builds (no env var) work exactly as today. CI builds get the universal output without a second cargo invocation.
+
+### 6.7 First release dress rehearsal
+
+Before pushing `v0.1.0`:
+
+1. Push `v0.0.1-rc1` as a test tag — same pipeline runs, creates a draft release Derek can poke
+2. Verify: draft exists with all 5 artifacts, Gatekeeper accepts the DMG, Sparkle verifies the sig
+3. Delete the draft + tag; don't publish
+4. Only then push real `v0.1.0`
+
+This catches pipeline misconfigurations before they'd pollute the public release history.
+
+### 6.8 Key rotation runbook
+
+**Sparkle EdDSA key rotation (on leak or precautionary annual rotation):**
+
+1. Generate new keypair: `./bin/generate_keys --replace` (Sparkle tool writes new key; old one moved aside)
+2. Update `SPARKLE_PRIVATE_KEY` secret in GitHub Actions
+3. Embed the **new** public key in Info.plist as `SUPublicEDKey` + keep the **old** public key in Info.plist as `SUPublicEDKeys` (plural, array) for one release cycle — Sparkle 2.x supports this for seamless rollover
+4. Release `v0.X+1.0` signed with the *old* private key (existing installs trust it); this release's Info.plist has both keys
+5. Release `v0.X+2.0` signed with the *new* key; remove the old public key from Info.plist
+6. Existing installs auto-update through this path without any user action
+
+**Developer ID cert rotation (expiry or revocation):**
+- Standard Apple Developer portal flow: revoke old, create new, re-export `.p12`, update `DEVELOPER_ID_P12_BASE64` secret. Provisioning profiles tied to the old cert will stop working; regenerate them bound to the new cert.
 
 ---
 
