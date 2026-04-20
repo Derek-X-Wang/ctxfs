@@ -426,8 +426,16 @@ New script `scripts/release.sh X.Y.Z`:
    - `MARKETING_VERSION` → `X.Y.Z`
    - `CURRENT_PROJECT_VERSION` → `$(git rev-list --count HEAD)` at the time of bump. Monotonic, offline-computable, standard pattern.
 5. Runs `cargo generate-lockfile --offline` (or falls back to `cargo update -p <each workspace crate>` if the version bump changes path deps) to refresh `Cargo.lock` deterministically. Plain `cargo check` is not a reliable lockfile-refresh mechanism — it only touches the lock if something triggers resolution, which a version-string bump on path deps may not.
-6. `git commit -am "chore: release vX.Y.Z"`
-7. `git tag vX.Y.Z`
+6. Asserts `.github/release-notes/vX.Y.Z.md` exists and is non-empty — aborts with a clear message if Derek forgot to write it. (Derek writes it before running the release script; the script just guards against skipping the step.)
+7. Stages + commits every touched path explicitly. `-am` would miss the newly-created release-notes file, which Job 1 step 20 (`gh release create --notes-file …`) then fails on:
+   ```bash
+   git add VERSION Cargo.toml Cargo.lock \
+           crates/*/Cargo.toml \
+           swift/ContextFS/ContextFS.xcodeproj/project.pbxproj \
+           .github/release-notes/vX.Y.Z.md
+   git commit -m "chore: release vX.Y.Z"
+   ```
+8. `git tag vX.Y.Z`
 
 Derek runs the script, reviews the commit + tag, then `git push && git push --tags` manually (no auto-push — last chance to catch mistakes).
 
