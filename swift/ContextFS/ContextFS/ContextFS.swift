@@ -4,8 +4,13 @@ import AppCore
 @main
 struct ContextFSApp: App {
     @State private var daemonState: DaemonState
+    private let sparkleAction: SparkleMenuAction
 
     init() {
+        // Start Sparkle's background version checks before the daemon comes
+        // up so the first scheduled check fires close to launch time.
+        self.sparkleAction = SparkleMenuAction()
+
         let client: any HelperClientProtocol
         do {
             client = try HelperClient()
@@ -32,7 +37,11 @@ struct ContextFSApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContent(state: daemonState, showPreferences: $showPreferences)
+            MenuContent(
+                state: daemonState,
+                showPreferences: $showPreferences,
+                sparkleAction: sparkleAction
+            )
                 .task {
                     if !UserDefaults.standard.bool(forKey: UserDefaultsKey.onboardingComplete) {
                         openWindow(id: "onboarding")

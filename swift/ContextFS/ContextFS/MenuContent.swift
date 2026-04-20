@@ -4,6 +4,7 @@ import AppCore
 struct MenuContent: View {
     @Bindable var state: DaemonState
     @Binding var showPreferences: Bool
+    let sparkleAction: SparkleMenuAction
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -97,6 +98,9 @@ struct MenuContent: View {
             MenuActionButton("Preferences…") {
                 openWindow(id: "preferences")
                 NSApp.activate(ignoringOtherApps: true)
+            }
+            MenuActionButton("Check for Updates…") {
+                sparkleAction.checkForUpdates()
             }
             MenuActionButton("Quit") {
                 NSApplication.shared.terminate(nil)
