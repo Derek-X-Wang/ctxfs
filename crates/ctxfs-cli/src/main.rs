@@ -99,6 +99,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Self-update the CLI binary from the latest GitHub Release. Refuses
+    /// if installed via Homebrew or bundled with ContextFS.app.
+    Update {
+        /// Only report whether an update is available. Exits 0 if up-to-date,
+        /// 1 if a newer version exists. No files are modified.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -431,6 +439,10 @@ async fn main() -> Result<()> {
 
         Commands::Diag { json } => {
             diag::handle_diag(&config, json).await;
+        }
+
+        Commands::Update { check } => {
+            update::run(check)?;
         }
     }
 
