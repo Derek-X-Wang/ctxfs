@@ -24,6 +24,13 @@ pub struct ExtensionInfo {
 /// extension database, we consider it available to `FSKit`. The real
 /// enablement check happens when `fskit-rs` attempts to start a session —
 /// a mount against a toggled-off extension surfaces the failure there.
+///
+/// TODO(fskit-probe): if we ever need accurate enablement detection (e.g. to
+/// drive the onboarding wizard past the toggle step without false positives),
+/// call `FSClient.fetchInstalledExtensionsWithCompletionHandler:` from Swift
+/// and read `FSModuleIdentity.isEnabled` — those are the public `FSKit`
+/// framework APIs System Settings itself uses. Would need either a small
+/// bundled Swift probe binary or `objc2` bindings in this crate.
 #[must_use]
 pub fn query_fskit_extension_status(bundle_id: &str) -> ExtensionInfo {
     #[cfg(target_os = "macos")]
