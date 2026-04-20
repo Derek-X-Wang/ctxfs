@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		034579E52F9684C2009A6A3D /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 034579E42F9684C2009A6A3D /* Sparkle */; };
 		766207F02E3AC50D00C75C6C /* NIO in Frameworks */ = {isa = PBXBuildFile; productRef = 766207EF2E3AC50D00C75C6C /* NIO */; };
 		766207F92E3AD91200C75C6C /* SwiftProtobuf in Frameworks */ = {isa = PBXBuildFile; productRef = 766207F82E3AD91200C75C6C /* SwiftProtobuf */; };
 		76A2B12F2E2857B200BCA3F9 /* ContextFSExt.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = 76A2B1252E2857B200BCA3F9 /* ContextFSExt.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -31,6 +32,7 @@
 				"mkdir -p \"$OUT_DIR\"",
 				"",
 				"protoc --proto_path=\"${SRCROOT}/ContextFSExt\" --swift_out=\"$OUT_DIR\" \"$INPUT_FILE_PATH\"",
+				"",
 				"",
 				"",
 				"",
@@ -106,6 +108,7 @@
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				76CORE0032E00000000000003 /* AppCore in Frameworks */,
+				034579E52F9684C2009A6A3D /* Sparkle in Frameworks */,
 			);
 		};
 		76A2B1222E2857B200BCA3F9 /* Frameworks */ = {
@@ -168,6 +171,7 @@
 			name = ContextFS;
 			packageProductDependencies = (
 				76CORE0022E00000000000002 /* AppCore */,
+				034579E42F9684C2009A6A3D /* Sparkle */,
 			);
 			productName = ContextFS;
 			productReference = 76A2B10B2E28555D00BCA3F9 /* ContextFS.app */;
@@ -227,6 +231,7 @@
 				766207ED2E3AC43C00C75C6C /* XCRemoteSwiftPackageReference "swift-nio" */,
 				766207F72E3AD8E300C75C6C /* XCRemoteSwiftPackageReference "swift-protobuf" */,
 				76CORE0012E00000000000001 /* XCLocalSwiftPackageReference "Packages/AppCore" */,
+				034579E32F9684C2009A6A3D /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 76A2B10C2E28555D00BCA3F9 /* Products */;
@@ -252,6 +257,19 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		76CORE1002E00000000000100 /* Embed Rust binaries */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			name = "Embed Rust binaries";
+			shellPath = /bin/bash;
+			shellScript = (
+				"\"${SRCROOT}/build-rust.sh\"",
+				"",
+			);
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		76A2B1072E28555D00BCA3F9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -264,28 +282,6 @@
 			);
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXShellScriptBuildPhase section */
-		76CORE1002E00000000000100 /* Embed Rust binaries */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Embed Rust binaries";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/bash;
-			shellScript = "\"${SRCROOT}/build-rust.sh\"\n";
-		};
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXTargetDependency section */
 		76A2B12E2E2857B200BCA3F9 /* PBXTargetDependency */ = {
@@ -581,7 +577,22 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		76CORE0012E00000000000001 /* XCLocalSwiftPackageReference "Packages/AppCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AppCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
+		034579E32F9684C2009A6A3D /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.7.0;
+			};
+		};
 		766207ED2E3AC43C00C75C6C /* XCRemoteSwiftPackageReference "swift-nio" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/apple/swift-nio.git";
@@ -600,18 +611,11 @@
 		};
 /* End XCRemoteSwiftPackageReference section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		76CORE0012E00000000000001 /* XCLocalSwiftPackageReference "Packages/AppCore" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/AppCore;
-		};
-/* End XCLocalSwiftPackageReference section */
-
 /* Begin XCSwiftPackageProductDependency section */
-		76CORE0022E00000000000002 /* AppCore */ = {
+		034579E42F9684C2009A6A3D /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 76CORE0012E00000000000001 /* XCLocalSwiftPackageReference "Packages/AppCore" */;
-			productName = AppCore;
+			package = 034579E32F9684C2009A6A3D /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 		766207EF2E3AC50D00C75C6C /* NIO */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -622,6 +626,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 766207F72E3AD8E300C75C6C /* XCRemoteSwiftPackageReference "swift-protobuf" */;
 			productName = SwiftProtobuf;
+		};
+		76CORE0022E00000000000002 /* AppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 76CORE0012E00000000000001 /* XCLocalSwiftPackageReference "Packages/AppCore" */;
+			productName = AppCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
