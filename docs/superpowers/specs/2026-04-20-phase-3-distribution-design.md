@@ -309,14 +309,14 @@ Steps (step numbers are meaningful — they're referenced in the error table):
       echo "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_priv.b64
       SIG=$(sign_update ContextFS-$VERSION.zip --ed-key-file /tmp/sparkle_priv.b64)
       echo "$SIG" > ContextFS-$VERSION.zip.sig
-      shred -u /tmp/sparkle_priv.b64
+      rm -f /tmp/sparkle_priv.b64  # shred isn't in macOS toolchain
       ```
       The sidecar is plain text containing one signature string (`sparkle:edSignature` attribute value + length metadata), not the raw key.
     - The `.sig` file is a **first-class release asset** — Job 2 downloads it by this filename, no implicit handoff.
 19. Pre-release validation (see subsection below). Fails the job on any red check.
 20. Create draft GitHub Release:
-    - `gh release create vX.Y.Z --draft --title "v$VERSION" --notes-file release-notes-$VERSION.md ContextFS-$VERSION.dmg ContextFS-$VERSION.zip ContextFS-$VERSION.zip.sig ctxfs-$VERSION-darwin-arm64.tar.gz ctxfs-$VERSION-darwin-x86_64.tar.gz checksums.txt`
-    - Release notes file is committed to the repo at `.github/release-notes/vX.Y.Z.md` before tagging — Derek writes it during the version bump. CI fails if the file is absent.
+    - `gh release create vX.Y.Z --draft --title "v$VERSION" --notes-file .github/release-notes/vX.Y.Z.md ContextFS-$VERSION.dmg ContextFS-$VERSION.zip ContextFS-$VERSION.zip.sig ctxfs-$VERSION-darwin-arm64.tar.gz ctxfs-$VERSION-darwin-x86_64.tar.gz checksums.txt`
+    - Release notes file is committed to the repo at `.github/release-notes/vX.Y.Z.md` before tagging — Derek writes it during the version bump. CI fails at this step if the file is absent (which is the desired behavior — no un-annotated releases).
 
 ### Job 2: `publish-metadata`
 
