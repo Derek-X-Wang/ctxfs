@@ -183,9 +183,11 @@ Location: `Derek-X-Wang/homebrew-ctxfs/Formula/contextfs.rb`
 - `ctxfs update --check` exits 0 if up-to-date, 1 if newer available — for scripting
 - **Install-path detection (safety rail)**: before self-updating, resolve the running binary's path deterministically:
   1. Call `_NSGetExecutablePath` to get the invocation path
-  2. `std::fs::canonicalize` it — resolves `/opt/homebrew/bin/ctxfs` (symlink) to `/opt/homebrew/Cellar/contextfs/<ver>/bin/ctxfs` (real file), and also resolves the cask's `$HOMEBREW_PREFIX/bin/ctxfs` symlink into the real `/Applications/ContextFS.app/Contents/MacOS/ctxfs`
+  2. `std::fs::canonicalize` it — resolves every symlink including `$HOMEBREW_PREFIX/bin/ctxfs` → `$HOMEBREW_PREFIX/Cellar/contextfs/<ver>/bin/ctxfs` (formula), **or** → `/Applications/ContextFS.app/Contents/MacOS/ctxfs` (cask or DMG)
   3. Check in order of specificity:
-     a. **Cask-managed (bundled with app):** canonical path contains `/Applications/ContextFS.app/Contents/MacOS/` — refuse with `This ctxfs is managed by ContextFS.app — use the app's 'Check for Updates…' menu item, or 'brew upgrade --cask contextfs'`
+     a. **Inside the app bundle (cask *or* direct DMG install):** canonical path contains `/Applications/ContextFS.app/Contents/MacOS/` — refuse with a single message that covers both cases:
+        `This ctxfs is bundled with ContextFS.app. Update via the app's 'Check for Updates…' menu (or 'brew upgrade --cask contextfs' if you installed via Homebrew).`
+        We intentionally do **not** try to distinguish cask-managed from DMG-managed here — canonical path alone can't tell them apart, and the user-facing instruction covers both cleanly.
      b. **Homebrew formula:** canonical path contains `$(brew --prefix)/Cellar/contextfs/` (shell out to `brew --prefix` once, or read `HOMEBREW_PREFIX` env var if set) — refuse with `Run 'brew upgrade contextfs' instead`
      c. **Neither:** proceed with self-update
 
@@ -269,12 +271,15 @@ Steps (step numbers are meaningful — they're referenced in the error table):
       CODE_SIGN_STYLE=Manual \
       DEVELOPMENT_TEAM=RDQSC33B2X \
       CODE_SIGN_IDENTITY="Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
-      PROVISIONING_PROFILE_SPECIFIER="ContextFS Distribution" \
-      PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]="ContextFS Distribution" \
-      PROVISIONING_PROFILE_SPECIFIER_ContextFSExt="ContextFS Extension Distribution" \
       OTHER_CODE_SIGN_FLAGS="--options runtime --timestamp"
     ```
-    (Profile specifier names come from the `name` field embedded in the `.provisionprofile` files — exact names set during bootstrap in Section 6.)
+    **Per-target `PROVISIONING_PROFILE_SPECIFIER` is set in `pbxproj`, not on the xcodebuild command line.** `xcodebuild`'s `key=value` build-setting overrides apply globally to every target — there's no supported `KEY_TargetName=value` syntax, so the extension and host app can't be given different profiles that way. The bootstrap task (Section 6.1) edits `project.pbxproj` once to set:
+    - `ContextFS` target, Release config → `PROVISIONING_PROFILE_SPECIFIER = ContextFS Distribution`
+    - `ContextFSExt` target, Release config → `PROVISIONING_PROFILE_SPECIFIER = ContextFS Extension Distribution`
+
+    These settings are committed to the repo. CI's xcodebuild invocation then needs no profile flags — Xcode reads them from the project. Profile names must match the embedded `name` field of the `.provisionprofile` files created in Section 6.1. If those names change (e.g., portal rename), commit the new values to pbxproj and the `DEVELOPER_ID_*_PROFILE_BASE64` secrets together.
+
+    (`vars.PROVISIONING_PROFILE_*_NAME` workflow variables from the earlier draft are removed — they created a second source of truth that would drift from pbxproj.)
 11. Verify Xcode's signing handled everything, and add explicit sigs to any nested Rust binaries that may have been embedded post-sign:
     - For each in [`Contents/MacOS/ctxfs`, `Contents/MacOS/ctxfs-app-helper`]: `codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" --options runtime --timestamp --identifier ai.ctxfs.companion.$(basename) "$f"`
     - Re-sign the outer `.app` with `--force` so the outer hash covers the new nested signatures
@@ -298,8 +303,16 @@ Steps (step numbers are meaningful — they're referenced in the error table):
 17. Compute checksums:
     - `cd release-artifacts && shasum -a 256 *.tar.gz *.dmg *.zip > checksums.txt`
 18. Sign the Sparkle update zip:
-    - `sign_update ContextFS-$VERSION.zip --ed-key-file <(echo "$SPARKLE_PRIVATE_KEY") > ContextFS-$VERSION.zip.sig`
-    - The `.sig` file is a **first-class release asset** — Job 2 downloads it by this filename, no implicit handoff
+    - Sparkle 2.x's `sign_update` tool reads the private key from the user's Keychain by default. In CI we don't have a populated keychain, so use the `--ed-key-file` flag with the key material piped from the GH secret, and capture the printed signature string into the sidecar file:
+      ```bash
+      # SPARKLE_PRIVATE_KEY is the base64 ed25519 private key as produced by generate_keys
+      echo "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_priv.b64
+      SIG=$(sign_update ContextFS-$VERSION.zip --ed-key-file /tmp/sparkle_priv.b64)
+      echo "$SIG" > ContextFS-$VERSION.zip.sig
+      shred -u /tmp/sparkle_priv.b64
+      ```
+      The sidecar is plain text containing one signature string (`sparkle:edSignature` attribute value + length metadata), not the raw key.
+    - The `.sig` file is a **first-class release asset** — Job 2 downloads it by this filename, no implicit handoff.
 19. Pre-release validation (see subsection below). Fails the job on any red check.
 20. Create draft GitHub Release:
     - `gh release create vX.Y.Z --draft --title "v$VERSION" --notes-file release-notes-$VERSION.md ContextFS-$VERSION.dmg ContextFS-$VERSION.zip ContextFS-$VERSION.zip.sig ctxfs-$VERSION-darwin-arm64.tar.gz ctxfs-$VERSION-darwin-x86_64.tar.gz checksums.txt`
@@ -324,26 +337,35 @@ Runner: `ubuntu-latest`.
 Permissions:
 ```yaml
 permissions:
-  contents: write   # for gh-pages push
+  contents: write   # for gh-pages push on this repo
+  issues: write     # for opening failure issues on this repo (step 12)
 ```
 
-Tokens used:
-- `GITHUB_TOKEN` (auto) — for `gh release download` + gh-pages commit on this repo
-- `HOMEBREW_TAP_PAT` (secret) — for pushing a branch + opening a PR on the `homebrew-ctxfs` cross-repo
+Tokens used (annotated per step below):
+- **`GITHUB_TOKEN`** (auto-provisioned by Actions) — scoped to the current repo (`Derek-X-Wang/ctxfs`). Used for: downloading release assets, pushing to `gh-pages`, creating issues.
+- **`HOMEBREW_TAP_PAT`** (secret) — cross-repo PAT scoped to `Derek-X-Wang/homebrew-ctxfs`. Used for: cloning the tap, pushing a branch, opening the bump PR.
 
 Steps:
-1. Resolve tag: either `${{ github.event.release.tag_name }}` or `${{ github.event.inputs.tag }}`
-2. `gh release download $TAG --pattern 'ContextFS-*.zip.sig' --pattern 'ContextFS-*.dmg' --pattern 'ctxfs-*.tar.gz' --pattern 'checksums.txt'`
-3. Parse `.sig` file to extract the EdDSA signature + length
-4. Parse `checksums.txt` to get SHA-256 of each artifact
+1. Resolve tag: either `${{ github.event.release.tag_name }}` or `${{ github.event.inputs.tag }}` *(auth: none — context read)*
+2. `gh release download $TAG --pattern 'ContextFS-*.zip.sig' --pattern 'ContextFS-*.dmg' --pattern 'ctxfs-*.tar.gz' --pattern 'checksums.txt'` *(auth: `GITHUB_TOKEN`)*
+3. Parse `.sig` file to extract the EdDSA signature + length (local processing, no auth)
+4. Parse `checksums.txt` to get SHA-256 of each artifact (local processing, no auth)
 5. Generate new `<item>` XML block: version, shortVersionString, enclosure URL (pointing at `github.com/Derek-X-Wang/ctxfs/releases/download/$TAG/…`), EdDSA sig in `sparkle:edSignature`, release notes HTML from the tagged release body (escaped via `xmlstarlet` or Python's `xml.sax.saxutils.escape` — not raw string concat)
-6. Checkout `gh-pages` branch (orphan-safe with `--depth=1`)
+6. Checkout `gh-pages` branch (orphan-safe with `--depth=1`) *(auth: `GITHUB_TOKEN` for checkout)*
 7. Validate existing appcast.xml is well-formed (`xmllint --noout`); if the file doesn't exist, initialize it from the Phase 3 bootstrap template (see Section 6)
-8. Insert new `<item>` at the top of `<channel>` (newest first, per Sparkle convention), re-validate, commit, push to `gh-pages`
-9. Clone `Derek-X-Wang/homebrew-ctxfs` using `HOMEBREW_TAP_PAT`, create a branch `bump-v$VERSION`
-10. Rewrite `Casks/contextfs.rb` + `Formula/contextfs.rb` — version string, 3 URLs (DMG, arm64 tarball, x86_64 tarball), 3 SHA-256s. Regenerate using a Python script in the repo at `scripts/render-homebrew.py` so the edits are deterministic
-11. Push the branch; `gh pr create --repo Derek-X-Wang/homebrew-ctxfs --head bump-v$VERSION --title "Bump contextfs to v$VERSION" --body-file …`
-12. On any failure in steps 9–11 (PAT expired, merge conflict, etc.): open a GitHub Issue on this repo (`gh issue create --repo Derek-X-Wang/ctxfs --title "Tap bump failed for v$VERSION" --body "$GITHUB_JOB_URL"`) so Derek isn't silently left out-of-sync. Tap sync being slow isn't user-facing (Sparkle is the faster path), but we want a visible backlog, not a silent one.
+8. Insert new `<item>` at the top of `<channel>` (newest first, per Sparkle convention), re-validate, commit, push to `gh-pages` *(auth: `GITHUB_TOKEN` — requires `contents: write`)*
+9. Clone `Derek-X-Wang/homebrew-ctxfs` using `HOMEBREW_TAP_PAT`, create a branch `bump-v$VERSION` *(auth: `HOMEBREW_TAP_PAT`)*
+10. Rewrite `Casks/contextfs.rb` + `Formula/contextfs.rb` — version string, 3 URLs (DMG, arm64 tarball, x86_64 tarball), 3 SHA-256s. Regenerate using a Python script in the repo at `scripts/render-homebrew.py` so the edits are deterministic (local processing, no auth)
+11. Push the branch; `gh pr create --repo Derek-X-Wang/homebrew-ctxfs --head bump-v$VERSION --title "Bump contextfs to v$VERSION" --body-file …` *(auth: `HOMEBREW_TAP_PAT`)*
+12. On any failure in steps 9–11 (PAT expired, merge conflict, etc.): open a GitHub Issue on this repo so Derek isn't silently left out-of-sync. Compose the run URL from documented env vars (not the fictional `$GITHUB_JOB_URL`):
+    ```bash
+    RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+    gh issue create --repo Derek-X-Wang/ctxfs \
+      --title "Tap bump failed for v$VERSION" \
+      --body "Job 2 failed at step 9-11. Workflow run: $RUN_URL"
+    ```
+    *(auth: `GITHUB_TOKEN` — requires `issues: write`)*
+    Tap sync being slow isn't user-facing (Sparkle is the faster path), but we want a visible backlog, not a silent one.
 
 ### Why draft → manual publish → Job 2
 
@@ -358,7 +380,10 @@ The gap lets Derek download the draft DMG, install on a second Mac, sanity-check
 5. `spctl -a -vv --type install ContextFS-$VERSION.dmg` — DMG also accepts
 6. `codesign --verify --strict --verbose=4 ContextFS.app` — clean (no `--deep`; deprecated)
 7. For each nested binary in `ContextFS.app/Contents/MacOS/` and `ContextFS.app/Contents/Extensions/*.appex`: `codesign -dvvv` showing Developer ID Application identity and a hardened runtime flag
-8. `sign_update --verify ContextFS-$VERSION.zip ContextFS-$VERSION.zip.sig` — signature round-trips
+8. Verify the Sparkle signature round-trips. `sign_update --verify` takes the signature *string* as an argument, not a file path, so the sidecar must be read first:
+   ```bash
+   sign_update --verify "$(cat ContextFS-$VERSION.zip.sig)" ContextFS-$VERSION.zip
+   ```
 9. Smoke test: unzip notarized `.app` to `/tmp/`, run `/tmp/ContextFS.app/Contents/MacOS/ctxfs --version`, assert exit 0 and output matches `VERSION`
 
 ### Secrets required
@@ -380,9 +405,7 @@ Set via repo Settings → Secrets:
 **Cross-repo:**
 - `HOMEBREW_TAP_PAT` — fine-grained Personal Access Token scoped to `homebrew-ctxfs` repo with `contents: write` + `pull-requests: write`. 90-day expiry reminder in Derek's calendar.
 
-**Variables (not secrets — non-sensitive config):**
-- `vars.PROVISIONING_PROFILE_APP_NAME` — e.g. `"ContextFS Distribution"` (must match the profile's embedded `name` field)
-- `vars.PROVISIONING_PROFILE_EXT_NAME` — e.g. `"ContextFS Extension Distribution"`
+**No workflow variables needed** — provisioning profile specifier names are committed to `project.pbxproj` per target (see Section 3 step 10 and Section 6.1). Single source of truth.
 
 ---
 
@@ -460,7 +483,7 @@ Done once, by Derek, before `v0.1.0` ships. Committed as `docs/phase3-bootstrap-
 3. Create provisioning profiles (both Developer ID Distribution type, not development):
    - `ContextFS Distribution` → App ID `ai.ctxfs.companion`, cert = Developer ID Application
    - `ContextFS Extension Distribution` → App ID `ai.ctxfs.companion.fskitext`, cert = Developer ID Application, includes FSKit Module capability
-4. Download both `.provisionprofile` files. **Record the exact `name` field of each profile** — those strings feed into the `vars.PROVISIONING_PROFILE_*_NAME` workflow variables.
+4. Download both `.provisionprofile` files. **Record the exact `name` field of each profile** — those strings are committed to `project.pbxproj` as each target's `PROVISIONING_PROFILE_SPECIFIER` build setting (see Section 3 step 10 for why this must live in pbxproj, not as a workflow-time override).
 
 ### 6.2 Export secrets into GitHub Actions
 
@@ -486,16 +509,17 @@ Renewal reminder: `.provisionprofile` files expire after ~1 year. Add a calendar
 ```bash
 cd /tmp && curl -L -o Sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.7.x/Sparkle-2.7.x.tar.xz
 tar xf Sparkle.tar.xz
-./bin/generate_keys  # writes private key to ~/Library/Application Support/Sparkle, prints public key
+./bin/generate_keys  # stores private key in login keychain, prints public key to stdout
 ```
 
-- Private key stays in macOS Keychain (sourced from Sparkle's default location — don't copy it elsewhere unnecessarily)
-- Public key goes into `Info.plist` as `SUPublicEDKey` during Phase 3 Task 2
-- Private key also gets written to GitHub Actions secret `SPARKLE_PRIVATE_KEY`:
+- Private key is stored by `generate_keys` in the user's **login keychain** as a generic password. Sparkle 2.x uses service name `https://sparkle-project.org` and account name `ed25519` (verified against Sparkle's `generate_keys` source — see `github.com/sparkle-project/Sparkle/blob/2.x/generate_keys/main.swift`).
+- Public key is printed by `generate_keys` to stdout; goes into `Info.plist` as `SUPublicEDKey` during Phase 3 implementation.
+- Extract the private key into GitHub Actions secret `SPARKLE_PRIVATE_KEY`:
   ```bash
-  # generate_keys writes to ~/Library/Application Support/Sparkle/ed25519
-  security find-generic-password -a ed_private_key -s https://sparkle-project.org -w | gh secret set SPARKLE_PRIVATE_KEY
+  # Correct account is 'ed25519' (not 'ed_private_key'); -w prints the base64 key to stdout
+  security find-generic-password -s "https://sparkle-project.org" -a "ed25519" -w | gh secret set SPARKLE_PRIVATE_KEY
   ```
+  If the `find-generic-password` command can't find the item, double-check the exact service/account strings by inspecting the keychain entry in Keychain Access (look for "sparkle" in the search box).
 
 ### 6.4 Homebrew tap repo
 
