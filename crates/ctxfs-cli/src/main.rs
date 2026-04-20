@@ -1,8 +1,10 @@
 mod backend;
 mod deps;
 mod diag;
+mod install_path;
 mod setup;
 mod symlink;
+mod update;
 
 use std::collections::HashMap;
 use std::io::IsTerminal;

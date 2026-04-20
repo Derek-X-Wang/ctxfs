@@ -30,6 +30,7 @@ dirs = { workspace = true }
 sha2 = { workspace = true }
 toml_edit = { workspace = true }
 hex = { workspace = true }
+self_update = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "compression-flate2"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
