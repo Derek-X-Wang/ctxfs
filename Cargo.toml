@@ -51,20 +51,20 @@ cast_lossless = "allow"
 
 [workspace.dependencies]
 # Internal crates
-ctxfs-core = { path = "crates/ctxfs-core", version = "0.0.0" }
-ctxfs-manifest = { path = "crates/ctxfs-manifest", version = "0.0.0" }
-ctxfs-cache = { path = "crates/ctxfs-cache", version = "0.0.0" }
-ctxfs-ipc = { path = "crates/ctxfs-ipc", version = "0.0.0" }
-ctxfs-provider-git = { path = "crates/ctxfs-provider-git", version = "0.0.0" }
-ctxfs-nfs = { path = "crates/ctxfs-nfs", version = "0.0.0" }
-ctxfs-provider-common = { path = "crates/ctxfs-provider-common", version = "0.0.0" }
-ctxfs-provider-npm = { path = "crates/ctxfs-provider-npm", version = "0.0.0" }
-ctxfs-provider-pypi = { path = "crates/ctxfs-provider-pypi", version = "0.0.0" }
-ctxfs-provider-crate = { path = "crates/ctxfs-provider-crate", version = "0.0.0" }
-ctxfs-daemon = { path = "crates/ctxfs-daemon", version = "0.0.0" }
-ctxfs-cache-redis = { path = "crates/ctxfs-cache-redis", version = "0.0.0" }
-ctxfs-vfs = { path = "crates/ctxfs-vfs", version = "0.0.0" }
-ctxfs-fskit = { path = "crates/ctxfs-fskit", version = "0.0.0" }
+ctxfs-core = { path = "crates/ctxfs-core" }
+ctxfs-manifest = { path = "crates/ctxfs-manifest" }
+ctxfs-cache = { path = "crates/ctxfs-cache" }
+ctxfs-ipc = { path = "crates/ctxfs-ipc" }
+ctxfs-provider-git = { path = "crates/ctxfs-provider-git" }
+ctxfs-nfs = { path = "crates/ctxfs-nfs" }
+ctxfs-provider-common = { path = "crates/ctxfs-provider-common" }
+ctxfs-provider-npm = { path = "crates/ctxfs-provider-npm" }
+ctxfs-provider-pypi = { path = "crates/ctxfs-provider-pypi" }
+ctxfs-provider-crate = { path = "crates/ctxfs-provider-crate" }
+ctxfs-daemon = { path = "crates/ctxfs-daemon" }
+ctxfs-cache-redis = { path = "crates/ctxfs-cache-redis" }
+ctxfs-vfs = { path = "crates/ctxfs-vfs" }
+ctxfs-fskit = { path = "crates/ctxfs-fskit" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

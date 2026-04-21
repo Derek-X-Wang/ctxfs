@@ -1,6 +1,6 @@
 [package]
 name = "ctxfs-app-helper"
-version = "0.0.0"
+version.workspace = true
 edition = "2021"
 publish = false
 
