@@ -1,22 +1,11 @@
 """Unit tests for scripts/render-homebrew.py."""
 
-import importlib.util
-import pathlib
-import sys
 import unittest
 
-
-def _load():
-    repo_root = pathlib.Path(__file__).resolve().parents[2]
-    spec = importlib.util.spec_from_file_location(
-        "render_homebrew", repo_root / "scripts" / "render-homebrew.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+from .conftest import load_script
 
 
-render_homebrew = _load()
+render_homebrew = load_script("render-homebrew")
 
 VALID_SHA = "0" * 64
 OTHER_SHA = "a" * 64

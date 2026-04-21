@@ -1,23 +1,13 @@
 """Unit tests for scripts/append-appcast-item.py."""
 
-import importlib.util
-import pathlib
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
-
-def _load():
-    repo_root = pathlib.Path(__file__).resolve().parents[2]
-    spec = importlib.util.spec_from_file_location(
-        "append_appcast", repo_root / "scripts" / "append-appcast-item.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+from .conftest import load_script
 
 
-mod = _load()
+mod = load_script("append-appcast-item")
 
 SEED_APPCAST = """<?xml version='1.0' standalone='yes'?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">

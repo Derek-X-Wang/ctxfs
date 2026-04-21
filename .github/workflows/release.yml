@@ -24,6 +24,10 @@ env:
   XCODE_APP_PATH: /Applications/Xcode_17.app
   SPARKLE_VERSION: '2.7.0'
   SPARKLE_TARBALL_SHA256: ''   # Populated on first Phase 3e run; see README.
+  # One source of truth for signing identity + team — avoids typos across
+  # the four sites that sign artifacts (nested binaries, .app, DMG, CLI tarballs).
+  DEVELOPMENT_TEAM: RDQSC33B2X
+  DEVELOPER_ID_IDENTITY: 'Developer ID Application: Xinzhe Wang (RDQSC33B2X)'
 
 jobs:
   build-and-sign:
@@ -52,6 +56,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          cache-on-failure: false
 
       - name: Install create-dmg via Homebrew
         run: |
@@ -142,8 +152,12 @@ jobs:
 
       - name: Build Rust workspace (universal)
         run: |
-          cargo build --release --target aarch64-apple-darwin -p ctxfs -p ctxfs-app-helper
-          cargo build --release --target x86_64-apple-darwin -p ctxfs -p ctxfs-app-helper
+          # Single invocation: cargo walks the dep graph once and builds both
+          # targets from the same plan, instead of twice sequentially.
+          cargo build --release \
+            --target aarch64-apple-darwin \
+            --target x86_64-apple-darwin \
+            -p ctxfs -p ctxfs-app-helper
           mkdir -p /tmp/universal
           lipo -create -output /tmp/universal/ctxfs \
             target/aarch64-apple-darwin/release/ctxfs \
@@ -151,7 +165,7 @@ jobs:
           lipo -create -output /tmp/universal/ctxfs-app-helper \
             target/aarch64-apple-darwin/release/ctxfs-app-helper \
             target/x86_64-apple-darwin/release/ctxfs-app-helper
-          file /tmp/universal/ctxfs   # verify: Mach-O universal binary with 2 architectures
+          file /tmp/universal/ctxfs
 
       # -------- Xcode build + nested signing --------------------------
 
@@ -165,8 +179,8 @@ jobs:
             -configuration Release \
             -derivedDataPath /tmp/ctxfs-build \
             CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM=RDQSC33B2X \
-            CODE_SIGN_IDENTITY="Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            CODE_SIGN_IDENTITY="$DEVELOPER_ID_IDENTITY" \
             OTHER_CODE_SIGN_FLAGS="--options runtime --timestamp" \
             2>&1 | tail -20
           echo "--- built product ---"
@@ -177,36 +191,17 @@ jobs:
           APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
           for bin in "$APP/Contents/MacOS/ctxfs" "$APP/Contents/MacOS/ctxfs-app-helper"; do
             if [ -f "$bin" ]; then
-              codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
+              codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
                 --options runtime --timestamp "$bin"
             fi
           done
-          codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
+          codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
             --options runtime --timestamp "$APP"
           codesign --verify --strict --verbose=4 "$APP"
 
-      # -------- Notarize the app ---------------------------------------
+      # -------- Build DMG + sign both artifacts -----------------------
 
-      - name: Notarize + staple ContextFS.app
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
-          ditto -c -k --sequesterRsrc --keepParent "$APP" /tmp/_notary_app.zip
-          xcrun notarytool submit /tmp/_notary_app.zip \
-            --wait --timeout 30m \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID"
-          xcrun stapler staple "$APP"
-          xcrun stapler validate "$APP"
-          rm -f /tmp/_notary_app.zip
-
-      # -------- Build DMG + notarize DMG ------------------------------
-
-      - name: Build DMG
+      - name: Build + sign DMG
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
@@ -218,24 +213,52 @@ jobs:
             --app-drop-link 375 150 \
             "/tmp/dmg-artifacts/ContextFS-${VERSION}.dmg" \
             "$APP"
+          DMG=/tmp/dmg-artifacts/ContextFS-${VERSION}.dmg
+          codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
+            --options runtime --timestamp "$DMG"
           ls -la /tmp/dmg-artifacts/
 
-      - name: Sign + notarize + staple DMG
+      # -------- Notarize .app and DMG in parallel ---------------------
+      # Apple's notary service accepts concurrent submissions. Submit both
+      # without --wait, poll both in parallel, then staple sequentially.
+      # Cuts roughly 5-10 min off the sequential pattern.
+
+      - name: Notarize + staple .app and DMG in parallel
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
           DMG=/tmp/dmg-artifacts/ContextFS-${VERSION}.dmg
-          codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
-            --options runtime --timestamp "$DMG"
-          xcrun notarytool submit "$DMG" \
-            --wait --timeout 30m \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID"
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP" /tmp/_notary_app.zip
+
+          # Fire both submissions without --wait so they queue concurrently at Apple.
+          APP_ID=$(xcrun notarytool submit /tmp/_notary_app.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --output-format json | tee /tmp/_notary_app_submit.json | \
+            python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          DMG_ID=$(xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --output-format json | tee /tmp/_notary_dmg_submit.json | \
+            python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          echo "submitted app=$APP_ID dmg=$DMG_ID"
+
+          # Wait for both in parallel background jobs; `wait` blocks until both finish.
+          xcrun notarytool wait "$APP_ID" --timeout 30m \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" &
+          APP_WAIT=$!
+          xcrun notarytool wait "$DMG_ID" --timeout 30m \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" &
+          DMG_WAIT=$!
+          wait "$APP_WAIT" && wait "$DMG_WAIT"
+
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
           xcrun stapler staple "$DMG"
+          rm -f /tmp/_notary_app.zip
 
       # -------- Sparkle update archive --------------------------------
 
@@ -271,7 +294,7 @@ jobs:
               triple=x86_64-apple-darwin
             fi
             BIN="target/${triple}/release/ctxfs"
-            codesign --force --sign "Developer ID Application: Xinzhe Wang (RDQSC33B2X)" \
+            codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
               --options runtime --timestamp "$BIN"
             STAGE="$RUNNER_TEMP/cli-${arch}"
             mkdir -p "$STAGE"

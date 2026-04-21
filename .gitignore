@@ -11,3 +11,7 @@ swift/**/xcuserdata/
 
 # Brainstorming session mockups
 .superpowers/
+
+# Python test cache
+__pycache__/
+*.py[cod]
