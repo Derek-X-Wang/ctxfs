@@ -97,11 +97,14 @@ fi
 # release, but since Derek writes+commits notes separately per the flow, this
 # list covers only files the script itself touched. If it turns out something
 # was missed, `git status` after the commit will show it.
-git add \
-    VERSION \
-    Cargo.toml \
-    Cargo.lock \
-    "$PBXPROJ"
+#
+# Cargo.lock is conditionally staged — this workspace gitignores it (binaries
+# only; no libs publish). `git ls-files --error-unmatch` returns non-zero if
+# the file isn't tracked, in which case we skip it.
+git add VERSION Cargo.toml "$PBXPROJ"
+if git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+    git add Cargo.lock
+fi
 
 git commit -m "chore: release $TAG"
 git tag "$TAG"
