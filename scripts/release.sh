@@ -79,7 +79,10 @@ PBXPROJ="swift/ContextFS/ContextFS.xcodeproj/project.pbxproj"
 sed -i '' -e "s/MARKETING_VERSION = [^;]*;/MARKETING_VERSION = $VERSION;/g" "$PBXPROJ"
 
 # CURRENT_PROJECT_VERSION is a monotonic build number, not the semver.
-BUILD_NUMBER="$(git rev-list --count HEAD)"
+# We compute this *before* the release commit exists, so add 1 — by the
+# time the tag points at the release commit, `git rev-list --count HEAD`
+# on that commit will equal this number.
+BUILD_NUMBER="$(( $(git rev-list --count HEAD) + 1 ))"
 sed -i '' -e "s/CURRENT_PROJECT_VERSION = [^;]*;/CURRENT_PROJECT_VERSION = $BUILD_NUMBER;/g" "$PBXPROJ"
 
 # ---- Refresh Cargo.lock ---------------------------------------------------
