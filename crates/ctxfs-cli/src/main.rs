@@ -442,7 +442,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::Update { check } => {
-            update::run(check)?;
+            // self_update spins up its own blocking reqwest runtime; running
+            // it directly inside the #[tokio::main] async context panics
+            // with "Cannot drop a runtime ...". Isolate on a blocking thread.
+            tokio::task::spawn_blocking(move || update::run(check))
+                .await
+                .map_err(|e| anyhow::anyhow!("update task panicked: {e}"))??;
         }
     }
 
