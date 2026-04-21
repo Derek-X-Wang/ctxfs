@@ -35,9 +35,13 @@ cd "$REPO_ROOT"
 
 # ---- Preconditions ---------------------------------------------------------
 
-if [ -n "$(git status --porcelain)" ]; then
-    echo "error: working tree is dirty. Commit or stash before releasing." >&2
-    git status --short >&2
+# Ignore untracked files — local-tool state (.claude/, .vscode/, etc.) is
+# routinely present and shouldn't block a release. We *do* want to block on
+# modified or staged tracked files, which the `-uno` flag still reports.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "error: working tree has uncommitted changes to tracked files." >&2
+    echo "       Commit or stash before releasing." >&2
+    git status --short --untracked-files=no >&2
     exit 65  # EX_DATAERR
 fi
 
