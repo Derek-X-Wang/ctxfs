@@ -1,0 +1,185 @@
+name: Publish metadata
+
+# Triggered when Derek manually promotes the draft Release created by
+# release.yml. Also supports manual re-run via workflow_dispatch for
+# recovery when the tap PR needs a second attempt.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to reconcile (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write   # push to gh-pages
+  issues: write     # open failure-tracking issue if tap PR fails
+
+jobs:
+  publish-metadata:
+    name: Regenerate appcast + open Homebrew tap PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main (for helper scripts)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download Release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/release-assets
+          cd /tmp/release-assets
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.sig' \
+            --pattern '*.dmg' \
+            --pattern '*.tar.gz' \
+            --pattern 'checksums.txt'
+          ls -la
+
+      - name: Parse artifact metadata
+        id: meta
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          ASSETS=/tmp/release-assets
+
+          # Sparkle EdDSA signature + zip length
+          SIG=$(cat "${ASSETS}/ContextFS-${VERSION}.zip.sig" | tr -d '[:space:]')
+          ZIP_LEN=$(stat -c%s "${ASSETS}/ContextFS-${VERSION}.zip" 2>/dev/null || \
+                    stat -f%z "${ASSETS}/ContextFS-${VERSION}.zip")
+
+          # SHA-256 per artifact (read from checksums.txt)
+          dmg_sha=$(grep "ContextFS-${VERSION}.dmg" "${ASSETS}/checksums.txt" | awk '{print $1}')
+          arm_sha=$(grep "ctxfs-${VERSION}-darwin-arm64.tar.gz" "${ASSETS}/checksums.txt" | awk '{print $1}')
+          x86_sha=$(grep "ctxfs-${VERSION}-darwin-x86_64.tar.gz" "${ASSETS}/checksums.txt" | awk '{print $1}')
+
+          # Fetch release body for appcast description
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/release-body.md
+
+          {
+            echo "ed_sig=$SIG"
+            echo "zip_len=$ZIP_LEN"
+            echo "dmg_sha=$dmg_sha"
+            echo "arm_sha=$arm_sha"
+            echo "x86_sha=$x86_sha"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # -------- Appcast regeneration ---------------------------------
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Regenerate appcast.xml
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          ZIP_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/ContextFS-${VERSION}.zip"
+          python3 scripts/append-appcast-item.py \
+            --appcast gh-pages/appcast.xml \
+            --version "$VERSION" \
+            --short-version "$VERSION" \
+            --enclosure-url "$ZIP_URL" \
+            --ed-signature "${{ steps.meta.outputs.ed_sig }}" \
+            --length "${{ steps.meta.outputs.zip_len }}" \
+            --description-file /tmp/release-body.md
+          xmllint --noout gh-pages/appcast.xml
+
+      - name: Commit + push gh-pages
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          if git diff --staged --quiet; then
+            echo "appcast.xml unchanged (tag may have been re-published)"
+          else
+            git commit -m "chore(appcast): add ${{ steps.tag.outputs.tag }}"
+            git push origin gh-pages
+          fi
+
+      # -------- Homebrew tap bump ------------------------------------
+
+      - name: Clone homebrew-ctxfs
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_PAT }}
+        run: |
+          gh repo clone Derek-X-Wang/homebrew-ctxfs /tmp/homebrew-ctxfs
+          cd /tmp/homebrew-ctxfs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Render + stage cask + formula
+        id: tap_bump
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_PAT }}
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          BRANCH="bump-${TAG}"
+
+          cd /tmp/homebrew-ctxfs
+          git checkout -B "$BRANCH"
+
+          python3 "${GITHUB_WORKSPACE}/scripts/render-homebrew.py" \
+            --version "$VERSION" \
+            --tag "$TAG" \
+            --repo-slug "$GITHUB_REPOSITORY" \
+            --dmg-sha "${{ steps.meta.outputs.dmg_sha }}" \
+            --arm-sha "${{ steps.meta.outputs.arm_sha }}" \
+            --x86-sha "${{ steps.meta.outputs.x86_sha }}" \
+            --cask-out Casks/contextfs.rb \
+            --formula-out Formula/contextfs.rb
+
+          git add Casks/contextfs.rb Formula/contextfs.rb
+          if git diff --staged --quiet; then
+            echo "cask + formula unchanged"
+            exit 0
+          fi
+
+          git commit -m "Bump contextfs to ${TAG}"
+          git push origin "$BRANCH" --force-with-lease
+          gh pr create \
+            --repo Derek-X-Wang/homebrew-ctxfs \
+            --head "$BRANCH" \
+            --base main \
+            --title "Bump contextfs to ${TAG}" \
+            --body "Auto-generated by Derek-X-Wang/ctxfs release.yml run ${GITHUB_RUN_ID}."
+
+      - name: Open tracking issue if tap bump failed
+        if: steps.tap_bump.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Tap bump failed for ${{ steps.tag.outputs.tag }}" \
+            --body "Job 2 failed at the tap-bump step. Workflow run: ${RUN_URL}"
+
+      - name: Re-raise tap-bump failure
+        if: steps.tap_bump.outcome == 'failure'
+        run: exit 1
