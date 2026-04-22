@@ -1,0 +1,10 @@
+<?xml version="1.0" standalone="yes"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>ContextFS Updates</title>
+    <link>https://derek-x-wang.github.io/ctxfs/appcast.xml</link>
+    <description>Updates for ContextFS.app</description>
+    <language>en</language>
+    <!-- items appended by CI Job 2; newest first -->
+  </channel>
+</rss>
