@@ -21,10 +21,9 @@ concurrency:
 
 env:
   # Pinned tools. Bumping requires a PR that also updates the cache key.
-  # Xcode path intentionally unset — we rely on whatever `macos-latest`
-  # ships (currently Xcode 16.x), and the pbxproj is authored with
-  # `objectVersion = 90` which requires a modern xcodebuild. Pinning to
-  # a specific Xcode_NN.app path breaks whenever GitHub rotates runners.
+  # Xcode path intentionally unset — we rely on macos-26-arm64's default
+  # Xcode (26.2, ships macOS 26.2 SDK which has FSVolume.MountOptions
+  # used by ContextFSExt/Volume.swift).
   # Pinned to match the framework version Xcode resolves via SPM (Xcode
   # project's Package.resolved pins 2.9.1). The sign_update CLI from
   # Sparkle 2.x signs 2.x-embedded bundles regardless of minor version,
@@ -39,7 +38,12 @@ env:
 jobs:
   build-and-sign:
     name: Build, sign, notarize, draft Release
-    runs-on: macos-latest
+    # macos-26-arm64: GA since Feb 2026. Ships Xcode 26.2 default (and
+    # 26.0.1, 26.1.1, 26.3, 26.4, 26.5-beta pre-installed). Required because
+    # ContextFSExt/Volume.swift uses `FSVolume.MountOptions` which is a
+    # macOS 26 SDK addition. macos-latest still points at older images as
+    # of this writing; pin explicitly.
+    runs-on: macos-26-arm64
     timeout-minutes: 60
 
     steps:
@@ -50,12 +54,12 @@ jobs:
         with:
           fetch-depth: 0    # scripts/release.sh used `git rev-list --count HEAD` for build number
 
-      - name: Show Xcode version
+      - name: Show Xcode + SDK version
         run: |
           xcodebuild -version
-          # pbxproj uses objectVersion = 90, which requires Xcode 16.3+ or
-          # any Xcode 17+. If this fails with 'objectVersion not supported',
-          # the runner's default Xcode is too old — pin via xcode-select here.
+          xcrun --sdk macosx --show-sdk-version
+          # Expect Xcode 26.x + macOS 26.x SDK (required for
+          # FSVolume.MountOptions used by ContextFSExt/Volume.swift).
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
