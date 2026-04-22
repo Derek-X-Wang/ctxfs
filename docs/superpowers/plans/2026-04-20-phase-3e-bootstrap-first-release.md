@@ -108,11 +108,21 @@ Navigate to **Profiles** → **+**.
 - Name: exactly `ContextFS Extension Distribution`
 - Download the `.provisionprofile` file
 
-- [ ] **1.4a Calendar reminder for profile expiry**
+- [ ] **1.4a Calendar reminder for cert rotation**
 
-Developer ID provisioning profiles expire after ~1 year. Miss the renewal and every signed-build step (xcodebuild) breaks until you regenerate. Create a calendar event for 11 months from today: "Regenerate ContextFS Developer ID provisioning profiles + re-run Stage 2.2/2.4 to push new base64 into `DEVELOPER_ID_APP_PROFILE_BASE64` / `DEVELOPER_ID_EXT_PROFILE_BASE64`."
+For **Developer ID** profiles specifically, Apple issues profiles with an ~18-year lifetime bound to the cert's own lifetime — so the profile isn't the short-lived artifact. The cert is.
 
-The `.p12` (cert) expires on a different (longer) Apple Developer schedule — profiles are the shorter-lived item.
+Decode the cert expiry and set a reminder ~60 days before it:
+
+```bash
+security find-certificate -c "Developer ID Application: Xinzhe Wang" -p \
+  ~/Library/Keychains/login.keychain-db | \
+  openssl x509 -noout -enddate
+```
+
+For the cert we're using (SHA-1 `21ADDC5…9C41`), expiry is **Feb 26, 2030 GMT**. Calendar event: **~Dec 26, 2029 — "Rotate ContextFS Developer ID cert; regenerate both profiles bound to new cert; re-run Stage 2.1–2.4 secret export."**
+
+(For App Store / Enterprise profiles this would be a 1-year reminder. Developer ID is an exception — we've verified via `security cms -D` on the downloaded `.provisionprofile` that expiry is ~2044.)
 
 - [ ] **1.5 Double-check the profiles include FSKit Module capability**
 
