@@ -68,10 +68,15 @@ jobs:
           shared-key: release
           cache-on-failure: false
 
-      - name: Install create-dmg via Homebrew
+      - name: Install create-dmg + protobuf via Homebrew
         run: |
-          brew install create-dmg
+          # create-dmg: builds the notarized .dmg in a later step.
+          # protobuf: provides `protoc`, required by `fskit-rs`'s prost build
+          # script (the same thing pbxproj's protoc build rule invokes locally
+          # via /opt/homebrew/bin/protoc).
+          brew install create-dmg protobuf
           create-dmg --version
+          protoc --version
 
       - name: Cache + install Sparkle CLI tools
         id: sparkle-tools
