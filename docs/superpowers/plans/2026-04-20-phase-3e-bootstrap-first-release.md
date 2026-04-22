@@ -37,6 +37,32 @@ Only one file is created by this plan (the rest is external-system bootstrap):
 
 This is the irreducibly-web step. If Derek's Apple ID isn't signed into a paid Apple Developer Program membership, stop here — the rest of Phase 3 depends on it.
 
+- [ ] **1.0 Fresh-machine preflight (re-bootstrap only)**
+
+Skip this step if you're continuing directly from Phase 3a–3d on the same machine. Run it if you're re-bootstrapping after a laptop replacement, OS reinstall, or any scenario where the local toolchain state is uncertain.
+
+```bash
+# GitHub CLI — authenticated with access to Derek-X-Wang/ctxfs
+gh auth status                              # expect: "Logged in to github.com as Derek-X-Wang"
+gh api repos/Derek-X-Wang/ctxfs --silent    # expect: exit code 0
+
+# Xcode + command-line tools
+xcode-select -p                             # expect: path ending in /Xcode.app/Contents/Developer
+xcodebuild -version                         # expect: Xcode 16.x or later
+
+# Homebrew (we use `brew --prefix` inside ctxfs update's refusal path)
+brew --version                              # expect: Homebrew version line
+
+# Login keychain is accessible and unlocked
+security list-keychains                     # expect: login.keychain-db in the output
+
+# Git identity set (the release script commits on your behalf)
+git config user.email                       # expect: non-empty, matches your Apple ID
+git config user.name                        # expect: non-empty
+```
+
+If any of these fail, fix the tool before proceeding — the later stages assume all of this is working.
+
 - [ ] **1.1 Confirm membership**
 
 Visit `https://developer.apple.com/account` — the landing page shows membership status. Required: **active paid Apple Developer Program membership** under team `RDQSC33B2X` (Derek's team).
@@ -81,6 +107,12 @@ Navigate to **Profiles** → **+**.
 - Certificates: same cert
 - Name: exactly `ContextFS Extension Distribution`
 - Download the `.provisionprofile` file
+
+- [ ] **1.4a Calendar reminder for profile expiry**
+
+Developer ID provisioning profiles expire after ~1 year. Miss the renewal and every signed-build step (xcodebuild) breaks until you regenerate. Create a calendar event for 11 months from today: "Regenerate ContextFS Developer ID provisioning profiles + re-run Stage 2.2/2.4 to push new base64 into `DEVELOPER_ID_APP_PROFILE_BASE64` / `DEVELOPER_ID_EXT_PROFILE_BASE64`."
+
+The `.p12` (cert) expires on a different (longer) Apple Developer schedule — profiles are the shorter-lived item.
 
 - [ ] **1.5 Double-check the profiles include FSKit Module capability**
 
@@ -131,7 +163,16 @@ base64 -i ContextFS_Extension_Distribution.provisionprofile -o contextfs-ext-pro
 
 If the file names don't match (Apple tends to download with slightly munged names), adjust accordingly.
 
-- [ ] **2.3 Set the GitHub Actions secrets**
+- [ ] **2.3 Generate an app-specific password for notarytool**
+
+Apple requires an app-specific password for `notarytool`, separate from Derek's Apple ID login password.
+
+1. Visit `https://appleid.apple.com/account/manage` → **Sign-In and Security** → **App-Specific Passwords** → **Generate Password**
+2. Label it `ctxfs-ci` (or similar — just so Derek can find and revoke it later)
+3. Copy the generated string — format like `abcd-efgh-ijkl-mnop`
+4. Hold it somewhere temporarily (Password Manager or a scratch note) — you'll paste it into the GitHub secret in step 2.4.
+
+- [ ] **2.4 Set the GitHub Actions secrets**
 
 Navigate to the repo on GitHub → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
 
@@ -144,17 +185,8 @@ Create these exact secret names (copy-paste from the `.base64` files for the lar
 | `DEVELOPER_ID_APP_PROFILE_BASE64` | contents of `contextfs-app-profile.base64` |
 | `DEVELOPER_ID_EXT_PROFILE_BASE64` | contents of `contextfs-ext-profile.base64` |
 | `APPLE_ID` | Derek's Apple ID email (the one associated with team `RDQSC33B2X`) |
-| `APPLE_ID_PASSWORD` | app-specific password (see 2.4) |
+| `APPLE_ID_PASSWORD` | app-specific password from step 2.3 |
 | `APPLE_TEAM_ID` | `RDQSC33B2X` |
-
-- [ ] **2.4 Generate an app-specific password for notarytool**
-
-Apple requires an app-specific password for `notarytool`, separate from Derek's Apple ID login password.
-
-1. Visit `https://appleid.apple.com/account/manage` → **Sign-In and Security** → **App-Specific Passwords** → **Generate Password**
-2. Label it `ctxfs-ci` (or similar — just so Derek can find and revoke it later)
-3. Copy the generated string — format like `abcd-efgh-ijkl-mnop`
-4. Paste into the `APPLE_ID_PASSWORD` secret from step 2.3
 
 - [ ] **2.5 Shred the local .p12 + .base64 files**
 
@@ -204,7 +236,11 @@ Expected: one line showing `SPARKLE_PRIVATE_KEY` and its creation timestamp.
 The `release.yml` workflow left `SPARKLE_TARBALL_SHA256: ''` as a placeholder. Phase 3e fills it in now.
 
 ```bash
-# Recompute from the tarball we downloaded in Phase 3a
+# Phase 3a's tarball may be gone (post-reboot /tmp is ephemeral). Re-fetch if missing.
+if [ ! -f /tmp/Sparkle-2.7.0.tar.xz ]; then
+  curl -fsSL -o /tmp/Sparkle-2.7.0.tar.xz \
+    https://github.com/sparkle-project/Sparkle/releases/download/2.7.0/Sparkle-2.7.0.tar.xz
+fi
 shasum -a 256 /tmp/Sparkle-2.7.0.tar.xz | awk '{print $1}'
 ```
 
@@ -328,7 +364,9 @@ gh secret list --repo Derek-X-Wang/ctxfs | grep HOMEBREW_TAP_PAT
 
 - [ ] **4.5 Calendar reminder for PAT rotation**
 
-Token expires in 90 days. Create a calendar event for 85 days from now: "Rotate ctxfs-homebrew-tap-bump PAT." Miss this and Job 2 silently fails on every release until you rotate.
+Token expires in 90 days. Create a calendar event for 85 days from now: "Rotate ctxfs-homebrew-tap-bump PAT."
+
+If the reminder is missed, the symptom is visible (not silent): `publish-metadata.yml` opens a GitHub issue titled `Tap bump failed for vX.Y.Z` (see `publish-metadata.yml:178`) and re-raises the failure so the workflow run shows red. Appcast regeneration still succeeds — only the Homebrew tap PR fails — so Sparkle auto-update keeps working; users will see the new version, just not via `brew upgrade`.
 
 ---
 
@@ -433,13 +471,17 @@ git show HEAD --stat
 git log -1 --format=%B
 ```
 
-- [ ] **6.3 Push the tag + commit**
+- [ ] **6.3 Push only the tag (keep `main` clean)**
+
+Intentionally **do not** push `main`. `release.yml` triggers on tag refs only (see `.github/workflows/release.yml:7`). `git push origin v0.0.1` uploads the underlying release commit via git's reachability rules, but no branch ref is created on origin — so `origin/main` stays exactly as it was before `release.sh` ran. That's what makes Stage 6.7's rollback a local-only operation: no force-push of `main` ever needed.
 
 ```bash
 cd /Users/derekxwang/Development/incubator/ContextFS/ctxfs
-git push origin main
 git push origin v0.0.1
+# Explicitly NOT running: git push origin main
 ```
+
+If your shell aliases `git push` to also push the current branch (e.g., `push.default = current`), use `git push --no-follow-tags origin refs/tags/v0.0.1` to be paranoid about scope.
 
 The tag push triggers `release.yml`. Watch it:
 ```bash
@@ -456,11 +498,17 @@ If `release.yml` fails, common causes:
 
 | Failure point | Likely cause | Fix |
 |---|---|---|
-| "Import Developer ID cert" | `DEVELOPER_ID_P12_BASE64` not set or corrupted | Re-run Stage 2.2 + 2.3 |
+| "Read VERSION + assert match with tag" (`release.yml:94`) | `VERSION` file doesn't match tag (manual tag pushed, or release.sh was interrupted before stamping) | Run `scripts/release.sh X.Y.Z` cleanly; never push a tag by hand |
+| "Download + verify Sparkle tools" (`release.yml:85`) | `SPARKLE_TARBALL_SHA256` hex doesn't match the downloaded tarball | Recompute with Stage 3.3 — you may have pinned the wrong version |
+| "Import Developer ID cert" | `DEVELOPER_ID_P12_BASE64` not set or corrupted | Re-run Stage 2.2 + 2.4 |
 | "Install provisioning profiles" | Profile name or App ID mismatch | Stage 1.4 — regenerate profile |
 | "xcodebuild" | `PROVISIONING_PROFILE_SPECIFIER` in pbxproj doesn't match profile name | Stage 1.6 — fix pbxproj |
-| "Notarize" | App-specific password wrong or `APPLE_ID` wrong | Stage 2.4 — regenerate app-specific password |
-| "sign_update" | `SPARKLE_PRIVATE_KEY` wrong | Stage 3.2 — re-extract from Keychain |
+| "Notarize + staple" (`release.yml:226`) — auth error | `APPLE_ID` wrong or app-specific password revoked | Stage 2.3 — regenerate app-specific password |
+| "Notarize + staple" — team mismatch | `APPLE_TEAM_ID` secret doesn't match the cert's team (`RDQSC33B2X`) | Stage 2.4 — fix `APPLE_TEAM_ID` secret |
+| "Pre-release validation" → clippy (`release.yml:322`) | Code lands with clippy warnings | Fix warnings on `main`, re-tag (this should have been caught locally before running release.sh) |
+| "Pre-release validation" → tests (`release.yml:324`) | Test failure under CI's NFS backend | Run `CTXFS_BACKEND=nfs cargo test --workspace -- --test-threads=1` locally; fix, re-tag |
+| "Pre-release validation" → codesign/spctl | Nested bundle signed with wrong identity, or notarization stapling silently failed | Inspect the step log; may require re-running the whole build (signing is non-deterministic across re-runs) |
+| "sign_update" | `SPARKLE_PRIVATE_KEY` wrong or keychain item rotated since extraction | Stage 3.2 — re-extract from Keychain |
 | "gh release create" | Release notes file not committed | Check `.github/release-notes/v0.0.1.md` exists in the tagged commit |
 
 If you need to re-try: delete the failed tag both locally and remotely, fix the issue, re-cut with `scripts/release.sh`:
@@ -502,15 +550,23 @@ If the app crashes or Gatekeeper rejects it, the signing/notarization pipeline p
 
 - [ ] **6.7 Discard the v0.0.1 draft release**
 
+Because Stage 6.3 only pushed the tag (not `main`), rollback is local-only plus three remote deletions. **No force-push of `main` is required.**
+
 ```bash
-gh release delete v0.0.1 --yes --repo Derek-X-Wang/ctxfs
-git push --delete origin v0.0.1
-git tag -d v0.0.1
-git reset --hard HEAD~1  # undo the release commit
-git push --force-with-lease origin main
+gh release delete v0.0.1 --yes --repo Derek-X-Wang/ctxfs   # draft + its assets
+git push --delete origin v0.0.1                             # remote tag
+git tag -d v0.0.1                                           # local tag
+git reset --hard origin/main                                # drop local release commit
 ```
 
-Clean slate. `v0.0.1` never reached users.
+Verify the repo is back to a clean state:
+```bash
+git log --oneline origin/main..HEAD           # should print nothing (local main == remote main)
+gh release list --repo Derek-X-Wang/ctxfs | grep v0.0.1 || echo "ok: no v0.0.1 release"
+git ls-remote origin refs/tags/v0.0.1 || echo "ok: no v0.0.1 tag on remote"
+```
+
+Clean slate. `v0.0.1` never reached users. The release commit is now unreferenced on the remote and will be garbage-collected by GitHub's housekeeping — no further action required.
 
 ---
 
@@ -622,7 +678,21 @@ ctxfs --version
 
 Expected: `ctxfs --version` prints `0.1.0` (or whatever VERSION file says).
 
-- [ ] **8.8 Verify Sparkle sees the release**
+- [ ] **8.8 Verify `ctxfs update --check` agrees with the published release**
+
+The CLI self-update path is part of the ship criterion (line 22). Validate it sees the new version and correctly refuses to self-update a Homebrew-managed binary:
+
+```bash
+# On the clean Mac from 8.7 (Homebrew-managed binary):
+ctxfs update --check
+# Expected: prints "Latest: 0.1.0" (or current VERSION), and a refusal notice
+# ("Installed via Homebrew; use `brew upgrade` to update.") rather than offering to
+# self-update. Exit code 0.
+```
+
+If `ctxfs update --check` shows an older version, the GitHub Release probably hasn't been marked as the latest release yet. Re-check the GitHub Releases page.
+
+- [ ] **8.9 Verify Sparkle sees the release**
 
 On the same Mac:
 ```bash
@@ -640,6 +710,10 @@ Expected: Sparkle says "You're up to date" (the installed version matches the la
 - [ ] **9.1 Write the bootstrap runbook**
 
 Create `docs/phase3-bootstrap-runbook.md` by copying the stages from this plan, stripping the agent-directed checklist framing, and adding any fixes discovered during 3e. This lives in the repo as the authoritative "how to re-bootstrap if the laptop dies" doc.
+
+Must include:
+- All Stages 1–5 from this plan (the bootstrap itself)
+- A verbatim copy of spec Section 6.8 (key rotation for Sparkle EdDSA + Developer ID cert) — this plan intentionally defers key rotation and the spec is the authoritative source, so the runbook needs the procedure inlined.
 
 Commit + push.
 
@@ -684,13 +758,22 @@ Derek shipped a signed, notarized, auto-updating Mac app + CLI with a Homebrew t
 
 ## Self-review checklist
 
-**Spec coverage:** Plan 3e covers spec Section 6 (One-time bootstrap) fully: Apple Developer portal setup, secret export scripts (embedded as inline commands here rather than a separate `scripts/bootstrap-secrets.sh` since the one-shot nature doesn't warrant a committed script), Sparkle key generation + extraction, Homebrew tap seed, gh-pages bootstrap, dress rehearsal, first release, key rotation runbook (deferred — noted in the 90-day calendar reminder).
+**Spec coverage (partial — intentional deviations documented):**
+- ✅ Apple Developer portal setup (spec 6.1) — Stages 1.1–1.6
+- ⚠️ Secret export (spec 6.2) — inlined as `base64 -i …` + `gh secret set` commands in Stages 2.2–2.4 rather than a committed `scripts/bootstrap-secrets.sh`. The script is a one-shot that nobody runs on a cadence, so the maintenance cost of a script + its tests exceeds the readability win. If we ever need a second maintainer, promote the inlined commands to a script.
+- ✅ Sparkle key generation + extraction (spec 6.3) — Stages 3.1–3.2
+- ✅ Homebrew tap repo + PAT (spec 6.4) — Stage 4
+- ✅ `gh-pages` branch seed (spec 6.5) — Stage 5
+- N/A `build-rust.sh` env-var fast-path (spec 6.6) — already implemented in Phase 3d
+- ✅ Dress rehearsal (spec 6.7) — Stage 6 (we use `v0.0.1` rather than the spec's suggested `v0.0.1-rc1`; intent identical)
+- ❌ Key rotation runbook (spec 6.8) — **explicitly deferred**. The spec's Section 6.8 Sparkle EdDSA + Developer ID rotation procedures are the authoritative source. Stage 9.1 copies them into `docs/phase3-bootstrap-runbook.md` so the repo has the answer.
+- ✅ Profile-expiry reminder (spec 6.2 last paragraph) — Stage 1.4a
 
 **Placeholder scan:** No "TBD" or "fill in later." The only intentionally-placeholder content is the stub cask/formula in Stage 4.2, which is correct behavior (they're meant to be overwritten by the first Job 2 PR).
 
 **Type consistency:** Tag format (`vX.Y.Z`) vs version format (`X.Y.Z`) is consistent — `scripts/release.sh` bridges them, CI workflows derive both from `GITHUB_REF_NAME`. App bundle IDs (`ai.ctxfs.companion` / `ai.ctxfs.companion.fskitext`) match across Apple Developer portal, pbxproj, CI workflow env vars.
 
 **Known edges the plan does NOT solve** (by design):
-- Key rotation under compromise (referenced in spec Section 6.8 — runbook lives in the spec, not here; copy into `docs/phase3-bootstrap-runbook.md` in Stage 9.1 if you want it in the repo).
-- PAT rotation automation — 90-day expiry is a calendar reminder, not a CI reminder.
+- Key rotation under compromise — runbook lives in spec Section 6.8, copied into `docs/phase3-bootstrap-runbook.md` in Stage 9.1.
+- PAT rotation automation — 90-day expiry is a manual calendar reminder, not a CI reminder. Tap-bump failures are visible (opens a tracking issue + fails the workflow run — see `publish-metadata.yml:178`); not silent. Acceptable for v0.1 soft-launch; revisit if release cadence grows.
 - Multi-maintainer signing — only Derek can sign/notarize. If this project grows, move to a CI-only signing workload + passkey or hardware key.
