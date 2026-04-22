@@ -21,9 +21,16 @@ concurrency:
 
 env:
   # Pinned tools. Bumping requires a PR that also updates the cache key.
-  XCODE_APP_PATH: /Applications/Xcode_17.app
-  SPARKLE_VERSION: '2.7.0'
-  SPARKLE_TARBALL_SHA256: ''   # Populated on first Phase 3e run; see README.
+  # Xcode path intentionally unset — we rely on whatever `macos-latest`
+  # ships (currently Xcode 16.x), and the pbxproj is authored with
+  # `objectVersion = 90` which requires a modern xcodebuild. Pinning to
+  # a specific Xcode_NN.app path breaks whenever GitHub rotates runners.
+  # Pinned to match the framework version Xcode resolves via SPM (Xcode
+  # project's Package.resolved pins 2.9.1). The sign_update CLI from
+  # Sparkle 2.x signs 2.x-embedded bundles regardless of minor version,
+  # but keeping these aligned avoids subtle runtime/sign mismatches.
+  SPARKLE_VERSION: '2.9.1'
+  SPARKLE_TARBALL_SHA256: 'c0dde519fd2a43ddfc6a1eb76aec284d7d888fe281414f9177de3164d98ba4c7'
   # One source of truth for signing identity + team — avoids typos across
   # the four sites that sign artifacts (nested binaries, .app, DMG, CLI tarballs).
   DEVELOPMENT_TEAM: RDQSC33B2X
@@ -32,7 +39,7 @@ env:
 jobs:
   build-and-sign:
     name: Build, sign, notarize, draft Release
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 60
 
     steps:
@@ -43,14 +50,12 @@ jobs:
         with:
           fetch-depth: 0    # scripts/release.sh used `git rev-list --count HEAD` for build number
 
-      - name: Select Xcode 17
+      - name: Show Xcode version
         run: |
-          if [ -d "$XCODE_APP_PATH" ]; then
-            sudo xcode-select -s "$XCODE_APP_PATH"
-          else
-            echo "::warning::$XCODE_APP_PATH not found on runner; falling back to default"
-          fi
           xcodebuild -version
+          # pbxproj uses objectVersion = 90, which requires Xcode 16.3+ or
+          # any Xcode 17+. If this fails with 'objectVersion not supported',
+          # the runner's default Xcode is too old — pin via xcode-select here.
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
