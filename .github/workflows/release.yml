@@ -68,15 +68,18 @@ jobs:
           shared-key: release
           cache-on-failure: false
 
-      - name: Install create-dmg + protobuf via Homebrew
+      - name: Install create-dmg + protobuf + swift-protobuf via Homebrew
         run: |
           # create-dmg: builds the notarized .dmg in a later step.
-          # protobuf: provides `protoc`, required by `fskit-rs`'s prost build
-          # script (the same thing pbxproj's protoc build rule invokes locally
-          # via /opt/homebrew/bin/protoc).
-          brew install create-dmg protobuf
+          # protobuf: provides `protoc`, used by:
+          #   - `fskit-rs`'s prost build script (Rust side)
+          #   - pbxproj's protoc build rule for ContextFSExt (Swift side)
+          # swift-protobuf: provides `protoc-gen-swift`, the plugin protoc
+          #   needs to emit Swift via `--swift_out` in the pbxproj build rule.
+          brew install create-dmg protobuf swift-protobuf
           create-dmg --version
           protoc --version
+          protoc-gen-swift --version
 
       - name: Cache + install Sparkle CLI tools
         id: sparkle-tools
