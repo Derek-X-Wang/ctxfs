@@ -262,6 +262,7 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -o pipefail
           VERSION="${{ steps.version.outputs.version }}"
           APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
           DMG=/tmp/dmg-artifacts/ContextFS-${VERSION}.dmg
@@ -280,13 +281,36 @@ jobs:
           echo "submitted app=$APP_ID dmg=$DMG_ID"
 
           # Wait for both in parallel background jobs; `wait` blocks until both finish.
+          # Don't fail the step on non-zero wait — we need to keep running to fetch
+          # the notarization log on Invalid status (which is where the real error is).
           xcrun notarytool wait "$APP_ID" --timeout 30m \
-            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" &
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" || true &
           APP_WAIT=$!
           xcrun notarytool wait "$DMG_ID" --timeout 30m \
-            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" &
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" || true &
           DMG_WAIT=$!
-          wait "$APP_WAIT" && wait "$DMG_WAIT"
+          wait "$APP_WAIT"; wait "$DMG_WAIT"
+
+          # Check final status via `notarytool info`; dump the detailed rejection
+          # log if either came back Invalid. Without this, Apple's Invalid surfaces
+          # as 'The staple and validate action failed! Error 65' two steps later —
+          # useless for debugging.
+          check_status() {
+            local id="$1" label="$2"
+            local status
+            status=$(xcrun notarytool info "$id" \
+              --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              --output-format json | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")
+            echo "--- $label status: $status ---"
+            if [ "$status" != "Accepted" ]; then
+              echo "::error::Notarization rejected $label — fetching detailed log"
+              xcrun notarytool log "$id" \
+                --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID"
+              return 1
+            fi
+          }
+          check_status "$APP_ID" "app"
+          check_status "$DMG_ID" "dmg"
 
           xcrun stapler staple "$APP"
           xcrun stapler validate "$APP"
