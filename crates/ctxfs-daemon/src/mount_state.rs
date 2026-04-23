@@ -166,7 +166,7 @@ mod tests {
     fn write_and_read_roundtrip() {
         let (_dir, msf) = tmp_state();
         let e = entry("github:owner/repo@main", "/tmp/vol1", &["/usr/local/lib/repo"]);
-        msf.write(&[e.clone()]).unwrap();
+        msf.write(std::slice::from_ref(&e)).unwrap();
         let got = msf.read();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].source, "github:owner/repo@main");
