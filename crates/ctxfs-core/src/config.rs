@@ -129,7 +129,7 @@ impl Config {
             config.cache_max_bytes = v;
         }
         if let Some(v) = &file.log_level {
-            config.log_level = v.clone();
+            config.log_level.clone_from(v);
         }
         if let Some(v) = &file.redis_url {
             if !v.is_empty() {
