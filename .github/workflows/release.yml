@@ -378,30 +378,24 @@ jobs:
           ZIP="/tmp/dmg-artifacts/ContextFS-${VERSION}.zip"
           KEYFILE="$RUNNER_TEMP/sparkle_priv.b64"
 
-          # printf avoids adding a trailing newline that `echo` injects; some
-          # sign_update builds are sensitive to whitespace in the key file.
-          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEYFILE"
+          # Canonical pattern from `sign_update --help`:
+          #     echo "$PRIVATE_KEY_SECRET" | sign_update --ed-key-file - <file>
+          # Piping via stdin avoids any temp-file keychain fallthrough that
+          # caused 'Signing key not found for account ed25519' in earlier runs
+          # even when --ed-key-file was pointed at a valid file. -p asks for
+          # just the signature string (no "sparkle:edSignature=... length=..." prefix).
+          SIG=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            /tmp/sparkle-tools/bin/sign_update --ed-key-file - -p "$ZIP")
+          if [ -z "$SIG" ]; then
+            echo "::error::sign_update produced no signature — check SPARKLE_PRIVATE_KEY"
+            exit 1
+          fi
+          printf '%s' "$SIG" > "/tmp/dmg-artifacts/ContextFS-${VERSION}.zip.sig"
 
-          # Diagnostic — doesn't reveal the key value (byte count only)
-          echo "keyfile bytes: $(wc -c < "$KEYFILE")"
-          [ -s "$KEYFILE" ] || { echo "::error::Sparkle key file is empty — check SPARKLE_PRIVATE_KEY secret"; exit 1; }
-
-          # Sparkle 2.9.x sign_update usage surface — dump help so we know
-          # what flags this exact binary accepts before we call it.
-          echo '--- sign_update --help ---'
-          /tmp/sparkle-tools/bin/sign_update --help 2>&1 || true
-          echo '--- sign_update -h ---'
-          /tmp/sparkle-tools/bin/sign_update -h 2>&1 || true
-
-          # Sparkle 2.9.x reportedly wants -f or --ed-key-file before the
-          # positional input. Try file flag first; fall back to stdin piping
-          # if the flag-form rejects us.
-          SIG=$(/tmp/sparkle-tools/bin/sign_update -f "$KEYFILE" "$ZIP" 2>&1) || \
-          SIG=$(/tmp/sparkle-tools/bin/sign_update --ed-key-file "$KEYFILE" "$ZIP")
-          echo "$SIG" > "/tmp/dmg-artifacts/ContextFS-${VERSION}.zip.sig"
-          rm -f "$KEYFILE"
-          # Verify round-trip
-          /tmp/sparkle-tools/bin/sign_update --verify "$SIG" "$ZIP"
+          # Verify round-trip using the keychain-less flag form.
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            /tmp/sparkle-tools/bin/sign_update --ed-key-file - --verify "$ZIP" "$SIG"
+          rm -f "$KEYFILE" 2>/dev/null || true
 
       # -------- CLI tarballs ------------------------------------------
 
