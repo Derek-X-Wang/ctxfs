@@ -20,6 +20,7 @@ use ctxfs_ipc::transport;
 #[derive(Parser)]
 #[command(
     name = "ctxfs",
+    version,   // clap reads env!("CARGO_PKG_VERSION") at compile time
     about = "ContextFS — AI-native read-only mountable filesystem"
 )]
 struct Cli {
