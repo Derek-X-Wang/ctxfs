@@ -38,12 +38,16 @@ env:
 jobs:
   build-and-sign:
     name: Build, sign, notarize, draft Release
-    # macos-26-arm64: GA since Feb 2026. Ships Xcode 26.2 default (and
-    # 26.0.1, 26.1.1, 26.3, 26.4, 26.5-beta pre-installed). Required because
-    # ContextFSExt/Volume.swift uses `FSVolume.MountOptions` which is a
-    # macOS 26 SDK addition. macos-latest still points at older images as
-    # of this writing; pin explicitly.
-    runs-on: macos-26-arm64
+    # macos-26 (Intel): GA since Feb 2026. Ships Xcode 26.x with macOS 26
+    # SDK — required because ContextFSExt/Volume.swift uses
+    # `FSVolume.MountOptions`, a macOS 26 SDK addition.
+    #
+    # Intel rather than macos-26-arm64: the arm64 pool had 65+ min queue
+    # waits during the v0.0.1 dress rehearsal. Cargo cross-compiles to
+    # aarch64 from an Intel host via `--target aarch64-apple-darwin`, so
+    # `lipo` still produces a working universal binary. xcodebuild on
+    # Intel can also build for arm64 targets.
+    runs-on: macos-26
     timeout-minutes: 60
 
     steps:
