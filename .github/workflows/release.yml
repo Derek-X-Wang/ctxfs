@@ -373,11 +373,23 @@ jobs:
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
+          set -o pipefail
           VERSION="${{ steps.version.outputs.version }}"
           ZIP="/tmp/dmg-artifacts/ContextFS-${VERSION}.zip"
           KEYFILE="$RUNNER_TEMP/sparkle_priv.b64"
-          echo "$SPARKLE_PRIVATE_KEY" > "$KEYFILE"
-          SIG=$(/tmp/sparkle-tools/bin/sign_update "$ZIP" --ed-key-file "$KEYFILE")
+
+          # printf avoids adding a trailing newline that `echo` injects; some
+          # sign_update builds are sensitive to whitespace in the key file.
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEYFILE"
+
+          # Diagnostic — doesn't reveal the key value (byte count only)
+          echo "keyfile bytes: $(wc -c < "$KEYFILE")"
+          [ -s "$KEYFILE" ] || { echo "::error::Sparkle key file is empty — check SPARKLE_PRIVATE_KEY secret"; exit 1; }
+
+          # Order matters in Sparkle 2.9.x: --ed-key-file before the positional
+          # input path, otherwise sign_update falls through to the keychain
+          # path and errors with 'Signing key not found for account ed25519'.
+          SIG=$(/tmp/sparkle-tools/bin/sign_update --ed-key-file "$KEYFILE" "$ZIP")
           echo "$SIG" > "/tmp/dmg-artifacts/ContextFS-${VERSION}.zip.sig"
           rm -f "$KEYFILE"
           # Verify round-trip
