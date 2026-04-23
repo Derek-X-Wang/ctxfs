@@ -428,6 +428,11 @@ jobs:
       # -------- Pre-release validation --------------------------------
 
       - name: Pre-release validation
+        env:
+          # Some e2e tests call out to GitHub to resolve snapshots. With no
+          # token, CI hits the 60/hr unauthenticated rate limit and fails
+          # flakily; this bumps them to the 5000/hr authenticated ceiling.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
