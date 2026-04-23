@@ -481,7 +481,10 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
           NOTES=".github/release-notes/${TAG}.md"
           cd /tmp/dmg-artifacts
+          # --repo is required because cwd is outside the git checkout;
+          # gh release create tries `git remote` to infer it otherwise.
           gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --draft \
             --title "$TAG" \
             --notes-file "${GITHUB_WORKSPACE}/${NOTES}" \
