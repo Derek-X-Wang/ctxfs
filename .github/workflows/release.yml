@@ -58,12 +58,20 @@ jobs:
         with:
           fetch-depth: 0    # scripts/release.sh used `git rev-list --count HEAD` for build number
 
-      - name: Show Xcode + SDK version
+      - name: Select Xcode 26.4 (matches local dev; has FSVolume.MountOptions)
         run: |
+          # macos-26's default Xcode is 26.2 (macOS 26.2 SDK) — that SDK does
+          # NOT have FSVolume.MountOptions. Pinned to 26.4 to match Derek's
+          # local dev environment (Xcode 26.4.1) and ship macOS 26.4 SDK.
+          # If runner inventory rotates and 26.4 goes away, the `if -d` guard
+          # falls back to the default and emits a clear warning.
+          if [ -d /Applications/Xcode_26.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.4.app
+          else
+            echo "::warning::Xcode_26.4.app missing; falling back to default"
+          fi
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
-          # Expect Xcode 26.x + macOS 26.x SDK (required for
-          # FSVolume.MountOptions used by ContextFSExt/Volume.swift).
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
