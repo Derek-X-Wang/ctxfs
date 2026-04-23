@@ -386,9 +386,17 @@ jobs:
           echo "keyfile bytes: $(wc -c < "$KEYFILE")"
           [ -s "$KEYFILE" ] || { echo "::error::Sparkle key file is empty — check SPARKLE_PRIVATE_KEY secret"; exit 1; }
 
-          # Order matters in Sparkle 2.9.x: --ed-key-file before the positional
-          # input path, otherwise sign_update falls through to the keychain
-          # path and errors with 'Signing key not found for account ed25519'.
+          # Sparkle 2.9.x sign_update usage surface — dump help so we know
+          # what flags this exact binary accepts before we call it.
+          echo '--- sign_update --help ---'
+          /tmp/sparkle-tools/bin/sign_update --help 2>&1 || true
+          echo '--- sign_update -h ---'
+          /tmp/sparkle-tools/bin/sign_update -h 2>&1 || true
+
+          # Sparkle 2.9.x reportedly wants -f or --ed-key-file before the
+          # positional input. Try file flag first; fall back to stdin piping
+          # if the flag-form rejects us.
+          SIG=$(/tmp/sparkle-tools/bin/sign_update -f "$KEYFILE" "$ZIP" 2>&1) || \
           SIG=$(/tmp/sparkle-tools/bin/sign_update --ed-key-file "$KEYFILE" "$ZIP")
           echo "$SIG" > "/tmp/dmg-artifacts/ContextFS-${VERSION}.zip.sig"
           rm -f "$KEYFILE"
