@@ -12,6 +12,11 @@ swift/**/xcuserdata/
 # Brainstorming session mockups
 .superpowers/
 
+# Claude Code / Claire per-machine state (plans, settings, worktrees).
+# These are developer-local and should never be committed.
+.claude/settings.local.json
+.claire/
+
 # Python test cache
 __pycache__/
 *.py[cod]

@@ -68,6 +68,9 @@ where
     }
 }
 
+// The dispatch table is inherently long (one arm per IPC method).
+// Splitting per-method would add indirection without reducing complexity.
+#[allow(clippy::too_many_lines)]
 pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
     match req.method.as_str() {
         "ping" => Response::ok(req.id, "pong"),
@@ -267,7 +270,12 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                 serde_json::Value::String(s) => toml_edit::Value::from(s),
                 serde_json::Value::Bool(b) => toml_edit::Value::from(b),
                 serde_json::Value::Number(ref n) if n.is_u64() => {
-                    toml_edit::Value::from(n.as_u64().unwrap() as i64)
+                    // TOML ints are i64. Values > i64::MAX clamp to i64::MAX
+                    // rather than wrapping — the alternative would silently
+                    // produce negative numbers in the stored config.
+                    #[allow(clippy::cast_possible_wrap)]
+                    let v = n.as_u64().unwrap().min(i64::MAX as u64) as i64;
+                    toml_edit::Value::from(v)
                 }
                 serde_json::Value::Number(ref n) if n.is_i64() => {
                     toml_edit::Value::from(n.as_i64().unwrap())

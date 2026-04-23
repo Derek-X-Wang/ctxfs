@@ -570,7 +570,7 @@ fn config_set_value_updates_single_key() {
 /// Full-lifecycle test. Requires a running ctxfs daemon.
 /// Run with: cargo test -p ctxfs-app-helper -- --ignored helper_persistent_session
 #[test]
-#[ignore]
+#[ignore = "persistent-session e2e: spawns the real helper binary and talks to it over stdio"]
 fn helper_persistent_session_across_multiple_requests() {
     let mut child = Command::cargo_bin("ctxfs-app-helper")
         .unwrap()
@@ -650,7 +650,7 @@ fn helper_persistent_session_across_multiple_requests() {
 
 // Live network test — gated on env var to avoid flaky CI.
 #[test]
-#[ignore]
+#[ignore = "hits real GitHub; requires GITHUB_TOKEN and a network round-trip"]
 fn test_github_token_validates_real_token() {
     let token = std::env::var("GITHUB_TOKEN").expect("set GITHUB_TOKEN to run");
     let mut child = Command::cargo_bin("ctxfs-app-helper")

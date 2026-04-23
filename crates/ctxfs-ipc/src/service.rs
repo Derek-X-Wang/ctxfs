@@ -34,13 +34,13 @@ pub struct MountInfo {
     pub mounted_at: String,
     /// Loopback port where the daemon's NFS server for this mount is listening.
     /// The CLI uses this to invoke `mount_nfs` on the user's behalf.
-    /// `None` for FSKit mounts which do not use NFS.
+    /// `None` for `FSKit` mounts which do not use NFS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nfs_port: Option<u16>,
     /// Which backend is serving this mount.
     #[serde(default = "default_backend")]
     pub backend: Backend,
-    /// Filesystem path to the volume (FSKit mounts only).
+    /// Filesystem path to the volume (`FSKit` mounts only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_path: Option<String>,
     /// Symlink paths tracked for this mount (e.g. project-level convenience links).
