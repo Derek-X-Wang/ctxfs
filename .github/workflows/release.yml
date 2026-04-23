@@ -221,47 +221,54 @@ jobs:
 
       - name: Re-sign nested bundles with Developer ID (bottom-up)
         run: |
-          # SPM-pulled Sparkle framework keeps its maintainer signatures on the
-          # embedded helpers/XPC services. Those don't match our Developer ID,
-          # so the notary rejects every one of them. We have to re-sign each
-          # inner bundle from the leaves up, then the framework, then the
-          # extension, then the Rust binaries, then the outer app. Signing a
-          # parent bundle re-computes its content hash — any later change
-          # invalidates it, so order matters.
+          # SPM-pulled Sparkle framework keeps its maintainer signatures on
+          # the embedded helpers/XPC services. Those don't match our Developer
+          # ID, so the notary rejects every one of them. We have to re-sign
+          # each inner bundle from the leaves up, then the framework, then
+          # the extension, then the Rust binaries, then the outer app.
+          # Signing a parent bundle re-computes its content hash — any later
+          # change invalidates it, so order matters.
           APP=/tmp/ctxfs-build/Build/Products/Release/ContextFS.app
-          ID="$DEVELOPER_ID_IDENTITY"
-          FLAGS="--force --sign $ID --options runtime --timestamp"
           SPARKLE="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+
+          # Function wrapper so the identity (contains spaces) gets quoted
+          # correctly every time. A FLAGS="--sign $ID" string would word-split.
+          sign() {
+            codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
+              --options runtime --timestamp "$@"
+          }
 
           # 1. Sparkle XPC services (innermost first: binary, then .xpc wrapper)
           for xpc in Downloader Installer; do
-            codesign $FLAGS "$SPARKLE/XPCServices/$xpc.xpc/Contents/MacOS/$xpc"
-            codesign $FLAGS "$SPARKLE/XPCServices/$xpc.xpc"
+            sign "$SPARKLE/XPCServices/$xpc.xpc/Contents/MacOS/$xpc"
+            sign "$SPARKLE/XPCServices/$xpc.xpc"
           done
 
           # 2. Sparkle helper executables
-          codesign $FLAGS "$SPARKLE/Autoupdate"
-          codesign $FLAGS "$SPARKLE/Updater.app/Contents/MacOS/Updater"
-          codesign $FLAGS "$SPARKLE/Updater.app"
+          sign "$SPARKLE/Autoupdate"
+          sign "$SPARKLE/Updater.app/Contents/MacOS/Updater"
+          sign "$SPARKLE/Updater.app"
 
           # 3. Sparkle framework itself
-          codesign $FLAGS "$APP/Contents/Frameworks/Sparkle.framework"
+          sign "$APP/Contents/Frameworks/Sparkle.framework"
 
-          # 4. FSKit extension (re-apply entitlements — get-task-allow must not
-          # appear in the effective entitlements post-sign).
-          codesign $FLAGS \
+          # 4. FSKit extension (re-apply entitlements — get-task-allow must
+          # not appear in the effective entitlements post-sign).
+          codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
+            --options runtime --timestamp \
             --entitlements "$GITHUB_WORKSPACE/swift/ContextFS/ContextFSExt/ContextFSExt.entitlements" \
             "$APP/Contents/Extensions/ContextFSExt.appex"
 
           # 5. Rust binaries
           for bin in ctxfs ctxfs-app-helper; do
             if [ -f "$APP/Contents/MacOS/$bin" ]; then
-              codesign $FLAGS "$APP/Contents/MacOS/$bin"
+              sign "$APP/Contents/MacOS/$bin"
             fi
           done
 
           # 6. Finally sign the outer app bundle.
-          codesign $FLAGS \
+          codesign --force --sign "$DEVELOPER_ID_IDENTITY" \
+            --options runtime --timestamp \
             --entitlements "$GITHUB_WORKSPACE/swift/ContextFS/ContextFS/ContextFS.entitlements" \
             "$APP"
 
