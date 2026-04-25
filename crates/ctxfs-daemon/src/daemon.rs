@@ -1,3 +1,4 @@
+use crate::observability::Observability;
 use anyhow::{bail, Context, Result};
 use ctxfs_cache::{BlobCache, ResolutionCache, SharedTreeCache, TreeCache};
 use ctxfs_core::config::Config;
@@ -112,6 +113,7 @@ struct DaemonServer {
     mounts: Arc<RwLock<HashMap<String, MountHandle>>>,
     config: Config,
     rt_handle: tokio::runtime::Handle,
+    observability: Arc<Observability>,
 }
 
 impl Daemon {
@@ -162,6 +164,7 @@ impl Daemon {
             mounts: self.mounts.clone(),
             config: self.config.clone(),
             rt_handle: tokio::runtime::Handle::current(),
+            observability: Arc::new(Observability::new()),
         };
 
         let cancel = self.cancel.clone();
@@ -830,6 +833,13 @@ impl CtxfsService for DaemonServer {
     async fn ping(self, _: tarpc::context::Context) -> String {
         "pong".to_string()
     }
+
+    async fn get_status(
+        self,
+        _: tarpc::context::Context,
+    ) -> Result<ctxfs_ipc::service::StatusReportV1, String> {
+        Ok(self.observability.status_report())
+    }
 }
 
 #[cfg(test)]
@@ -917,6 +927,7 @@ mod tests {
             mounts: Arc::new(RwLock::new(HashMap::new())),
             config,
             rt_handle: tokio::runtime::Handle::current(),
+            observability: Arc::new(Observability::new()),
         }
     }
 
