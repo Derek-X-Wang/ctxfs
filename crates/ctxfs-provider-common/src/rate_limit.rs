@@ -129,6 +129,76 @@ impl ResourceClass {
     }
 }
 
+/// Verdict returned by [`ThrottleClassifier::classify`].
+#[derive(Debug, Clone)]
+pub enum RateLimitVerdict {
+    Ok { resource: ResourceClass },
+    PrimaryExhausted { reset_at: SystemTime, resource: ResourceClass },
+    SecondaryThrottle { retry_after: Duration, resource: ResourceClass },
+    Other { status: u16 },
+}
+
+/// Classifies an HTTP response into a rate-limit verdict.
+///
+/// Order of checks (matters):
+/// 1. `Retry-After` header present + status 429/403 → `SecondaryThrottle`
+///    (secondary throttles can fire while `x-ratelimit-remaining` is still
+///    nonzero, so this comes before the remaining-zero check).
+/// 2. `x-ratelimit-remaining == 0` and status not 2xx → `PrimaryExhausted`.
+/// 3. Status 2xx → `Ok`.
+/// 4. Anything else → `Other`.
+#[derive(Debug)]
+pub struct ThrottleClassifier;
+
+impl ThrottleClassifier {
+    #[must_use]
+    pub fn classify(
+        status: u16,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> RateLimitVerdict {
+        let resource = headers
+            .get("x-ratelimit-resource")
+            .map(|s| ResourceClass::parse(s))
+            .unwrap_or_else(|| ResourceClass::Other("unknown".to_string()));
+
+        // 1. Secondary throttle: 429 or 403 with Retry-After.
+        if (status == 429 || status == 403) && headers.contains_key("retry-after") {
+            if let Some(secs) = headers.get("retry-after").and_then(|s| s.parse::<u64>().ok()) {
+                return RateLimitVerdict::SecondaryThrottle {
+                    retry_after: Duration::from_secs(secs),
+                    resource,
+                };
+            }
+        }
+
+        // 2. Primary exhausted.
+        if let Some(remaining) = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if remaining == 0 && !(200..300).contains(&status) {
+                if let Some(reset_secs) = headers
+                    .get("x-ratelimit-reset")
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    return RateLimitVerdict::PrimaryExhausted {
+                        reset_at: SystemTime::UNIX_EPOCH + Duration::from_secs(reset_secs),
+                        resource,
+                    };
+                }
+            }
+        }
+
+        // 3. OK.
+        if (200..300).contains(&status) {
+            return RateLimitVerdict::Ok { resource };
+        }
+
+        // 4. Other.
+        RateLimitVerdict::Other { status }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +256,78 @@ mod tests {
         let mut g = RateLimitGauge::unknown();
         g.update_from_headers(&headers);
         assert!(g.remaining.is_none());
+    }
+
+    use std::collections::HashMap;
+
+    fn hdr(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn classifier_returns_ok_for_200() {
+        let h = hdr(&[
+            ("x-ratelimit-resource", "core"),
+            ("x-ratelimit-remaining", "100"),
+        ]);
+        let v = ThrottleClassifier::classify(200, &h);
+        assert!(matches!(v, RateLimitVerdict::Ok { resource: ResourceClass::Core }));
+    }
+
+    #[test]
+    fn classifier_primary_exhausted_when_remaining_zero() {
+        let h = hdr(&[
+            ("x-ratelimit-resource", "core"),
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1700000000"),
+        ]);
+        let v = ThrottleClassifier::classify(403, &h);
+        match v {
+            RateLimitVerdict::PrimaryExhausted { reset_at, resource } => {
+                assert_eq!(resource, ResourceClass::Core);
+                assert_eq!(
+                    reset_at,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1700000000)
+                );
+            }
+            other => panic!("expected PrimaryExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifier_secondary_throttle_429_with_retry_after_and_remaining_nonzero() {
+        let h = hdr(&[
+            ("x-ratelimit-resource", "core"),
+            ("x-ratelimit-remaining", "4500"),
+            ("retry-after", "60"),
+        ]);
+        let v = ThrottleClassifier::classify(429, &h);
+        match v {
+            RateLimitVerdict::SecondaryThrottle {
+                retry_after,
+                resource,
+            } => {
+                assert_eq!(retry_after, Duration::from_secs(60));
+                assert_eq!(resource, ResourceClass::Core);
+            }
+            other => panic!("expected SecondaryThrottle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifier_secondary_throttle_403_with_retry_after_is_secondary() {
+        // GitHub's secondary limits sometimes return 403 (not 429) with retry-after.
+        let h = hdr(&[("x-ratelimit-remaining", "4500"), ("retry-after", "30")]);
+        let v = ThrottleClassifier::classify(403, &h);
+        assert!(matches!(v, RateLimitVerdict::SecondaryThrottle { .. }));
+    }
+
+    #[test]
+    fn classifier_other_for_500() {
+        let v = ThrottleClassifier::classify(500, &HashMap::new());
+        assert!(matches!(v, RateLimitVerdict::Other { status: 500 }));
     }
 }
