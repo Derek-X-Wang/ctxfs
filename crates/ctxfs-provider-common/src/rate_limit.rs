@@ -130,7 +130,7 @@ impl ResourceClass {
 }
 
 /// Verdict returned by [`ThrottleClassifier::classify`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RateLimitVerdict {
     Ok { resource: ResourceClass },
     PrimaryExhausted { reset_at: SystemTime, resource: ResourceClass },
@@ -329,5 +329,15 @@ mod tests {
     fn classifier_other_for_500() {
         let v = ThrottleClassifier::classify(500, &HashMap::new());
         assert!(matches!(v, RateLimitVerdict::Other { status: 500 }));
+    }
+
+    #[test]
+    fn classifier_other_when_remaining_zero_but_no_reset() {
+        let h = hdr(&[
+            ("x-ratelimit-remaining", "0"),
+            // no x-ratelimit-reset
+        ]);
+        let v = ThrottleClassifier::classify(403, &h);
+        assert!(matches!(v, RateLimitVerdict::Other { status: 403 }));
     }
 }
