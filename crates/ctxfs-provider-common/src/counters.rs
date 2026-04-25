@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Key for a per-mount counter bucket. All four dimensions are required:
 /// two mounts of the same `(source, repo, commit)` at different mount points
 /// hold separate counters keyed by `mount_id`.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CounterKey {
     pub source: String,
     pub repo: String,
