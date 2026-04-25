@@ -15,6 +15,7 @@ swift/**/xcuserdata/
 # Claude Code / Claire per-machine state (plans, settings, worktrees).
 # These are developer-local and should never be committed.
 .claude/settings.local.json
+.claude/worktrees/
 .claire/
 
 # Python test cache
