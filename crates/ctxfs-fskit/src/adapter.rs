@@ -565,7 +565,14 @@ impl Filesystem for FilesystemAdapter {
     }
 
     async fn get_xattr(&mut self, _name: &OsStr, _item_id: u64) -> FsKitResult<Vec<u8>> {
-        Err(FsKitError::Posix(libc::ENOATTR))
+        // ENOATTR is the macOS spelling; Linux uses ENODATA for the same value.
+        // This crate only runs on macOS, but it cross-compiles on Linux CI as a
+        // workspace member, so use the platform-correct constant.
+        #[cfg(target_os = "macos")]
+        let err = libc::ENOATTR;
+        #[cfg(not(target_os = "macos"))]
+        let err = libc::ENODATA;
+        Err(FsKitError::Posix(err))
     }
 
     async fn set_xattr(
