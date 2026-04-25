@@ -79,7 +79,9 @@ impl MountCounters {
     }
 
     pub fn record_truncated_tree_fallback(&self) {
-        let _ = self.truncated_tree_fallbacks.fetch_add(1, Ordering::Relaxed);
+        let _ = self
+            .truncated_tree_fallbacks
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_cache_hit(&self) {

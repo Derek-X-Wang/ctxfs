@@ -24,7 +24,10 @@ fn lazy_workload_records_one_call_per_blob() {
     assert_eq!(calls.len(), 1 + 1 + blob_count);
     assert!(matches!(calls[0], RecordedCall::Commit { .. }));
     assert!(matches!(calls[1], RecordedCall::Tree { .. }));
-    let blob_calls = calls.iter().filter(|c| matches!(c, RecordedCall::Blob { .. })).count();
+    let blob_calls = calls
+        .iter()
+        .filter(|c| matches!(c, RecordedCall::Blob { .. }))
+        .count();
     assert_eq!(blob_calls, blob_count);
 }
 
@@ -42,6 +45,9 @@ fn tarball_workload_records_three_calls() {
     assert!(matches!(calls[2], RecordedCall::Tarball { .. }));
 
     // No blob calls.
-    let blob_calls = calls.iter().filter(|c| matches!(c, RecordedCall::Blob { .. })).count();
+    let blob_calls = calls
+        .iter()
+        .filter(|c| matches!(c, RecordedCall::Blob { .. }))
+        .count();
     assert_eq!(blob_calls, 0);
 }

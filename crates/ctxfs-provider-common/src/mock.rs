@@ -9,10 +9,23 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RecordedCall {
-    Commit { repo: String, reference: String },
-    Tree { repo: String, sha: String, recursive: bool },
-    Blob { repo: String, sha: String },
-    Tarball { repo: String, sha: String },
+    Commit {
+        repo: String,
+        reference: String,
+    },
+    Tree {
+        repo: String,
+        sha: String,
+        recursive: bool,
+    },
+    Blob {
+        repo: String,
+        sha: String,
+    },
+    Tarball {
+        repo: String,
+        sha: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -27,42 +40,60 @@ impl MockProvider {
     }
 
     pub fn record_commit(&self, repo: impl Into<String>, reference: impl Into<String>) {
-        self.calls.lock().expect("MockProvider mutex poisoned").push(RecordedCall::Commit {
-            repo: repo.into(),
-            reference: reference.into(),
-        });
+        self.calls
+            .lock()
+            .expect("MockProvider mutex poisoned")
+            .push(RecordedCall::Commit {
+                repo: repo.into(),
+                reference: reference.into(),
+            });
     }
 
     pub fn record_tree(&self, repo: impl Into<String>, sha: impl Into<String>, recursive: bool) {
-        self.calls.lock().expect("MockProvider mutex poisoned").push(RecordedCall::Tree {
-            repo: repo.into(),
-            sha: sha.into(),
-            recursive,
-        });
+        self.calls
+            .lock()
+            .expect("MockProvider mutex poisoned")
+            .push(RecordedCall::Tree {
+                repo: repo.into(),
+                sha: sha.into(),
+                recursive,
+            });
     }
 
     pub fn record_blob(&self, repo: impl Into<String>, sha: impl Into<String>) {
-        self.calls.lock().expect("MockProvider mutex poisoned").push(RecordedCall::Blob {
-            repo: repo.into(),
-            sha: sha.into(),
-        });
+        self.calls
+            .lock()
+            .expect("MockProvider mutex poisoned")
+            .push(RecordedCall::Blob {
+                repo: repo.into(),
+                sha: sha.into(),
+            });
     }
 
     pub fn record_tarball(&self, repo: impl Into<String>, sha: impl Into<String>) {
-        self.calls.lock().expect("MockProvider mutex poisoned").push(RecordedCall::Tarball {
-            repo: repo.into(),
-            sha: sha.into(),
-        });
+        self.calls
+            .lock()
+            .expect("MockProvider mutex poisoned")
+            .push(RecordedCall::Tarball {
+                repo: repo.into(),
+                sha: sha.into(),
+            });
     }
 
     #[must_use]
     pub fn calls(&self) -> Vec<RecordedCall> {
-        self.calls.lock().expect("MockProvider mutex poisoned").clone()
+        self.calls
+            .lock()
+            .expect("MockProvider mutex poisoned")
+            .clone()
     }
 
     #[must_use]
     pub fn count(&self) -> usize {
-        self.calls.lock().expect("MockProvider mutex poisoned").len()
+        self.calls
+            .lock()
+            .expect("MockProvider mutex poisoned")
+            .len()
     }
 }
 

@@ -2,10 +2,10 @@
 //! Assembles the StatusReportV1 payload for IPC `get_status`.
 
 use ctxfs_provider_common::counters::{CounterKey, MountCounters};
-use ctxfs_provider_common::rate_limit::{AuthIdentity, AuthKind, RateLimitGauge, ResourceClass, ThrottleState};
-use ctxfs_provider_common::status::{
-    BudgetEntry, CounterEntry, MountSummary, StatusReportV1,
+use ctxfs_provider_common::rate_limit::{
+    AuthIdentity, AuthKind, RateLimitGauge, ResourceClass, ThrottleState,
 };
+use ctxfs_provider_common::status::{BudgetEntry, CounterEntry, MountSummary, StatusReportV1};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -77,10 +77,9 @@ impl Observability {
                         .map(|d| d.as_secs()),
                     throttle_active_until_unix: match &g.secondary_throttle_state {
                         ThrottleState::None => None,
-                        ThrottleState::Active { until } => until
-                            .duration_since(UNIX_EPOCH)
-                            .ok()
-                            .map(|d| d.as_secs()),
+                        ThrottleState::Active { until } => {
+                            until.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+                        }
                     },
                 }
             })
@@ -119,6 +118,8 @@ impl Observability {
             .collect();
 
         // Sort by rest_calls_total descending so the top-N consumers are first.
+        // When two mounts have equal cost, iteration order is undefined (acceptable
+        // for top-N reporting where only the top 10 are shown by the CLI).
         mounts.sort_by(|a, b| b.rest_calls_total.cmp(&a.rest_calls_total));
 
         StatusReportV1 {
@@ -130,6 +131,8 @@ impl Observability {
     }
 }
 
+/// Produces wire-format string for AuthKind (safe to log, contains no secrets).
+/// Format: "anonymous" | "pat:{8-char-prefix}" | "github_app:{installation_id}"
 fn auth_kind_string(kind: &AuthKind) -> String {
     match kind {
         AuthKind::Anonymous => "anonymous".to_string(),
@@ -138,6 +141,8 @@ fn auth_kind_string(kind: &AuthKind) -> String {
     }
 }
 
+/// Produces wire-format string for ResourceClass (matches GitHub x-ratelimit-resource header values).
+/// Format: "core" | "search" | "code_search" | "graphql" | "other:{value}"
 fn resource_class_string(rc: &ResourceClass) -> String {
     match rc {
         ResourceClass::Core => "core".to_string(),

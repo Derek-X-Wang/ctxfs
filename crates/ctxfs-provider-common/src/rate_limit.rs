@@ -21,9 +21,13 @@ pub enum AuthKind {
     Anonymous,
     /// Personal-access token. Stored as the **token id prefix** (first 8
     /// chars), not the secret itself, so this struct is safe to log.
-    Pat { token_id_prefix: String },
+    Pat {
+        token_id_prefix: String,
+    },
     /// GitHub App installation token (placeholder for future).
-    GithubApp { installation_id: u64 },
+    GithubApp {
+        installation_id: u64,
+    },
 }
 
 impl AuthIdentity {
@@ -60,7 +64,9 @@ pub struct RateLimitGauge {
 pub enum ThrottleState {
     None,
     /// Secondary throttle active until the wrapped instant.
-    Active { until: SystemTime },
+    Active {
+        until: SystemTime,
+    },
 }
 
 impl RateLimitGauge {
@@ -77,13 +83,22 @@ impl RateLimitGauge {
     /// Update the gauge from a map of HTTP response headers (lowercased keys).
     /// Missing headers leave the corresponding field unchanged.
     pub fn update_from_headers(&mut self, headers: &std::collections::HashMap<String, String>) {
-        if let Some(v) = headers.get("x-ratelimit-limit").and_then(|s| s.parse().ok()) {
+        if let Some(v) = headers
+            .get("x-ratelimit-limit")
+            .and_then(|s| s.parse().ok())
+        {
             self.limit = Some(v);
         }
-        if let Some(v) = headers.get("x-ratelimit-remaining").and_then(|s| s.parse().ok()) {
+        if let Some(v) = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|s| s.parse().ok())
+        {
             self.remaining = Some(v);
         }
-        if let Some(secs) = headers.get("x-ratelimit-reset").and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(secs) = headers
+            .get("x-ratelimit-reset")
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             self.reset_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
         }
     }
@@ -132,10 +147,20 @@ impl ResourceClass {
 /// Verdict returned by [`ThrottleClassifier::classify`].
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RateLimitVerdict {
-    Ok { resource: ResourceClass },
-    PrimaryExhausted { reset_at: SystemTime, resource: ResourceClass },
-    SecondaryThrottle { retry_after: Duration, resource: ResourceClass },
-    Other { status: u16 },
+    Ok {
+        resource: ResourceClass,
+    },
+    PrimaryExhausted {
+        reset_at: SystemTime,
+        resource: ResourceClass,
+    },
+    SecondaryThrottle {
+        retry_after: Duration,
+        resource: ResourceClass,
+    },
+    Other {
+        status: u16,
+    },
 }
 
 /// Classifies an HTTP response into a rate-limit verdict.
@@ -163,7 +188,10 @@ impl ThrottleClassifier {
 
         // 1. Secondary throttle: 429 or 403 with Retry-After.
         if (status == 429 || status == 403) && headers.contains_key("retry-after") {
-            if let Some(secs) = headers.get("retry-after").and_then(|s| s.parse::<u64>().ok()) {
+            if let Some(secs) = headers
+                .get("retry-after")
+                .and_then(|s| s.parse::<u64>().ok())
+            {
                 return RateLimitVerdict::SecondaryThrottle {
                     retry_after: Duration::from_secs(secs),
                     resource,
@@ -215,12 +243,18 @@ mod tests {
         assert_eq!(ResourceClass::parse("core"), ResourceClass::Core);
         assert_eq!(ResourceClass::parse("search"), ResourceClass::Search);
         assert_eq!(ResourceClass::parse("graphql"), ResourceClass::Graphql);
-        assert_eq!(ResourceClass::parse("code_search"), ResourceClass::CodeSearch);
+        assert_eq!(
+            ResourceClass::parse("code_search"),
+            ResourceClass::CodeSearch
+        );
     }
 
     #[test]
     fn resource_class_unknown_falls_back_to_other() {
-        assert!(matches!(ResourceClass::parse("audit_log"), ResourceClass::Other(_)));
+        assert!(matches!(
+            ResourceClass::parse("audit_log"),
+            ResourceClass::Other(_)
+        ));
     }
 
     #[test]
@@ -274,7 +308,12 @@ mod tests {
             ("x-ratelimit-remaining", "100"),
         ]);
         let v = ThrottleClassifier::classify(200, &h);
-        assert!(matches!(v, RateLimitVerdict::Ok { resource: ResourceClass::Core }));
+        assert!(matches!(
+            v,
+            RateLimitVerdict::Ok {
+                resource: ResourceClass::Core
+            }
+        ));
     }
 
     #[test]
