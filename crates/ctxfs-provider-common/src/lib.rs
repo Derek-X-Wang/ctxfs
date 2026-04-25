@@ -1,5 +1,6 @@
 pub mod counters;
 pub mod http;
+pub mod mock;
 pub mod rate_limit;
 pub mod repo_url;
 pub mod resolver;
