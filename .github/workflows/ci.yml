@@ -21,10 +21,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Linux: install NFS client for mount.nfs
-      - name: Install NFS client (Linux)
+      # Linux: install NFS client for mount.nfs + protoc for fskit-rs prost build
+      - name: Install NFS client + protoc (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y nfs-common
+        run: sudo apt-get update && sudo apt-get install -y nfs-common protobuf-compiler
+
+      # macOS: protoc + protoc-gen-swift (same set release.yml installs).
+      # fskit-rs's build.rs uses prost-build which shells out to protoc.
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf swift-protobuf
+          protoc --version
+          protoc-gen-swift --version
 
       - name: Clippy
         run: cargo clippy --all-targets --tests
