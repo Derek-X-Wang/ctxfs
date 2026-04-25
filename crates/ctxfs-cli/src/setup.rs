@@ -266,16 +266,14 @@ pub fn find_fskit_app() -> Option<std::path::PathBuf> {
 ///    the relevant pane on macOS.
 pub fn install_fskit() -> Result<(), String> {
     // Step 1: find the app bundle.
-    let app_src = find_fskit_app()
-        .ok_or_else(|| {
-            "ContextFS.app not found. Make sure it is next to the ctxfs binary, in \
+    let app_src = find_fskit_app().ok_or_else(|| {
+        "ContextFS.app not found. Make sure it is next to the ctxfs binary, in \
              ~/Applications, or /Applications, or set CTXFS_FSKIT_APP_PATH."
-                .to_string()
-        })?;
+            .to_string()
+    })?;
 
     // Step 2: copy to ~/Applications if not already there.
-    let home = dirs::home_dir()
-        .ok_or_else(|| "could not determine home directory".to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "could not determine home directory".to_string())?;
     let dest = home.join("Applications").join("ContextFS.app");
 
     if dest != app_src {
@@ -363,7 +361,9 @@ pub fn check_fskit_status() {
         if volumes_dir.exists() {
             println!("  Mount dir:      /Volumes/ctxfs (exists)");
         } else {
-            println!("  Mount dir:      /Volumes/ctxfs (missing — run `ctxfs setup install-fskit`)");
+            println!(
+                "  Mount dir:      /Volumes/ctxfs (missing — run `ctxfs setup install-fskit`)"
+            );
         }
     }
 
@@ -386,12 +386,8 @@ pub fn set_default_backend(backend: &str, config_path: &std::path::Path) -> anyh
     if !matches!(backend, "nfs" | "fskit") {
         anyhow::bail!("invalid backend: {backend:?}. Use 'nfs' or 'fskit'");
     }
-    ctxfs_core::config::update_config_key(
-        config_path,
-        "backend",
-        toml_edit::Value::from(backend),
-    )
-    .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
+    ctxfs_core::config::update_config_key(config_path, "backend", toml_edit::Value::from(backend))
+        .map_err(|e| anyhow::anyhow!("failed to write config: {e}"))?;
     Ok(())
 }
 
@@ -601,10 +597,7 @@ mod tests {
             "expected ExternalEdit error, got {result:?}"
         );
         // File should still have external content
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "external edit"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
     }
 
     #[test]

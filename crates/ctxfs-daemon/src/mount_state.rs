@@ -165,7 +165,11 @@ mod tests {
     #[test]
     fn write_and_read_roundtrip() {
         let (_dir, msf) = tmp_state();
-        let e = entry("github:owner/repo@main", "/tmp/vol1", &["/usr/local/lib/repo"]);
+        let e = entry(
+            "github:owner/repo@main",
+            "/tmp/vol1",
+            &["/usr/local/lib/repo"],
+        );
         msf.write(std::slice::from_ref(&e)).unwrap();
         let got = msf.read();
         assert_eq!(got.len(), 1);
@@ -209,8 +213,10 @@ mod tests {
     #[test]
     fn remove_volume() {
         let (_dir, msf) = tmp_state();
-        msf.add(entry("github:a/b@main", "/tmp/vA", &["/la"])).unwrap();
-        msf.add(entry("github:c/d@main", "/tmp/vB", &["/lb"])).unwrap();
+        msf.add(entry("github:a/b@main", "/tmp/vA", &["/la"]))
+            .unwrap();
+        msf.add(entry("github:c/d@main", "/tmp/vB", &["/lb"]))
+            .unwrap();
         msf.remove_volume("/tmp/vA").unwrap();
         let got = msf.read();
         assert_eq!(got.len(), 1);
@@ -222,7 +228,8 @@ mod tests {
         let (_dir, msf) = tmp_state();
 
         // Write valid state first so the file exists.
-        msf.write(&[entry("github:e/f@main", "/tmp/vC", &[])]).unwrap();
+        msf.write(&[entry("github:e/f@main", "/tmp/vC", &[])])
+            .unwrap();
 
         // Corrupt the file in-place.
         {
@@ -248,8 +255,10 @@ mod tests {
     #[test]
     fn clear_removes_all() {
         let (_dir, msf) = tmp_state();
-        msf.add(entry("github:i/j@main", "/tmp/vE", &["/le"])).unwrap();
-        msf.add(entry("github:k/l@main", "/tmp/vF", &["/lf"])).unwrap();
+        msf.add(entry("github:i/j@main", "/tmp/vE", &["/le"]))
+            .unwrap();
+        msf.add(entry("github:k/l@main", "/tmp/vF", &["/lf"]))
+            .unwrap();
         msf.clear().unwrap();
         assert!(msf.read().is_empty());
     }

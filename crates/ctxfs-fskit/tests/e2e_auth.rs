@@ -311,7 +311,10 @@ async fn daemon_generated_token_rejects_mismatched_client() {
 
     // Connection must be closed after the rejection.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let follow_up = Request { id: 2, content: None };
+    let follow_up = Request {
+        id: 2,
+        content: None,
+    };
     let _ = stream.write_all(&encode_request(&follow_up)).await;
     let n2 = stream.read(&mut resp_buf).await.unwrap_or(0);
     assert_eq!(n2, 0, "server must have closed the connection after EACCES");
@@ -349,7 +352,10 @@ async fn replay_authenticate_after_success_is_rejected() {
             token: raw.clone(),
         })),
     };
-    stream.write_all(&encode_request(&first_auth)).await.unwrap();
+    stream
+        .write_all(&encode_request(&first_auth))
+        .await
+        .unwrap();
 
     let mut resp_buf = vec![0u8; 256];
     let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut resp_buf))
@@ -390,7 +396,10 @@ async fn replay_authenticate_after_success_is_rejected() {
 
     // Connection must be closed after the EPROTO response.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let follow_up = Request { id: 3, content: None };
+    let follow_up = Request {
+        id: 3,
+        content: None,
+    };
     let _ = stream.write_all(&encode_request(&follow_up)).await;
     let n3 = stream.read(&mut resp_buf).await.unwrap_or(0);
     assert_eq!(n3, 0, "server must have closed the connection after EPROTO");

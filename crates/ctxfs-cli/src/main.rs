@@ -230,7 +230,15 @@ async fn main() -> Result<()> {
             server_only,
             backend: backend_flag,
         } => {
-            handle_mount(&config, sources, mount_point, mount_dir, server_only, backend_flag).await?;
+            handle_mount(
+                &config,
+                sources,
+                mount_point,
+                mount_dir,
+                server_only,
+                backend_flag,
+            )
+            .await?;
         }
 
         Commands::Unmount { target, all } => {
@@ -716,8 +724,7 @@ fn handle_existing_fskit_mount_point(path: &std::path::Path) -> Result<()> {
                  to use this path for an FSKit mount.",
                 path.display()
             ),
-            Err(e) => Err(e)
-                .with_context(|| format!("failed to remove {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("failed to remove {}", path.display())),
         }
     } else {
         anyhow::bail!(
@@ -792,9 +799,7 @@ async fn handle_unmount(config: &Config, target: Option<String>, all: bool) -> R
     // fskit-rs calls `hdiutil detach` on session drop, which can block >10s
     // when multiple volumes share a virtual device — use the longer deadline.
     let client = connect(config).await?;
-    let rpc_result = client
-        .unmount(long_context(), daemon_target.clone())
-        .await;
+    let rpc_result = client.unmount(long_context(), daemon_target.clone()).await;
 
     // Clean up the symlink even if the RPC timed out — the daemon may have
     // finished internally after we gave up waiting.

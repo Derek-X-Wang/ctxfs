@@ -501,7 +501,10 @@ mod tests {
 
         // Prune to 250 bytes — should evict oldest 3 blobs (300 bytes freed)
         let freed = cache.prune_blobs(250);
-        assert!(freed >= 250, "expected at least 250 bytes freed, got {freed}");
+        assert!(
+            freed >= 250,
+            "expected at least 250 bytes freed, got {freed}"
+        );
 
         let (total_after, count_after) = cache.stats();
         assert!(

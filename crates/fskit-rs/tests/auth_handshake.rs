@@ -27,7 +27,7 @@ fn constant_time_compare_rejects_wrong_length() {
 
 // ── Integration tests for TCP handshake behavior ────────────────────────────
 
-use fskit_rs::protocol::{request, AuthenticateRequest, GetVolumeIdentifier, Request};
+use fskit_rs::protocol::{AuthenticateRequest, GetVolumeIdentifier, Request, request};
 use fskit_rs::session::SessionBuilder;
 use prost::Message as _;
 use std::sync::{Arc, Mutex};
@@ -117,7 +117,10 @@ async fn invalid_token_is_rejected_and_closes_connection() {
 
     // After the bad auth, connection should be closed.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let next = Request { id: 2, content: None };
+    let next = Request {
+        id: 2,
+        content: None,
+    };
     let _ = stream.write_all(&encode_length_delimited(&next)).await;
     let n = stream.read(&mut resp_buf).await.unwrap_or(0);
     assert_eq!(n, 0, "server must have closed the connection");

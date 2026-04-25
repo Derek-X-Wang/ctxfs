@@ -6,7 +6,7 @@
 //! - `ctxfs update` → if newer available, download, verify SHA-256, atomically
 //!   swap the current binary. Refuses if the binary is package-manager-managed.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use self_update::backends::github::ReleaseList;
 use self_update::cargo_crate_version;
 
@@ -70,9 +70,15 @@ fn run_apply() -> Result<()> {
         .context("self_update failed")?;
 
     if status.updated() {
-        println!("Updated to {}. Restart any open ctxfs shell sessions.", status.version());
+        println!(
+            "Updated to {}. Restart any open ctxfs shell sessions.",
+            status.version()
+        );
     } else {
-        println!("Already on the latest version ({}).", cargo_crate_version!());
+        println!(
+            "Already on the latest version ({}).",
+            cargo_crate_version!()
+        );
     }
     Ok(())
 }
@@ -129,9 +135,7 @@ fn require_proceed_or_bail() -> Result<()> {
              'Check for Updates…' menu (or 'brew upgrade --cask contextfs' \
              if you installed via Homebrew)."
         ),
-        Decision::RefuseHomebrewFormula => bail!(
-            "Run 'brew upgrade contextfs' instead."
-        ),
+        Decision::RefuseHomebrewFormula => bail!("Run 'brew upgrade contextfs' instead."),
     }
 }
 

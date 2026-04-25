@@ -4,7 +4,9 @@ fn authenticate_request_variant_exists() {
     let token = vec![0u8; 32];
     let req = Request {
         id: 1,
-        content: Some(request::Content::Authenticate(AuthenticateRequest { token })),
+        content: Some(request::Content::Authenticate(AuthenticateRequest {
+            token,
+        })),
     };
     assert_eq!(req.id, 1);
     match req.content {

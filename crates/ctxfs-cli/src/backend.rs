@@ -31,7 +31,9 @@ fn fskit_app_installed() -> bool {
         dirs::home_dir().map(|h| h.join("Applications/ContextFS.app")),
         Some(std::path::PathBuf::from("/Applications/ContextFS.app")),
     ];
-    candidates.iter().any(|p| p.as_ref().is_some_and(|p| p.exists()))
+    candidates
+        .iter()
+        .any(|p| p.as_ref().is_some_and(|p| p.exists()))
 }
 
 /// Resolve backend: flag > env > config > auto-detect.

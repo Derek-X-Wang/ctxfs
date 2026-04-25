@@ -18,7 +18,10 @@ pub(crate) fn vfs_to_fskit_inode(vfs_id: u64) -> u64 {
 /// Inverse of `vfs_to_fskit_inode`. Debug-asserts on `FSKit` id 0 or 1
 /// (never emitted by us, so they indicate a bug if `FSKit` ever sends them).
 pub(crate) fn fskit_to_vfs_inode(fskit_id: u64) -> u64 {
-    debug_assert!(fskit_id >= FSKIT_ROOT_ID, "FSKit inode {fskit_id} is reserved");
+    debug_assert!(
+        fskit_id >= FSKIT_ROOT_ID,
+        "FSKit inode {fskit_id} is reserved"
+    );
     fskit_id.saturating_sub(1).max(1)
 }
 
@@ -136,16 +139,25 @@ mod tests {
 
     #[test]
     fn node_type_translation() {
-        assert!(matches!(node_type_to_item_type(NodeType::File), ItemType::File));
-        assert!(matches!(node_type_to_item_type(NodeType::Directory), ItemType::Directory));
-        assert!(matches!(node_type_to_item_type(NodeType::Symlink), ItemType::Symlink));
+        assert!(matches!(
+            node_type_to_item_type(NodeType::File),
+            ItemType::File
+        ));
+        assert!(matches!(
+            node_type_to_item_type(NodeType::Directory),
+            ItemType::Directory
+        ));
+        assert!(matches!(
+            node_type_to_item_type(NodeType::Symlink),
+            ItemType::Symlink
+        ));
     }
 
     #[test]
     fn file_attr_translates_correctly() {
         let attr = file_attr(5, 1, 1024, false);
         let item_attr = node_attr_to_item_attributes(&attr);
-        assert_eq!(item_attr.file_id, Some(6));   // 5 + 1
+        assert_eq!(item_attr.file_id, Some(6)); // 5 + 1
         assert_eq!(item_attr.parent_id, Some(2)); // 1 + 1 (root)
         assert_eq!(item_attr.r#type, Some(ItemType::File as i32));
         assert_eq!(item_attr.mode, Some(0o444));
@@ -174,12 +186,24 @@ mod tests {
 
     #[test]
     fn error_translation_all_variants() {
-        assert!(matches!(vfs_err_to_fskit(&VfsError::NotFound), FsKitError::Posix(e) if e == libc::ENOENT));
-        assert!(matches!(vfs_err_to_fskit(&VfsError::NotDir), FsKitError::Posix(e) if e == libc::ENOTDIR));
-        assert!(matches!(vfs_err_to_fskit(&VfsError::IsDir), FsKitError::Posix(e) if e == libc::EISDIR));
-        assert!(matches!(vfs_err_to_fskit(&VfsError::Invalid), FsKitError::Posix(e) if e == libc::EINVAL));
-        assert!(matches!(vfs_err_to_fskit(&VfsError::ReadOnly), FsKitError::Posix(e) if e == libc::EROFS));
-        assert!(matches!(vfs_err_to_fskit(&VfsError::Io("x".into())), FsKitError::Posix(e) if e == libc::EIO));
+        assert!(
+            matches!(vfs_err_to_fskit(&VfsError::NotFound), FsKitError::Posix(e) if e == libc::ENOENT)
+        );
+        assert!(
+            matches!(vfs_err_to_fskit(&VfsError::NotDir), FsKitError::Posix(e) if e == libc::ENOTDIR)
+        );
+        assert!(
+            matches!(vfs_err_to_fskit(&VfsError::IsDir), FsKitError::Posix(e) if e == libc::EISDIR)
+        );
+        assert!(
+            matches!(vfs_err_to_fskit(&VfsError::Invalid), FsKitError::Posix(e) if e == libc::EINVAL)
+        );
+        assert!(
+            matches!(vfs_err_to_fskit(&VfsError::ReadOnly), FsKitError::Posix(e) if e == libc::EROFS)
+        );
+        assert!(
+            matches!(vfs_err_to_fskit(&VfsError::Io("x".into())), FsKitError::Posix(e) if e == libc::EIO)
+        );
     }
 }
 
@@ -266,8 +290,8 @@ impl Filesystem for FilesystemAdapter {
 
     async fn get_volume_identifier(&mut self) -> FsKitResult<VolumeIdentifier> {
         Ok(VolumeIdentifier {
-            id: Some(self.volume_id.clone()),        // "ctxfs-npm-react-19.1.0" (slug-based)
-            name: Some(self.display_name.clone()),   // "react 19.1.0" (human-readable)
+            id: Some(self.volume_id.clone()), // "ctxfs-npm-react-19.1.0" (slug-based)
+            name: Some(self.display_name.clone()), // "react 19.1.0" (human-readable)
         })
     }
 
@@ -341,7 +365,11 @@ impl Filesystem for FilesystemAdapter {
 
     async fn activate(&mut self, _options: TaskOptions) -> FsKitResult<Item> {
         let root_id = self.vfs.root_id();
-        let attr = self.vfs.getattr(root_id).await.map_err(|e| vfs_err_to_fskit(&e))?;
+        let attr = self
+            .vfs
+            .getattr(root_id)
+            .await
+            .map_err(|e| vfs_err_to_fskit(&e))?;
         Ok(make_item("/", &attr))
     }
 
@@ -357,7 +385,11 @@ impl Filesystem for FilesystemAdapter {
 
     async fn get_attributes(&mut self, item_id: u64) -> FsKitResult<ItemAttributes> {
         let vfs_id = fskit_to_vfs_inode(item_id);
-        let attr = self.vfs.getattr(vfs_id).await.map_err(|e| vfs_err_to_fskit(&e))?;
+        let attr = self
+            .vfs
+            .getattr(vfs_id)
+            .await
+            .map_err(|e| vfs_err_to_fskit(&e))?;
         Ok(node_attr_to_item_attributes(&attr))
     }
 
@@ -438,12 +470,7 @@ impl Filesystem for FilesystemAdapter {
         Err(FsKitError::Posix(libc::EROFS))
     }
 
-    async fn remove_item(
-        &mut self,
-        _item_id: u64,
-        _name: &OsStr,
-        _dir_id: u64,
-    ) -> FsKitResult<()> {
+    async fn remove_item(&mut self, _item_id: u64, _name: &OsStr, _dir_id: u64) -> FsKitResult<()> {
         Err(FsKitError::Posix(libc::EROFS))
     }
 
@@ -480,12 +507,7 @@ impl Filesystem for FilesystemAdapter {
         Ok(data)
     }
 
-    async fn write(
-        &mut self,
-        _contents: Vec<u8>,
-        _item_id: u64,
-        _offset: i64,
-    ) -> FsKitResult<i64> {
+    async fn write(&mut self, _contents: Vec<u8>, _item_id: u64, _offset: i64) -> FsKitResult<i64> {
         Err(FsKitError::Posix(libc::EROFS))
     }
 
@@ -522,17 +544,17 @@ impl Filesystem for FilesystemAdapter {
 
     async fn read_symbolic_link(&mut self, item_id: u64) -> FsKitResult<Vec<u8>> {
         let vfs_id = fskit_to_vfs_inode(item_id);
-        let target = self.vfs.readlink(vfs_id).await.map_err(|e| vfs_err_to_fskit(&e))?;
+        let target = self
+            .vfs
+            .readlink(vfs_id)
+            .await
+            .map_err(|e| vfs_err_to_fskit(&e))?;
         Ok(target.into_bytes())
     }
 
     // ─── Access control ──────────────────────────────────────────────────
 
-    async fn check_access(
-        &mut self,
-        _item_id: u64,
-        _access: Vec<AccessMask>,
-    ) -> FsKitResult<bool> {
+    async fn check_access(&mut self, _item_id: u64, _access: Vec<AccessMask>) -> FsKitResult<bool> {
         Ok(true)
     }
 

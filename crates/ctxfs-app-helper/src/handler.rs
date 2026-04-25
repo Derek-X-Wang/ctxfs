@@ -77,10 +77,7 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
 
         "list" => {
             dispatch_rpc(state, req.id, "list", |client| async move {
-                client
-                    .list(tarpc::context::current())
-                    .await
-                    .map(Ok)
+                client.list(tarpc::context::current()).await.map(Ok)
             })
             .await
         }
@@ -92,9 +89,7 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             }
             let params: UnmountParams = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
-                Err(e) => {
-                    return Response::err(req.id, format!("invalid params for unmount: {e}"))
-                }
+                Err(e) => return Response::err(req.id, format!("invalid params for unmount: {e}")),
             };
             dispatch_rpc(state, req.id, "unmount", |client| async move {
                 client
@@ -142,10 +137,7 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
             let params: Params = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
                 Err(e) => {
-                    return Response::err(
-                        req.id,
-                        format!("invalid params for prune_blobs: {e}"),
-                    )
+                    return Response::err(req.id, format!("invalid params for prune_blobs: {e}"))
                 }
             };
             dispatch_rpc(state, req.id, "prune_blobs", |client| async move {
@@ -291,9 +283,7 @@ pub async fn dispatch(state: &HandlerState, req: &Request) -> Response {
                 }
             };
             match ctxfs_core::config::update_config_key(&path, &params.key, toml_value) {
-                Ok(()) => {
-                    Response::ok(req.id, serde_json::json!({"ok": true, "key": params.key}))
-                }
+                Ok(()) => Response::ok(req.id, serde_json::json!({"ok": true, "key": params.key})),
                 Err(e) => Response::err(req.id, format!("write failed: {e}")),
             }
         }

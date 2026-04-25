@@ -90,10 +90,7 @@ impl Config {
                         Ok(file) => Self::apply_file(&mut config, &file),
                         Err(e) => {
                             // Warn but don't abort — env vars still work.
-                            tracing::warn!(
-                                "failed to parse {}: {e}",
-                                path.display()
-                            );
+                            tracing::warn!("failed to parse {}: {e}", path.display());
                         }
                     },
                     Err(e) => {
@@ -334,7 +331,11 @@ impl ConfigSnapshot {
     ///
     /// Returns [`ConfigWriteError::ExternalEdit`] if the current on-disk hash
     /// differs from the hash recorded at read time.
-    pub fn write_back(&self, path: &std::path::Path, contents: &str) -> Result<(), ConfigWriteError> {
+    pub fn write_back(
+        &self,
+        path: &std::path::Path,
+        contents: &str,
+    ) -> Result<(), ConfigWriteError> {
         use sha2::Digest as _;
         let current = match std::fs::read(path) {
             Ok(b) => b,

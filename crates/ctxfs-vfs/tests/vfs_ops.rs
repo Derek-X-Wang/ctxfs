@@ -3,9 +3,7 @@ use ctxfs_cache::BlobCache;
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::Digest;
-use ctxfs_manifest::{
-    DirEntry, Directory, DirectoryEntry, FileEntry, Snapshot, SymlinkEntry,
-};
+use ctxfs_manifest::{DirEntry, Directory, DirectoryEntry, FileEntry, Snapshot, SymlinkEntry};
 use ctxfs_vfs::{NodeType, VfsError, VfsState};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +19,10 @@ struct MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn fetch_snapshot(&self, _source: &ctxfs_core::source::SourceSpec) -> Result<Vec<u8>, CtxfsError> {
+    async fn fetch_snapshot(
+        &self,
+        _source: &ctxfs_core::source::SourceSpec,
+    ) -> Result<Vec<u8>, CtxfsError> {
         Err(CtxfsError::Provider("not implemented".into()))
     }
 
@@ -255,7 +256,9 @@ async fn subpath_reroots() {
 async fn lookup_populates_parent_inode() {
     let (provider, snapshot, _main_rs) = build_fixture();
     let cache = make_cache();
-    let vfs = VfsState::new(provider, cache, snapshot, None).await.unwrap();
+    let vfs = VfsState::new(provider, cache, snapshot, None)
+        .await
+        .unwrap();
 
     let root = vfs.root_id();
 

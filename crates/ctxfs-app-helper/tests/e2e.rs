@@ -54,11 +54,7 @@ fn unmount_errors_when_params_missing() {
     let mut reader = BufReader::new(stdout);
 
     // Missing params.target
-    writeln!(
-        stdin,
-        r#"{{"id":1,"method":"unmount","params":{{}}}}"#
-    )
-    .unwrap();
+    writeln!(stdin, r#"{{"id":1,"method":"unmount","params":{{}}}}"#).unwrap();
     stdin.flush().unwrap();
 
     let mut response = String::new();
@@ -95,10 +91,7 @@ fn helper_responds_to_ping() {
         response.contains(r#""result":"pong""#),
         "unexpected response: {response}"
     );
-    assert!(
-        response.contains(r#""id":1"#),
-        "response must echo id"
-    );
+    assert!(response.contains(r#""id":1"#), "response must echo id");
 
     // Second request on same process — proves persistent loop.
     writeln!(stdin, r#"{{"id":2,"method":"ping"}}"#).unwrap();
@@ -156,7 +149,11 @@ fn set_cache_limits_errors_when_params_missing() {
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
-    writeln!(stdin, r#"{{"id":1,"method":"set_cache_limits","params":{{}}}}"#).unwrap();
+    writeln!(
+        stdin,
+        r#"{{"id":1,"method":"set_cache_limits","params":{{}}}}"#
+    )
+    .unwrap();
     stdin.flush().unwrap();
 
     let mut response = String::new();
@@ -288,7 +285,10 @@ fn test_github_token_empty_returns_error() {
         response.contains(r#""error""#),
         "empty token should error: {response}"
     );
-    assert!(response.contains("empty"), "error should mention 'empty': {response}");
+    assert!(
+        response.contains("empty"),
+        "error should mention 'empty': {response}"
+    );
     drop(stdin);
     let _ = child.wait();
 }
@@ -352,7 +352,10 @@ fn config_read_returns_content_and_hash() {
     reader.read_line(&mut response).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
     assert!(
-        parsed["result"]["content"].as_str().unwrap().contains("github_token"),
+        parsed["result"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("github_token"),
         "expected content to contain github_token: {response}"
     );
     assert!(
@@ -360,7 +363,10 @@ fn config_read_returns_content_and_hash() {
         "snapshot_hash must be a string: {response}"
     );
     assert!(
-        !parsed["result"]["snapshot_hash"].as_str().unwrap().is_empty(),
+        !parsed["result"]["snapshot_hash"]
+            .as_str()
+            .unwrap()
+            .is_empty(),
         "snapshot_hash must not be empty: {response}"
     );
     assert!(
@@ -544,10 +550,7 @@ fn config_set_value_updates_single_key() {
     stdin.flush().unwrap();
     let mut response = String::new();
     reader.read_line(&mut response).unwrap();
-    assert!(
-        response.contains(r#""ok":true"#),
-        "expected ok: {response}"
-    );
+    assert!(response.contains(r#""ok":true"#), "expected ok: {response}");
 
     drop(stdin);
     let _ = child.wait();
@@ -610,7 +613,10 @@ fn helper_persistent_session_across_multiple_requests() {
         "cache_breakdown errored — is daemon running? {line}"
     );
     let result = &parsed["result"];
-    assert!(result["blob_bytes"].is_u64(), "missing blob_bytes: {result}");
+    assert!(
+        result["blob_bytes"].is_u64(),
+        "missing blob_bytes: {result}"
+    );
     assert!(result["blob_count"].is_u64());
     assert!(result["tree_bytes"].is_u64());
     assert!(result["tree_count"].is_u64());

@@ -115,6 +115,10 @@ mod tests {
         let token = AuthToken::generate();
         let vec = token.bytes_vec();
         assert_eq!(vec.len(), 32, "bytes_vec must return 32 bytes");
-        assert_eq!(vec.as_slice(), &token.bytes, "bytes_vec must equal raw bytes");
+        assert_eq!(
+            vec.as_slice(),
+            &token.bytes,
+            "bytes_vec must equal raw bytes"
+        );
     }
 }

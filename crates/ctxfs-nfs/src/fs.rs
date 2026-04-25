@@ -149,12 +149,20 @@ impl NFSFileSystem for CtxfsNfs {
 
     async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
         let name = std::str::from_utf8(filename.as_ref()).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
-        let (id, _attr) = self.vfs.lookup(dirid, name).await.map_err(|ref e| vfs_err_to_nfs(e))?;
+        let (id, _attr) = self
+            .vfs
+            .lookup(dirid, name)
+            .await
+            .map_err(|ref e| vfs_err_to_nfs(e))?;
         Ok(id)
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
-        let attr = self.vfs.getattr(id).await.map_err(|ref e| vfs_err_to_nfs(e))?;
+        let attr = self
+            .vfs
+            .getattr(id)
+            .await
+            .map_err(|ref e| vfs_err_to_nfs(e))?;
         Ok(attr_to_fattr3(&attr))
     }
 
@@ -164,8 +172,16 @@ impl NFSFileSystem for CtxfsNfs {
         offset: u64,
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let attr = self.vfs.getattr(id).await.map_err(|ref e| vfs_err_to_nfs(e))?;
-        let data = self.vfs.read(id, offset, count).await.map_err(|ref e| vfs_err_to_nfs(e))?;
+        let attr = self
+            .vfs
+            .getattr(id)
+            .await
+            .map_err(|ref e| vfs_err_to_nfs(e))?;
+        let data = self
+            .vfs
+            .read(id, offset, count)
+            .await
+            .map_err(|ref e| vfs_err_to_nfs(e))?;
         let eof = (offset + data.len() as u64) >= attr.size;
         Ok((data, eof))
     }
@@ -176,7 +192,11 @@ impl NFSFileSystem for CtxfsNfs {
         start_after: fileid3,
         max_entries: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
-        let children = self.vfs.readdir(dirid).await.map_err(|ref e| vfs_err_to_nfs(e))?;
+        let children = self
+            .vfs
+            .readdir(dirid)
+            .await
+            .map_err(|ref e| vfs_err_to_nfs(e))?;
 
         let mut entries: Vec<NfsDirEntry> = Vec::new();
         let mut started = start_after == 0;
@@ -191,7 +211,11 @@ impl NFSFileSystem for CtxfsNfs {
             if entries.len() >= max_entries {
                 break;
             }
-            let attr = self.vfs.getattr(*child_id).await.map_err(|ref e| vfs_err_to_nfs(e))?;
+            let attr = self
+                .vfs
+                .getattr(*child_id)
+                .await
+                .map_err(|ref e| vfs_err_to_nfs(e))?;
             entries.push(NfsDirEntry {
                 fileid: *child_id,
                 name: filename3::from(name.as_bytes().to_vec()),
@@ -209,7 +233,11 @@ impl NFSFileSystem for CtxfsNfs {
     }
 
     async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3> {
-        let target = self.vfs.readlink(id).await.map_err(|ref e| vfs_err_to_nfs(e))?;
+        let target = self
+            .vfs
+            .readlink(id)
+            .await
+            .map_err(|ref e| vfs_err_to_nfs(e))?;
         Ok(nfspath3::from(target.into_bytes()))
     }
 

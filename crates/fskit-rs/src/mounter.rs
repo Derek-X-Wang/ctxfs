@@ -42,11 +42,7 @@ impl Mounter {
         // Build the argument list for `mount`. Extra task_options are forwarded
         // as `-o key=value` pairs so fskitd passes them to the appex as
         // FSTaskOptions (equivalent to argv).
-        let mut args: Vec<String> = vec![
-            "-F".into(),
-            "-t".into(),
-            fs_type.into(),
-        ];
+        let mut args: Vec<String> = vec!["-F".into(), "-t".into(), fs_type.into()];
         for opt in &opts.task_options {
             args.push("-o".into());
             args.push(opt.clone());

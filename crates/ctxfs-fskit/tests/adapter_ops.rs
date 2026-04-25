@@ -36,10 +36,7 @@ impl ctxfs_core::provider::Provider for MockProvider {
             .cloned()
             .ok_or_else(|| ctxfs_core::error::CtxfsError::NotFound(digest.hex.clone()))
     }
-    async fn fetch_blob(
-        &self,
-        digest: &Digest,
-    ) -> Result<Vec<u8>, ctxfs_core::error::CtxfsError> {
+    async fn fetch_blob(&self, digest: &Digest) -> Result<Vec<u8>, ctxfs_core::error::CtxfsError> {
         self.blobs
             .get(&digest.hex)
             .cloned()
@@ -88,8 +85,14 @@ async fn build_adapter() -> FilesystemAdapter {
     };
 
     let mut directories = std::collections::HashMap::new();
-    directories.insert(root_dir.digest.hex.clone(), serde_json::to_vec(&root_dir).unwrap());
-    directories.insert(src_dir.digest.hex.clone(), serde_json::to_vec(&src_dir).unwrap());
+    directories.insert(
+        root_dir.digest.hex.clone(),
+        serde_json::to_vec(&root_dir).unwrap(),
+    );
+    directories.insert(
+        src_dir.digest.hex.clone(),
+        serde_json::to_vec(&src_dir).unwrap(),
+    );
     let mut blobs = std::collections::HashMap::new();
     blobs.insert(readme_digest.hex.clone(), readme_content);
     blobs.insert(main_rs_digest.hex.clone(), main_rs_content);
@@ -104,7 +107,11 @@ async fn build_adapter() -> FilesystemAdapter {
 
     let tmp = tempfile::tempdir().unwrap();
     let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf(), 64 * 1024 * 1024).unwrap());
-    let vfs = Arc::new(VfsState::new(provider, cache, snapshot, None).await.unwrap());
+    let vfs = Arc::new(
+        VfsState::new(provider, cache, snapshot, None)
+            .await
+            .unwrap(),
+    );
     FilesystemAdapter::new(vfs, "test-vol".into(), "Test Vol".into())
 }
 
@@ -120,12 +127,15 @@ async fn activate_returns_root_at_fskit_id_2() {
 #[tokio::test]
 async fn lookup_child_from_root() {
     let mut adapter = build_adapter().await;
-    let item = adapter.lookup_item(OsStr::new("README.md"), 2).await.unwrap();
+    let item = adapter
+        .lookup_item(OsStr::new("README.md"), 2)
+        .await
+        .unwrap();
     let attrs = item.attributes.unwrap();
     assert_eq!(attrs.r#type, Some(ItemType::File as i32));
     assert_eq!(attrs.size, Some(8));
-    assert_eq!(attrs.parent_id, Some(2));  // README's parent is root
-    assert_eq!(attrs.file_id, Some(3));    // VFS id 2 → FSKit id 3
+    assert_eq!(attrs.parent_id, Some(2)); // README's parent is root
+    assert_eq!(attrs.file_id, Some(3)); // VFS id 2 → FSKit id 3
 }
 
 #[tokio::test]
@@ -162,7 +172,10 @@ async fn enumerate_returns_real_sizes() {
 #[tokio::test]
 async fn lookup_missing_returns_enoent() {
     let mut adapter = build_adapter().await;
-    let err = adapter.lookup_item(OsStr::new("nope"), 2).await.unwrap_err();
+    let err = adapter
+        .lookup_item(OsStr::new("nope"), 2)
+        .await
+        .unwrap_err();
     match err {
         fskit_rs::Error::Posix(e) => assert_eq!(e, libc::ENOENT),
     }
@@ -171,7 +184,10 @@ async fn lookup_missing_returns_enoent() {
 #[tokio::test]
 async fn read_file_contents() {
     let mut adapter = build_adapter().await;
-    let readme = adapter.lookup_item(OsStr::new("README.md"), 2).await.unwrap();
+    let readme = adapter
+        .lookup_item(OsStr::new("README.md"), 2)
+        .await
+        .unwrap();
     let file_id = readme.attributes.unwrap().file_id.unwrap();
     let bytes = adapter.read(file_id, 0, 1024).await.unwrap();
     assert_eq!(bytes, b"# Hello\n");

@@ -160,10 +160,7 @@ mod tests {
     fn handles_different_cellar_version_strings() {
         for version in ["0.1.0", "1.2.3", "0.1.0-beta.1", "HEAD-abc1234"] {
             let p = format!("/opt/homebrew/Cellar/contextfs/{version}/bin/ctxfs");
-            let decision = classify(
-                Path::new(&p),
-                Path::new("/opt/homebrew"),
-            );
+            let decision = classify(Path::new(&p), Path::new("/opt/homebrew"));
             assert_eq!(
                 decision,
                 Decision::RefuseHomebrewFormula,

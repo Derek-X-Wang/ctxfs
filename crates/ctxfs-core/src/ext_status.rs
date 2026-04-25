@@ -82,5 +82,9 @@ fn parse_version_from_raw(raw: &str) -> Option<String> {
     let start = raw.find(key)? + key.len();
     let end = start + raw[start..].find('"')?;
     let v = &raw[start..end];
-    if v.is_empty() { None } else { Some(v.to_string()) }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
 }

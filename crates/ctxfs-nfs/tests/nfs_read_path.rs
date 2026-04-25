@@ -44,7 +44,9 @@ async fn build_fs_for(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, temp
     let snapshot_bytes = provider.fetch_snapshot(&source).await.unwrap();
     let snapshot: Snapshot = serde_json::from_slice(&snapshot_bytes).unwrap();
 
-    let vfs = VfsState::new(provider, cache, snapshot, None).await.unwrap();
+    let vfs = VfsState::new(provider, cache, snapshot, None)
+        .await
+        .unwrap();
     let fs = CtxfsNfs::new(Arc::new(vfs), source);
     (fs, tempdir)
 }

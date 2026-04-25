@@ -22,19 +22,13 @@ pub async fn validate_github_token(token: &str) -> Result<TokenInfo, String> {
     let rate_limit_fut = client
         .get("https://api.github.com/rate_limit")
         .header("Authorization", format!("Bearer {token}"))
-        .header(
-            "User-Agent",
-            concat!("ctxfs/", env!("CARGO_PKG_VERSION")),
-        )
+        .header("User-Agent", concat!("ctxfs/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .send();
     let user_fut = client
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {token}"))
-        .header(
-            "User-Agent",
-            concat!("ctxfs/", env!("CARGO_PKG_VERSION")),
-        )
+        .header("User-Agent", concat!("ctxfs/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .send();
 

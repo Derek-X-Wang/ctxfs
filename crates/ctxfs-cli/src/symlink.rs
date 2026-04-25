@@ -133,7 +133,10 @@ mod tests {
         let regular = dir.path().join("regular.txt");
         std::fs::write(&regular, b"data").unwrap();
         let resolved = resolve_ctxfs_path(&regular);
-        assert_eq!(resolved, regular, "non-symlink path must be returned unchanged");
+        assert_eq!(
+            resolved, regular,
+            "non-symlink path must be returned unchanged"
+        );
     }
 
     #[test]

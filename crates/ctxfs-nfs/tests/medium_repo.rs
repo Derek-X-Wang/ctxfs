@@ -38,7 +38,9 @@ async fn build_fs(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, tempfile
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
     let snap_bytes = provider.fetch_snapshot(&source).await.unwrap();
     let snapshot: Snapshot = serde_json::from_slice(&snap_bytes).unwrap();
-    let vfs = VfsState::new(provider, cache, snapshot, None).await.unwrap();
+    let vfs = VfsState::new(provider, cache, snapshot, None)
+        .await
+        .unwrap();
     (CtxfsNfs::new(Arc::new(vfs), source), dir)
 }
 

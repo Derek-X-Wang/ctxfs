@@ -144,7 +144,11 @@ impl VfsState {
         // Populate directory and retry.
         let _ = self.ensure_populated(parent).await?;
 
-        let id = self.dir_cache.get(&cache_key).map(|r| *r).ok_or(VfsError::NotFound)?;
+        let id = self
+            .dir_cache
+            .get(&cache_key)
+            .map(|r| *r)
+            .ok_or(VfsError::NotFound)?;
         let node = self.nodes.get(&id).ok_or(VfsError::NotFound)?;
         Ok((id, Self::node_to_attr(&node)))
     }
@@ -288,7 +292,10 @@ impl VfsState {
         // Fast path: already populated.
         {
             let node = self.nodes.get(&dirid).ok_or(VfsError::NotFound)?;
-            if let NodeKind::Directory { populated: true, .. } = &node.kind {
+            if let NodeKind::Directory {
+                populated: true, ..
+            } = &node.kind
+            {
                 drop(node);
                 if let Some(children) = self.dir_children.get(&dirid) {
                     return Ok(children.clone());
@@ -363,13 +370,20 @@ impl VfsState {
 
         // Mark populated and store child list.
         if let Some(mut node_ref) = self.nodes.get_mut(&dirid) {
-            if let NodeKind::Directory { ref mut populated, .. } = node_ref.kind {
+            if let NodeKind::Directory {
+                ref mut populated, ..
+            } = node_ref.kind
+            {
                 *populated = true;
             }
         }
         let _ = self.dir_children.insert(dirid, child_ids.clone());
 
-        debug!("populated directory {} with {} children", dirid, child_ids.len());
+        debug!(
+            "populated directory {} with {} children",
+            dirid,
+            child_ids.len()
+        );
         Ok(child_ids)
     }
 
@@ -381,7 +395,11 @@ impl VfsState {
             ..
         } = &node.kind
         {
-            debug!("inline content for file id={} ({} bytes)", node.id, content.len());
+            debug!(
+                "inline content for file id={} ({} bytes)",
+                node.id,
+                content.len()
+            );
             let _ = digest;
             return Ok(content.clone());
         }

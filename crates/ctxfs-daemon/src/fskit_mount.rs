@@ -73,8 +73,8 @@ pub async fn start_fskit_mount(
     // daemon can spawn a watcher task for Finder-eject cleanup.
     let (unmount_tx, unmount_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-    let adapter = FilesystemAdapter::new(vfs, slug.clone(), display)
-        .with_unmount_notifier(unmount_tx);
+    let adapter =
+        FilesystemAdapter::new(vfs, slug.clone(), display).with_unmount_notifier(unmount_tx);
 
     let opts = MountOptions {
         fskit_id: bundle_id.to_string(),

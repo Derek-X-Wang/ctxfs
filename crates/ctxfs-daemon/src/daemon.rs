@@ -42,10 +42,7 @@ impl FsKitHandle {
 
     /// Attach the receiver side of the unmount-notification channel.
     #[must_use]
-    pub fn with_unmount_rx(
-        mut self,
-        rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-    ) -> Self {
+    pub fn with_unmount_rx(mut self, rx: tokio::sync::mpsc::UnboundedReceiver<()>) -> Self {
         self.unmount_rx = Some(rx);
         self
     }
@@ -282,9 +279,10 @@ impl Daemon {
 
         // Clear mounts.json — we've shut down cleanly.
         let state_file = crate::mount_state::MountStateFile::new(
-            self.config.pid_file.parent().unwrap_or_else(|| {
-                std::path::Path::new("/tmp")
-            }),
+            self.config
+                .pid_file
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/tmp")),
         );
         if let Err(e) = state_file.clear() {
             warn!("failed to clear mount state: {e}");
@@ -298,9 +296,10 @@ impl Daemon {
 
     fn cleanup_stale_mounts(&self) {
         let state_file = crate::mount_state::MountStateFile::new(
-            self.config.pid_file.parent().unwrap_or_else(|| {
-                std::path::Path::new("/tmp")
-            }),
+            self.config
+                .pid_file
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/tmp")),
         );
         let entries = state_file.read();
         if entries.is_empty() {
@@ -495,16 +494,10 @@ impl DaemonServer {
     /// to run `mount_nfs`. `mount_point` is the user's *logical* path
     /// (a symlink managed by the CLI); the real volume lives under
     /// `/Volumes/ctxfs/<slug>`.
-    fn do_mount_fskit(
-        &self,
-        source_str: &str,
-        mount_point: &str,
-    ) -> Result<MountInfo, String> {
-        let bundle_id = self
-            .config
-            .fskit_bundle_id
-            .clone()
-            .ok_or_else(|| "CTXFS_FSKIT_BUNDLE_ID not set — cannot start FSKit mount".to_string())?;
+    fn do_mount_fskit(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+        let bundle_id = self.config.fskit_bundle_id.clone().ok_or_else(|| {
+            "CTXFS_FSKIT_BUNDLE_ID not set — cannot start FSKit mount".to_string()
+        })?;
 
         let prep = self.prepare_mount(source_str)?;
 
@@ -908,10 +901,8 @@ mod tests {
             base.join("trees"),
             64 * 1024 * 1024,
         ));
-        let resolution_cache = ctxfs_cache::ResolutionCache::load(
-            base.join("resolutions.json"),
-            3600,
-        );
+        let resolution_cache =
+            ctxfs_cache::ResolutionCache::load(base.join("resolutions.json"), 3600);
         let config = ctxfs_core::config::Config {
             pid_file: base.join("ctxfs.pid"),
             cache_dir: base.join("cache"),
@@ -1022,7 +1013,11 @@ mod tests {
 
         assert!(bd.blob_bytes > 0, "blob_bytes must be positive after a put");
         assert_eq!(bd.blob_count, 1, "blob_count must be 1");
-        assert_eq!(bd.max_bytes, 64 * 1024 * 1024, "max_bytes must match config");
+        assert_eq!(
+            bd.max_bytes,
+            64 * 1024 * 1024,
+            "max_bytes must match config"
+        );
         // tree and resolution counts are 0 in a fresh cache — just ensure no panic.
         let _ = bd.tree_bytes;
         let _ = bd.tree_count;
@@ -1157,8 +1152,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let cache = Arc::new(
-            ctxfs_cache::BlobCache::new(tmp.path().join("cache"), 1024 * 1024)
-                .expect("BlobCache"),
+            ctxfs_cache::BlobCache::new(tmp.path().join("cache"), 1024 * 1024).expect("BlobCache"),
         );
 
         let provider: SharedProvider = Arc::new(NullProvider);
@@ -1167,8 +1161,7 @@ mod tests {
             commit_sha: "test".to_string(),
             root_directory: ctxfs_core::Digest {
                 algorithm: ctxfs_core::digest::HashAlgorithm::Sha256,
-                hex: "0000000000000000000000000000000000000000000000000000000000000000"
-                    .to_string(),
+                hex: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             },
             created_at: "2025-01-01T00:00:00Z".to_string(),
         };

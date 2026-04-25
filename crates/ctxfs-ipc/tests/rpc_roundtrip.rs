@@ -96,10 +96,7 @@ impl CtxfsService for MockServer {
         })
     }
 
-    async fn cache_breakdown(
-        self,
-        _: tarpc::context::Context,
-    ) -> Result<CacheBreakdown, String> {
+    async fn cache_breakdown(self, _: tarpc::context::Context) -> Result<CacheBreakdown, String> {
         Ok(CacheBreakdown {
             blob_bytes: 1024,
             blob_count: 5,
