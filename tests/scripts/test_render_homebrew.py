@@ -27,12 +27,17 @@ class RenderCaskTests(unittest.TestCase):
             out,
         )
 
-    def test_emits_conflicts_and_zap(self):
+    def test_omits_cask_conflicts_with_and_emits_zap(self):
+        # Homebrew Cask only accepts `conflicts_with cask:`, not `:formula`.
+        # The reciprocal declaration lives on the formula side — neither form
+        # of `conflicts_with` should appear as an actual stanza in the cask.
+        # Match the keyword followed by space + `cask:` or `formula:` so a
+        # comment that mentions the keyword doesn't trigger a false positive.
         out = render_homebrew.render_cask(
             version="0.1.0", tag="v0.1.0",
             repo_slug="Derek-X-Wang/ctxfs", dmg_sha=VALID_SHA,
         )
-        self.assertIn('conflicts_with formula: "contextfs"', out)
+        self.assertNotRegex(out, r"^\s*conflicts_with\s+(cask|formula):")
         self.assertIn("zap trash:", out)
         self.assertIn('"~/.ctxfs"', out)
 

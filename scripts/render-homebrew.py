@@ -26,7 +26,11 @@ CASK_TEMPLATE = textwrap.dedent("""\
       app "ContextFS.app"
       binary "#{{appdir}}/ContextFS.app/Contents/MacOS/ctxfs"
 
-      conflicts_with formula: "contextfs"
+      # No conflicts_with stanza on the cask: Homebrew Cask only accepts
+      # `conflicts_with cask:`, not `formula:`. The reciprocal declaration
+      # on Formula/contextfs.rb (`conflicts_with cask: "contextfs"`) is
+      # sufficient — brew refuses to install the formula when this cask
+      # is present.
 
       zap trash: [
         "~/.ctxfs",
