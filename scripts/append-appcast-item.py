@@ -66,7 +66,13 @@ def append_item_to_appcast(
 ) -> None:
     """Parse the existing appcast.xml, prepend `item` to its first <channel>,
     and write the result back. Raises if the file doesn't match the
-    expected RSS+Sparkle shape."""
+    expected RSS+Sparkle shape.
+
+    Idempotent: if an item with the same sparkle:shortVersionString already
+    exists in the channel, the call is a no-op. publish-metadata.yml may run
+    twice for the same release (workflow_dispatch retry, accidental re-publish);
+    duplicates would otherwise show up to Sparkle as two updates with identical
+    versions and confuse users."""
     tree = ET.parse(appcast_path)
     root = tree.getroot()
     if root.tag != "rss":
@@ -75,6 +81,15 @@ def append_item_to_appcast(
     channel = root.find("channel")
     if channel is None:
         raise ValueError("<channel> not found in appcast.xml")
+
+    new_short = item.findtext(f"{{{SPARKLE_NS}}}shortVersionString")
+    for existing in channel.findall("item"):
+        existing_short = existing.findtext(f"{{{SPARKLE_NS}}}shortVersionString")
+        if existing_short == new_short:
+            print(
+                f"skip: appcast already has an item with sparkle:shortVersionString={new_short!r}"
+            )
+            return
 
     # Find the first existing <item> (if any) — we want to insert before it,
     # so newest-first ordering is preserved. If none exist, append to channel.
