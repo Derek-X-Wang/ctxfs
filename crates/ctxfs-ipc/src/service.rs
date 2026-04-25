@@ -1,6 +1,8 @@
 use ctxfs_core::backend::Backend;
 use serde::{Deserialize, Serialize};
 
+pub use ctxfs_provider_common::status::StatusReportV1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MountStatus {
     Mounting,
@@ -89,6 +91,9 @@ pub trait CtxfsService {
     /// Prune blob cache only until usage fits within `target_bytes`.
     /// Returns bytes freed.
     async fn prune_blobs(target_bytes: u64) -> Result<u64, String>;
+    /// Returns global observability state: rate-limit budgets, per-mount
+    /// counters, and top-N mount summary. Used by `ctxfs status` (no-arg).
+    async fn get_status() -> Result<StatusReportV1, String>;
     async fn ping() -> String;
 }
 

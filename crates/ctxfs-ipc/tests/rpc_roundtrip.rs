@@ -4,7 +4,9 @@
 //! Spins up a real tarpc server implementing `CtxfsService`, connects a client,
 //! and verifies all RPC methods work end-to-end through the actual transport layer.
 
-use ctxfs_ipc::service::{CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountStatus};
+use ctxfs_ipc::service::{
+    CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountStatus, StatusReportV1,
+};
 use ctxfs_ipc::transport;
 use futures::StreamExt;
 use std::sync::Arc;
@@ -126,6 +128,10 @@ impl CtxfsService for MockServer {
         _target_bytes: u64,
     ) -> Result<u64, String> {
         Ok(512)
+    }
+
+    async fn get_status(self, _: tarpc::context::Context) -> Result<StatusReportV1, String> {
+        Err("not implemented in mock".into())
     }
 
     async fn ping(self, _: tarpc::context::Context) -> String {
