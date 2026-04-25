@@ -111,7 +111,8 @@ jobs:
             --ed-signature "${{ steps.meta.outputs.ed_sig }}" \
             --length "${{ steps.meta.outputs.zip_len }}" \
             --description-file /tmp/release-body.md
-          xmllint --noout gh-pages/appcast.xml
+          # Validate via stdlib xml.etree — xmllint isn't on ubuntu-latest by default.
+          python3 -c "import xml.etree.ElementTree as ET; ET.parse('gh-pages/appcast.xml')"
 
       - name: Commit + push gh-pages
         run: |
