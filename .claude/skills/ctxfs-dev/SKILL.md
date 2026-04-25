@@ -71,7 +71,7 @@ cargo build --release
 ln -sf "$(pwd)/target/release/ctxfs" ~/.local/bin/ctxfs-dev
 ```
 
-This gives you `ctxfs-dev` on PATH, pointing at your local release build. After every `cargo build --release`, the symlink picks up the new binary automatically. Use `ctxfs-dev` (not `ctxfs`) during development to distinguish from any installed release version.
+This gives you `ctxfs-dev` on PATH, pointing at your local release build. After every `cargo build --release`, the symlink picks up the new binary automatically. Use `ctxfs-dev` (not `ctxfs`) during development to distinguish from the Homebrew-installed release.
 
 **macOS first-time setup** (also needed for dev testing mounts):
 ```bash
@@ -80,6 +80,43 @@ ctxfs-dev setup install                   # passwordless sudo for NFS mounts
 open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
 # Restart your terminal after granting.
 ```
+
+## Coexistence with the Homebrew install
+
+As of v0.1.0, ContextFS ships via `brew install --cask Derek-X-Wang/ctxfs/contextfs`. That installs the bundled CLI at `/opt/homebrew/bin/ctxfs` (and the menu-bar app at `/Applications/ContextFS.app`). Same binary code as a release build of this repo — just compiled by CI rather than locally.
+
+**Both can be installed at the same time without conflict** because:
+- The binaries live at different paths (`/opt/homebrew/bin/ctxfs` vs `~/.local/bin/ctxfs-dev`).
+- The symlink name `ctxfs-dev` doesn't shadow `ctxfs` on PATH.
+- Use `ctxfs` to invoke the shipped version, `ctxfs-dev` to invoke your local build.
+
+**However, they share the same daemon** by default — both defaults resolve to socket `~/.ctxfs/ctxfs.sock` and cache `~/.ctxfs/cache`. Only one daemon process can hold the socket at a time, so when you switch which version to iterate on:
+
+```bash
+# 1. Stop whichever daemon is running (works regardless of which binary spawned it)
+ctxfs daemon stop          # OR  ctxfs-dev daemon stop
+
+# 2. Start the version you want to iterate on
+ctxfs-dev daemon start &   # dev build, foreground
+# ...iterate, edit, cargo build --release, restart...
+
+# 3. When done, restart the brew daemon so the menu-bar app keeps working
+ctxfs daemon stop          # stop dev daemon
+ctxfs daemon start &       # back to shipped binary
+```
+
+**For full isolation** (run dev + brew daemons simultaneously), namespace the dev daemon's state with env vars:
+
+```bash
+export CTXFS_SOCKET=$HOME/.ctxfs-dev/ctxfs.sock
+export CTXFS_CACHE_DIR=$HOME/.ctxfs-dev/cache
+export CTXFS_PID_FILE=$HOME/.ctxfs-dev/ctxfs.pid
+ctxfs-dev daemon start &   # uses isolated socket+cache+pid
+```
+
+In that case `ctxfs-dev <subcommand>` will only see dev's mounts (because the CLI reads `CTXFS_SOCKET` from env), and `ctxfs <subcommand>` (without those env vars) sees the brew daemon's mounts. **Caveat**: the menu-bar app (`ContextFS.app`) hard-codes the brew defaults; it won't see the env-var-namespaced dev daemon. Use this isolation mode only when you're testing CLI/daemon behavior and don't need the GUI.
+
+The "stop one, start the other" pattern is simpler and matches the project's solo-dev reality — prefer it unless you specifically need both running.
 
 ## Build, Test, Lint
 
@@ -196,6 +233,8 @@ Mount test output under the project directory (e.g., `./test-mnt/`) rather than 
 **"My integration test gets rate-limited"** — Set `GITHUB_TOKEN` in your shell, or mark the test `#[ignore]`. Never commit real API keys.
 
 **"Daemon won't stop"** — Stale PID file at `~/.ctxfs/ctxfs.pid`. Delete it. The daemon startup checks for live processes via signal 0 and skips stale files, but if something went wrong you may have to clean up manually.
+
+**"Two daemons fight over the socket"** — A common slip after installing v0.1.0 via brew: the menu-bar app auto-starts a daemon at login, and your `ctxfs-dev daemon start` then errors with "address already in use" or silently re-uses the brew daemon. Run `ctxfs daemon stop` first (or namespace via `CTXFS_SOCKET`; see Coexistence with the Homebrew install above).
 
 **"Mount succeeds but files look empty"** — NFS cache timing. If it persists across retries, check the daemon log for fetch errors. Blob cache at `~/.ctxfs/cache/sha256/...` should have the data.
 
