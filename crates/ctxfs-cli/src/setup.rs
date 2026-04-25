@@ -190,6 +190,7 @@ pub fn uninstall_sudoers() -> Result<()> {
 ///
 /// Shells out to `sw_vers -productVersion` and checks the major version number.
 /// Returns false on any error or on non-macOS platforms.
+#[allow(dead_code)] // macOS-only call sites; clippy on Linux CI doesn't see them
 pub fn is_macos_26_or_later() -> bool {
     #[cfg(not(target_os = "macos"))]
     return false;
