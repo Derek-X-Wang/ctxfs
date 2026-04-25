@@ -5,5 +5,6 @@
 pub mod daemon;
 pub mod fskit_mount;
 pub mod mount_state;
+pub mod observability;
 
 pub use daemon::Daemon;
