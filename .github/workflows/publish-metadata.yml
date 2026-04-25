@@ -137,6 +137,10 @@ jobs:
           cd /tmp/homebrew-ctxfs
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # gh clone uses HTTPS without embedding credentials in the remote URL,
+          # so subsequent git push falls back to interactive auth and fails on
+          # the runner. Rewrite origin to include the PAT so push works.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git"
 
       - name: Render + stage cask + formula
         id: tap_bump
