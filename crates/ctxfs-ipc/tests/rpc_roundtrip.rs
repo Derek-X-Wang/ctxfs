@@ -131,7 +131,12 @@ impl CtxfsService for MockServer {
     }
 
     async fn get_status(self, _: tarpc::context::Context) -> Result<StatusReportV1, String> {
-        Err("not implemented in mock".into())
+        Ok(StatusReportV1 {
+            schema_version: 1,
+            budgets: vec![],
+            counters: vec![],
+            mounts: vec![],
+        })
     }
 
     async fn ping(self, _: tarpc::context::Context) -> String {
@@ -327,6 +332,28 @@ async fn multiple_mounts() {
     let mounts = client.list(tarpc::context::current()).await.unwrap();
     assert_eq!(mounts.len(), 1);
     assert_eq!(mounts[0].mount_point, "/mnt/2");
+}
+
+#[tokio::test]
+async fn get_status_roundtrips_through_uds() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("get_status.sock");
+
+    let _server = start_server(&socket).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = transport::connect_client(&socket).await.unwrap();
+
+    let report = client
+        .get_status(tarpc::context::current())
+        .await
+        .expect("transport ok")
+        .expect("server returned Ok");
+
+    assert_eq!(report.schema_version, 1);
+    assert!(report.budgets.is_empty());
+    assert!(report.counters.is_empty());
+    assert!(report.mounts.is_empty());
 }
 
 #[tokio::test]
