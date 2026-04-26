@@ -37,14 +37,47 @@ pub async fn fetch_registry_json(
         .map_err(|e| CtxfsError::Provider(format!("{registry_name} request failed: {e}")))?;
 
     let status = resp.status();
+    let headers: std::collections::HashMap<String, String> = resp
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+        })
+        .collect();
+
+    tracing::debug!(
+        target: "ctxfs.provider.fetch",
+        registry = registry_name,
+        url = url,
+        status = status.as_u16(),
+        ratelimit_remaining = headers.get("x-ratelimit-remaining").map_or("?", String::as_str),
+        "registry fetch completed"
+    );
+
+    let verdict = crate::rate_limit::ThrottleClassifier::classify(status.as_u16(), &headers);
+    if let crate::rate_limit::RateLimitVerdict::SecondaryThrottle {
+        retry_after,
+        ref resource,
+    } = verdict
+    {
+        let resource_str = format!("{resource:?}");
+        tracing::warn!(
+            target: "ctxfs.provider.throttle",
+            registry = registry_name,
+            resource = resource_str.as_str(),
+            retry_after_secs = retry_after.as_secs(),
+            "secondary throttle detected"
+        );
+    }
+
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(CtxfsError::NotFound(not_found_label.to_string()));
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let retry_after = resp
-            .headers()
+        let retry_after = headers
             .get("retry-after")
-            .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_RETRY_AFTER_SECS);
         return Err(CtxfsError::RateLimited {
