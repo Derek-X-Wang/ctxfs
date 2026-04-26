@@ -441,10 +441,48 @@ impl GitHubProvider {
         (sha, result)
     }
 
-    /// Build directory tree from flat GitHub tree entries.
+    /// Build directory tree from flat GitHub tree entries (no inline content).
+    ///
+    /// Backward-compat wrapper for callers that don't have a prefetched-blob
+    /// map. `FileEntry::inline_content` is left `None` and `SymlinkEntry::target`
+    /// is left empty; the read path will fetch lazily.
     pub fn build_directories(
         entries: &[TreeEntry],
+        source: &SourceSpec,
+    ) -> (Digest, HashMap<String, Directory>) {
+        Self::build_directories_inner(entries, source, None)
+    }
+
+    /// Like [`Self::build_directories`], but populates `FileEntry::inline_content`
+    /// for blobs ≤ [`Self::SMALL_BLOB_THRESHOLD_BYTES`] whose SHA appears in
+    /// `inline`, and decodes `SymlinkEntry::target` from the same map for
+    /// mode-120000 entries.
+    ///
+    /// Files (B1): the size guard inside `build_directories_inner` prevents a
+    /// misbuilt map from accidentally inlining a >4 KB blob even if the caller
+    /// places larger bytes in the map.
+    ///
+    /// Symlinks (B7): no size guard — symlinks are always small in practice,
+    /// and the prefetch path's strict-on-symlink failure policy ensures the
+    /// map already contains the target before this function runs in production.
+    pub fn build_directories_with_inline(
+        entries: &[TreeEntry],
+        source: &SourceSpec,
+        inline: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> (Digest, HashMap<String, Directory>) {
+        Self::build_directories_inner(entries, source, Some(inline))
+    }
+
+    /// Shared implementation behind [`Self::build_directories`] and
+    /// [`Self::build_directories_with_inline`]. When `inline` is `Some`, file
+    /// entries ≤ [`Self::SMALL_BLOB_THRESHOLD_BYTES`] whose SHA appears in the
+    /// map get `inline_content` populated, and symlink entries decode their
+    /// target from the same map. When `inline` is `None`, behavior matches the
+    /// pre-M2 path: empty target, no inline content.
+    fn build_directories_inner(
+        entries: &[TreeEntry],
         _source: &SourceSpec,
+        inline: Option<&std::collections::HashMap<String, Vec<u8>>>,
     ) -> (Digest, HashMap<String, Directory>) {
         // Group entries by parent path
         let mut dir_children: HashMap<String, Vec<DirEntry>> = HashMap::new();
@@ -469,21 +507,30 @@ impl GitHubProvider {
 
             // Check mode first: symlinks are entry_type "blob" with mode "120000"
             let dir_entry = if entry.mode == MODE_SYMLINK {
-                DirEntry::Symlink(SymlinkEntry {
-                    name,
-                    target: String::new(), // target resolved lazily via blob fetch
-                })
+                let target = inline
+                    .and_then(|m| m.get(&entry.sha))
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .map(String::from)
+                    .unwrap_or_default();
+                DirEntry::Symlink(SymlinkEntry { name, target })
             } else {
                 match entry.entry_type.as_str() {
                     "blob" => {
                         let executable = entry.mode == MODE_EXECUTABLE;
                         let size = entry.size.unwrap_or(0);
+                        // Size guard: only inline if the entry's recorded size
+                        // is ≤ the threshold. Prevents a misbuilt map from
+                        // sneaking a large blob into the manifest.
+                        let inline_content = inline
+                            .filter(|_| size <= Self::SMALL_BLOB_THRESHOLD_BYTES)
+                            .and_then(|m| m.get(&entry.sha))
+                            .cloned();
                         DirEntry::File(FileEntry {
                             name,
                             digest: Digest::from_sha256_hex(&entry.sha),
                             size,
                             executable,
-                            inline_content: None, // filled lazily
+                            inline_content,
                         })
                     }
                     "tree" => DirEntry::Directory(DirectoryEntry {
@@ -660,6 +707,12 @@ fn file_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: produces a stable `SourceSpec` that build_directories tests
+    /// can pass without re-parsing the same string at each call site.
+    fn make_test_source() -> SourceSpec {
+        SourceSpec::parse("github:test/repo@main").unwrap()
+    }
 
     #[test]
     fn test_parent_path() {
@@ -1002,5 +1055,108 @@ mod tests {
         let set = GitHubProvider::symlink_shas(&entries);
         assert_eq!(set.len(), 1);
         assert!(set.contains("lnk1"));
+    }
+
+    #[test]
+    fn build_directories_inlines_small_files_when_map_provided() {
+        let source = make_test_source();
+        let entries = vec![
+            TreeEntry {
+                path: "small.txt".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "abc".into(),
+                size: Some(10),
+            },
+            TreeEntry {
+                path: "big.bin".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "def".into(),
+                size: Some(99_999),
+            },
+        ];
+        let mut inline = std::collections::HashMap::new();
+        let _ = inline.insert("abc".to_string(), b"hello!".to_vec());
+
+        let (_, dirs) = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        let root = dirs.get("").unwrap();
+        let small_entry = root
+            .entries
+            .iter()
+            .find(|e| e.name() == "small.txt")
+            .unwrap();
+        let big_entry = root.entries.iter().find(|e| e.name() == "big.bin").unwrap();
+
+        match small_entry {
+            DirEntry::File(f) => assert_eq!(f.inline_content, Some(b"hello!".to_vec())),
+            _ => panic!("expected file"),
+        }
+        match big_entry {
+            DirEntry::File(f) => assert_eq!(f.inline_content, None),
+            _ => panic!("expected file"),
+        }
+    }
+
+    #[test]
+    fn build_directories_resolves_symlink_target_from_inline_map() {
+        let source = make_test_source();
+        let entries = vec![TreeEntry {
+            path: "link".into(),
+            mode: "120000".into(),
+            entry_type: "blob".into(),
+            sha: "lnk".into(),
+            size: Some(13),
+        }];
+        let mut inline = std::collections::HashMap::new();
+        let _ = inline.insert("lnk".to_string(), b"path/to/target".to_vec());
+
+        let (_, dirs) = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        let root = dirs.get("").unwrap();
+        let link_entry = root.entries.iter().find(|e| e.name() == "link").unwrap();
+        match link_entry {
+            DirEntry::Symlink(s) => assert_eq!(s.target, "path/to/target"),
+            _ => panic!("expected symlink"),
+        }
+    }
+
+    #[test]
+    fn build_directories_without_inline_keeps_target_empty_and_no_inline_content() {
+        // Backward-compat: existing build_directories(...) with no inline map
+        // produces empty target and no inline_content.
+        let source = make_test_source();
+        let entries = vec![
+            TreeEntry {
+                path: "small.txt".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "abc".into(),
+                size: Some(10),
+            },
+            TreeEntry {
+                path: "link".into(),
+                mode: "120000".into(),
+                entry_type: "blob".into(),
+                sha: "lnk".into(),
+                size: Some(13),
+            },
+        ];
+        let (_, dirs) = GitHubProvider::build_directories(&entries, &source);
+        let root = dirs.get("").unwrap();
+        let small_entry = root
+            .entries
+            .iter()
+            .find(|e| e.name() == "small.txt")
+            .unwrap();
+        let link_entry = root.entries.iter().find(|e| e.name() == "link").unwrap();
+
+        match small_entry {
+            DirEntry::File(f) => assert!(f.inline_content.is_none()),
+            _ => panic!("expected file"),
+        }
+        match link_entry {
+            DirEntry::Symlink(s) => assert_eq!(s.target, ""),
+            _ => panic!("expected symlink"),
+        }
     }
 }
