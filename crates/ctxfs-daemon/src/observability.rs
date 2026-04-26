@@ -132,7 +132,7 @@ impl Observability {
 }
 
 /// Produces wire-format string for AuthKind (safe to log, contains no secrets).
-/// Format: "anonymous" | "pat:{8-char-prefix}" | "github_app:{installation_id}"
+/// Format examples: "anonymous", "pat:ghp_xxxxxxxx", "github_app:12345"
 fn auth_kind_string(kind: &AuthKind) -> String {
     match kind {
         AuthKind::Anonymous => "anonymous".to_string(),
@@ -142,7 +142,7 @@ fn auth_kind_string(kind: &AuthKind) -> String {
 }
 
 /// Produces wire-format string for ResourceClass (matches GitHub x-ratelimit-resource header values).
-/// Format: "core" | "search" | "code_search" | "graphql" | "other:{value}"
+/// Format examples: "core", "search", "code_search", "graphql", "other:audit_log"
 fn resource_class_string(rc: &ResourceClass) -> String {
     match rc {
         ResourceClass::Core => "core".to_string(),
@@ -222,5 +222,33 @@ mod tests {
         let r = o.status_report();
         let ratio = r.mounts[0].cache_hit_ratio.unwrap();
         assert!((ratio - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn auth_kind_string_format_is_stable() {
+        assert_eq!(auth_kind_string(&AuthKind::Anonymous), "anonymous");
+        let pat = AuthKind::Pat {
+            token_id_prefix: "ghp_1234".to_string(),
+        };
+        assert_eq!(auth_kind_string(&pat), "pat:ghp_1234");
+        let app = AuthKind::GithubApp {
+            installation_id: 42,
+        };
+        assert_eq!(auth_kind_string(&app), "github_app:42");
+    }
+
+    #[test]
+    fn resource_class_string_format_is_stable() {
+        assert_eq!(resource_class_string(&ResourceClass::Core), "core");
+        assert_eq!(resource_class_string(&ResourceClass::Search), "search");
+        assert_eq!(
+            resource_class_string(&ResourceClass::CodeSearch),
+            "code_search"
+        );
+        assert_eq!(resource_class_string(&ResourceClass::Graphql), "graphql");
+        assert_eq!(
+            resource_class_string(&ResourceClass::Other("audit_log".to_string())),
+            "other:audit_log"
+        );
     }
 }

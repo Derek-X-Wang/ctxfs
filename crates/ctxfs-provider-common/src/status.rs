@@ -18,8 +18,8 @@ pub struct StatusReportV1 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetEntry {
     pub host: String,
-    pub auth_kind: String, // "anonymous" | "pat:<prefix>" | "github_app:<id>"
-    pub resource_class: String, // "core" | "search" | "code_search" | "graphql" | "other:<value>"
+    pub auth_kind: String, // "anonymous" | "pat:ghp_xxxxxxxx" | "github_app:12345"
+    pub resource_class: String, // "core" | "search" | "code_search" | "graphql" | "other:audit_log"
     pub limit: Option<u64>,
     pub remaining: Option<u64>,
     pub reset_at_unix: Option<u64>,
