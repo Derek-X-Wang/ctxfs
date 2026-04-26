@@ -15,6 +15,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 ctxfs-cache = { workspace = true }
 ctxfs-manifest = { workspace = true }
+ctxfs-provider-common = { workspace = true }
 ctxfs-provider-git = { workspace = true }
 ctxfs-vfs = { workspace = true }
 serde_json = { workspace = true }

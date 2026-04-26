@@ -1,11 +1,9 @@
 //! Daemon-owned registry of rate-limit gauges and per-mount counters.
 //! Assembles the StatusReportV1 payload for IPC `get_status`.
 
-use ctxfs_provider_common::counters::{CounterKey, MountCounters};
-use ctxfs_provider_common::rate_limit::{
-    AuthIdentity, AuthKind, RateLimitGauge, ResourceClass, ThrottleState,
-};
-use ctxfs_provider_common::status::{BudgetEntry, CounterEntry, MountSummary, StatusReportV1};
+use crate::counters::{CounterKey, MountCounters};
+use crate::rate_limit::{AuthIdentity, AuthKind, RateLimitGauge, ResourceClass, ThrottleState};
+use crate::status::{BudgetEntry, CounterEntry, MountSummary, StatusReportV1};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;

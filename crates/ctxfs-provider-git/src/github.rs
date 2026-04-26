@@ -6,6 +6,9 @@ use ctxfs_core::provider::Provider;
 use ctxfs_core::source::SourceSpec;
 use ctxfs_core::Digest;
 use ctxfs_manifest::{DirEntry, Directory, DirectoryEntry, FileEntry, Snapshot, SymlinkEntry};
+use ctxfs_provider_common::counters::CounterKey;
+use ctxfs_provider_common::observability::Observability;
+use ctxfs_provider_common::rate_limit::AuthIdentity;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -25,6 +28,18 @@ pub struct GitHubProvider {
     cache: Arc<BlobCache>,
     tree_cache: Option<Arc<TreeCache>>,
     shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
+    // M2.T1 plumbs these; M2.T2 wires them into the rate-limit path.
+    // Allow dead-code so this commit (T1) is independently buildable without
+    // dragging the T2 changes forward.
+    #[allow(dead_code)]
+    observability: Arc<Observability>,
+    #[allow(dead_code)]
+    auth_identity: AuthIdentity,
+    /// Set in `fetch_snapshot` AFTER `resolve_ref`, using the resolved commit SHA
+    /// (not `source.version`). Read by `check_rate_limit` and `fetch_blob` to
+    /// attribute counters to the right `(source, repo, commit, mount_id)` bucket.
+    #[allow(dead_code)]
+    counter_key: std::sync::Mutex<Option<CounterKey>>,
     /// The most-recently-fetched source. `fetch_snapshot` records it so that
     /// subsequent `fetch_blob` calls (which only receive a `Digest`) can locate
     /// the right repo for the GitHub blob API. A provider instance is scoped
@@ -87,7 +102,13 @@ impl GitHubProvider {
         cache: Arc<BlobCache>,
         tree_cache: Option<Arc<TreeCache>>,
         shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
+        observability: Arc<Observability>,
     ) -> Self {
+        let auth_identity = match token {
+            Some(t) => AuthIdentity::pat("api.github.com", t),
+            None => AuthIdentity::anonymous("api.github.com"),
+        };
+
         let mut default_headers = HeaderMap::new();
         let _ = default_headers.insert(ACCEPT, "application/vnd.github.v3+json".parse().unwrap());
         if let Some(token) = token {
@@ -106,6 +127,9 @@ impl GitHubProvider {
             cache,
             tree_cache,
             shared_tree_cache,
+            observability,
+            auth_identity,
+            counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
         }
     }

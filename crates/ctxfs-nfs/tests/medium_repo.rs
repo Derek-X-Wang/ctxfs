@@ -34,6 +34,7 @@ async fn build_fs(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, tempfile
         cache.clone(),
         None,
         None,
+        Arc::new(ctxfs_provider_common::observability::Observability::new()),
     ));
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
     let snap_bytes = provider.fetch_snapshot(&source).await.unwrap();

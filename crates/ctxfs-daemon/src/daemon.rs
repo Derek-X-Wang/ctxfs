@@ -460,6 +460,7 @@ impl DaemonServer {
             self.cache.clone(),
             Some(self.tree_cache.clone()),
             self.shared_tree_cache.clone(),
+            self.observability.clone(),
         ));
 
         let snapshot_data = self
