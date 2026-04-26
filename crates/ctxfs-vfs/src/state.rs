@@ -1,4 +1,5 @@
 use ctxfs_cache::BlobCache;
+use ctxfs_core::error::CtxfsError;
 use ctxfs_core::provider::SharedProvider;
 use ctxfs_core::Digest;
 use ctxfs_manifest::{DirEntry, Directory, Snapshot};
@@ -8,6 +9,20 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::types::{NodeAttr, NodeType, StatFsResult, VfsError};
+
+/// Map a provider error to the corresponding VFS error.
+///
+/// Special-cases [`CtxfsError::RateLimited`] so adapter layers (NFS, FSKit)
+/// can return `NFS3ERR_JUKEBOX` / `EAGAIN` instead of `NFS3ERR_IO` / `EIO`.
+/// This is what makes the M2 "zero EIO under 429" exit criterion verifiable
+/// end-to-end. All other provider errors collapse into [`VfsError::Io`] with
+/// the supplied context prefix.
+fn provider_err_to_vfs(e: CtxfsError, ctx: &str) -> VfsError {
+    match e {
+        CtxfsError::RateLimited { retry_after_secs } => VfsError::RateLimited { retry_after_secs },
+        other => VfsError::Io(format!("{ctx}: {other}")),
+    }
+}
 
 const ROOT_ID: u64 = 1;
 const BLOCK_SIZE: u64 = 4096;
@@ -259,7 +274,7 @@ impl VfsState {
                 .provider
                 .fetch_directory(&current_digest)
                 .await
-                .map_err(|e| VfsError::Io(format!("fetching directory for subpath: {e}")))?;
+                .map_err(|e| provider_err_to_vfs(e, "fetching directory for subpath"))?;
 
             let directory: Directory = serde_json::from_slice(&data)
                 .map_err(|e| VfsError::Io(format!("parsing directory: {e}")))?;
@@ -314,7 +329,7 @@ impl VfsState {
 
         let data = self.provider.fetch_directory(&digest).await.map_err(|e| {
             error!("fetch_directory({}) failed: {}", digest, e);
-            VfsError::Io(format!("fetch_directory: {e}"))
+            provider_err_to_vfs(e, "fetch_directory")
         })?;
 
         let directory: Directory = serde_json::from_slice(&data).map_err(|e| {
@@ -415,7 +430,7 @@ impl VfsState {
 
         let data = self.provider.fetch_blob(&digest).await.map_err(|e| {
             error!("fetch_blob({}) failed: {}", digest, e);
-            VfsError::Io(format!("fetch_blob: {e}"))
+            provider_err_to_vfs(e, "fetch_blob")
         })?;
 
         if let Err(e) = self.cache.put(&digest, &data) {
@@ -491,5 +506,37 @@ mod tests {
         assert_eq!(attr.size, BLOCK_SIZE);
         assert_eq!(attr.kind, NodeType::Directory);
         assert!(!attr.executable);
+    }
+
+    #[test]
+    fn provider_err_to_vfs_rate_limited_preserves_retry_after_secs() {
+        let e = CtxfsError::RateLimited {
+            retry_after_secs: 30,
+        };
+        match provider_err_to_vfs(e, "fetch_blob") {
+            VfsError::RateLimited { retry_after_secs } => assert_eq!(retry_after_secs, 30),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_err_to_vfs_other_collapses_to_io_with_context() {
+        let e = CtxfsError::Provider("nope".into());
+        match provider_err_to_vfs(e, "fetch_blob") {
+            VfsError::Io(s) => {
+                assert!(s.contains("fetch_blob"), "expected ctx prefix in: {s}");
+                assert!(s.contains("nope"), "expected error message in: {s}");
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_err_to_vfs_not_found_collapses_to_io() {
+        let e = CtxfsError::NotFound("blob abc".into());
+        match provider_err_to_vfs(e, "fetch_directory") {
+            VfsError::Io(s) => assert!(s.contains("fetch_directory") && s.contains("blob abc")),
+            other => panic!("expected Io, got {other:?}"),
+        }
     }
 }

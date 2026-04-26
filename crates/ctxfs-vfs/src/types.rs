@@ -40,6 +40,11 @@ pub enum VfsError {
     ReadOnly,
     #[error("I/O error: {0}")]
     Io(String),
+    /// The provider is rate-limited; the read should be retried after
+    /// `retry_after_secs`. Mapped to `NFS3ERR_JUKEBOX` (NFS) / `EAGAIN`
+    /// (FSKit) at adapter boundaries so it does NOT surface as EIO.
+    #[error("rate limited: retry after {retry_after_secs}s")]
+    RateLimited { retry_after_secs: u64 },
 }
 
 #[cfg(test)]
@@ -97,6 +102,17 @@ mod tests {
         assert_eq!(
             VfsError::Io("disk failure".to_string()).to_string(),
             "I/O error: disk failure"
+        );
+    }
+
+    #[test]
+    fn vfs_error_display_rate_limited() {
+        assert_eq!(
+            VfsError::RateLimited {
+                retry_after_secs: 30
+            }
+            .to_string(),
+            "rate limited: retry after 30s"
         );
     }
 

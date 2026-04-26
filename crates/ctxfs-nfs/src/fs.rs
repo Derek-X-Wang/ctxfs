@@ -122,6 +122,12 @@ fn attr_to_fattr3(attr: &NodeAttr) -> fattr3 {
 }
 
 /// Convert a [`VfsError`] to the corresponding NFS3 status code.
+///
+/// `RateLimited` maps to `NFS3ERR_JUKEBOX` (RFC 1813: server busy, retry).
+/// Most NFS clients automatically retry on JUKEBOX, which is the right
+/// behavior for a transient provider rate-limit. We do *not* surface the
+/// `retry_after_secs` to the client — NFSv3 has no such field — but it is
+/// logged when the original VFS error is constructed.
 fn vfs_err_to_nfs(e: &VfsError) -> nfsstat3 {
     match e {
         VfsError::NotFound => nfsstat3::NFS3ERR_NOENT,
@@ -130,6 +136,7 @@ fn vfs_err_to_nfs(e: &VfsError) -> nfsstat3 {
         VfsError::Invalid => nfsstat3::NFS3ERR_INVAL,
         VfsError::ReadOnly => nfsstat3::NFS3ERR_ROFS,
         VfsError::Io(_) => nfsstat3::NFS3ERR_IO,
+        VfsError::RateLimited { .. } => nfsstat3::NFS3ERR_JUKEBOX,
     }
 }
 
@@ -298,5 +305,51 @@ impl NFSFileSystem for CtxfsNfs {
         _attr: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         Err(nfsstat3::NFS3ERR_ROFS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `nfsstat3` doesn't implement `PartialEq`, so we use `matches!` here.
+
+    #[test]
+    fn vfs_err_to_nfs_rate_limited_maps_to_jukebox() {
+        let e = VfsError::RateLimited {
+            retry_after_secs: 30,
+        };
+        assert!(matches!(vfs_err_to_nfs(&e), nfsstat3::NFS3ERR_JUKEBOX));
+    }
+
+    #[test]
+    fn vfs_err_to_nfs_io_still_maps_to_io_not_jukebox() {
+        // Regression: the new RateLimited arm must not steal Io's mapping.
+        let e = VfsError::Io("disk failure".into());
+        assert!(matches!(vfs_err_to_nfs(&e), nfsstat3::NFS3ERR_IO));
+    }
+
+    #[test]
+    fn vfs_err_to_nfs_other_variants_unchanged() {
+        assert!(matches!(
+            vfs_err_to_nfs(&VfsError::NotFound),
+            nfsstat3::NFS3ERR_NOENT
+        ));
+        assert!(matches!(
+            vfs_err_to_nfs(&VfsError::NotDir),
+            nfsstat3::NFS3ERR_NOTDIR
+        ));
+        assert!(matches!(
+            vfs_err_to_nfs(&VfsError::IsDir),
+            nfsstat3::NFS3ERR_ISDIR
+        ));
+        assert!(matches!(
+            vfs_err_to_nfs(&VfsError::Invalid),
+            nfsstat3::NFS3ERR_INVAL
+        ));
+        assert!(matches!(
+            vfs_err_to_nfs(&VfsError::ReadOnly),
+            nfsstat3::NFS3ERR_ROFS
+        ));
     }
 }

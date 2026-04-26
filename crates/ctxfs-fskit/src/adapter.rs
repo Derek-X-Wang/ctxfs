@@ -81,6 +81,11 @@ pub(crate) fn make_item(name: &str, attr: &NodeAttr) -> Item {
 }
 
 /// Translate `VfsError` to `fskit_rs::Error` (POSIX errno).
+///
+/// `RateLimited` maps to `EAGAIN` so macOS Finder / userspace clients see
+/// a retryable signal rather than `EIO`. The `retry_after_secs` value is
+/// not propagated to FSKit (no field for it); it is logged when the VFS
+/// error is constructed.
 pub(crate) fn vfs_err_to_fskit(err: &VfsError) -> FsKitError {
     let errno = match err {
         VfsError::NotFound => libc::ENOENT,
@@ -89,6 +94,7 @@ pub(crate) fn vfs_err_to_fskit(err: &VfsError) -> FsKitError {
         VfsError::Invalid => libc::EINVAL,
         VfsError::ReadOnly => libc::EROFS,
         VfsError::Io(_) => libc::EIO,
+        VfsError::RateLimited { .. } => libc::EAGAIN,
     };
     FsKitError::Posix(errno)
 }
@@ -204,6 +210,12 @@ mod tests {
         assert!(
             matches!(vfs_err_to_fskit(&VfsError::Io("x".into())), FsKitError::Posix(e) if e == libc::EIO)
         );
+        // RateLimited must map to EAGAIN, NOT EIO — that's the whole point of
+        // M2.T3. EIO would defeat the spec's "zero EIO under 429" criterion.
+        assert!(matches!(
+            vfs_err_to_fskit(&VfsError::RateLimited { retry_after_secs: 30 }),
+            FsKitError::Posix(e) if e == libc::EAGAIN
+        ));
     }
 }
 

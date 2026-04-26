@@ -276,3 +276,111 @@ async fn lookup_populates_parent_inode() {
     assert_eq!(main_rs_attr.parent_inode, src_id);
     assert_ne!(main_rs_attr.parent_inode, root);
 }
+
+// ---------------------------------------------------------------------------
+// Rate-limit propagation: provider RateLimited must surface as
+// VfsError::RateLimited (not VfsError::Io). This is the M2.T3 (B4 part 2)
+// guarantee that downstream adapters can map to NFS3ERR_JUKEBOX / EAGAIN
+// instead of EIO.
+// ---------------------------------------------------------------------------
+
+/// Mock provider that always returns `CtxfsError::RateLimited` from
+/// `fetch_blob`, while serving directories normally so the VFS can
+/// reach the read path.
+struct RateLimitedBlobProvider {
+    directories: HashMap<String, Vec<u8>>,
+    retry_after_secs: u64,
+}
+
+#[async_trait]
+impl Provider for RateLimitedBlobProvider {
+    async fn fetch_snapshot(
+        &self,
+        _source: &ctxfs_core::source::SourceSpec,
+    ) -> Result<Vec<u8>, CtxfsError> {
+        Err(CtxfsError::Provider(
+            "snapshot not used in this test".into(),
+        ))
+    }
+
+    async fn fetch_directory(&self, digest: &Digest) -> Result<Vec<u8>, CtxfsError> {
+        self.directories
+            .get(&digest.hex)
+            .cloned()
+            .ok_or_else(|| CtxfsError::NotFound(format!("directory {}", digest.hex)))
+    }
+
+    async fn fetch_blob(&self, _digest: &Digest) -> Result<Vec<u8>, CtxfsError> {
+        Err(CtxfsError::RateLimited {
+            retry_after_secs: self.retry_after_secs,
+        })
+    }
+}
+
+#[tokio::test]
+async fn provider_rate_limited_blob_surfaces_as_vfs_rate_limited_not_io() {
+    // Build a minimal repo with a non-inline file under src/main.rs so
+    // reading triggers fetch_blob, which the mock provider rate-limits.
+    let main_rs_content = b"fn main() {}";
+    let main_rs_digest = Digest::sha256(main_rs_content);
+    let src_entries = vec![DirEntry::File(FileEntry {
+        name: "main.rs".into(),
+        digest: main_rs_digest,
+        size: main_rs_content.len() as u64,
+        executable: false,
+        inline_content: None, // forces fetch_blob
+    })];
+    let src_digest = Directory::compute_digest(&src_entries);
+    let src_dir = Directory {
+        digest: src_digest.clone(),
+        entries: src_entries,
+    };
+
+    let root_entries = vec![DirEntry::Directory(DirectoryEntry {
+        name: "src".into(),
+        digest: src_digest.clone(),
+    })];
+    let root_digest = Directory::compute_digest(&root_entries);
+    let root_dir = Directory {
+        digest: root_digest.clone(),
+        entries: root_entries,
+    };
+
+    let mut directories = HashMap::new();
+    let _ = directories.insert(
+        root_digest.hex.clone(),
+        serde_json::to_vec(&root_dir).unwrap(),
+    );
+    let _ = directories.insert(
+        src_digest.hex.clone(),
+        serde_json::to_vec(&src_dir).unwrap(),
+    );
+
+    let provider: Arc<dyn Provider> = Arc::new(RateLimitedBlobProvider {
+        directories,
+        retry_after_secs: 42,
+    });
+
+    let snapshot = Snapshot {
+        source: "test:rate-limited".into(),
+        commit_sha: "abc123".into(),
+        root_directory: root_digest,
+        created_at: "2026-04-25T00:00:00Z".into(),
+    };
+
+    let cache = make_cache();
+    let vfs = VfsState::new(provider, cache, snapshot, None)
+        .await
+        .unwrap();
+
+    let root = vfs.root_id();
+    let (src_id, _) = vfs.lookup(root, "src").await.unwrap();
+    let (main_id, _) = vfs.lookup(src_id, "main.rs").await.unwrap();
+
+    let result = vfs.read(main_id, 0, 4096).await;
+    match result {
+        Err(VfsError::RateLimited { retry_after_secs }) => assert_eq!(retry_after_secs, 42),
+        Err(VfsError::Io(s)) => panic!("provider RateLimited collapsed to Io: {s}"),
+        other => panic!("expected VfsError::RateLimited, got {other:?}"),
+    }
+}
