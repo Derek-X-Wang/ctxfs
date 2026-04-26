@@ -318,6 +318,129 @@ impl GitHubProvider {
         Self::classify_response(status, &headers)
     }
 
+    /// Threshold: files ≤ this byte size are eligible for inline prefetch.
+    /// Larger blobs go through the lazy per-read path.
+    pub const SMALL_BLOB_THRESHOLD_BYTES: u64 = 4096;
+
+    /// Maximum concurrent in-flight blob requests during prefetch.
+    /// 8 is the GitHub-best-practices recommendation for batched fetches;
+    /// higher concurrencies risk tripping secondary rate limits.
+    /// See https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api
+    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
+    const PREFETCH_CONCURRENCY: usize = 8;
+
+    /// Returns deduplicated SHAs for entries that should be prefetched: any blob
+    /// ≤ 4 KB, plus any mode-120000 (symlink) entry regardless of size. Trees
+    /// and submodules are excluded. Result is sorted for deterministic ordering.
+    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
+    fn small_blob_shas(entries: &[TreeEntry]) -> Vec<String> {
+        use std::collections::BTreeSet;
+        let mut seen = BTreeSet::new();
+        for e in entries {
+            if e.entry_type != "blob" {
+                continue;
+            }
+            let is_symlink = e.mode == MODE_SYMLINK;
+            let is_small = e
+                .size
+                .is_some_and(|s| s <= Self::SMALL_BLOB_THRESHOLD_BYTES);
+            if is_symlink || is_small {
+                let _ = seen.insert(e.sha.clone());
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Identifies blob SHAs that come from symlink (mode-120000) entries.
+    /// Used by `prefetch_small_blobs` to apply the strict-failure policy to
+    /// symlinks (which have no lazy fallback in the read path: `readlink`
+    /// just returns the stored target string).
+    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
+    fn symlink_shas(entries: &[TreeEntry]) -> std::collections::HashSet<String> {
+        entries
+            .iter()
+            .filter(|e| e.entry_type == "blob" && e.mode == MODE_SYMLINK)
+            .map(|e| e.sha.clone())
+            .collect()
+    }
+
+    /// Fetches blob SHAs in `shas` in parallel (capped at
+    /// [`Self::PREFETCH_CONCURRENCY`]) and returns a map sha → bytes.
+    ///
+    /// Failure policy:
+    /// - Files (non-symlink): per-blob errors are logged and the
+    ///   `prefetch_failures` counter is incremented; the SHA is omitted from
+    ///   the map; the caller falls back to lazy fetch on read.
+    /// - Symlinks (SHA in `symlink_shas` set): per-blob errors **fail the
+    ///   entire prefetch** and propagate as the returned error. Symlinks have
+    ///   no lazy provider path (readlink returns the stored target string),
+    ///   so an empty target would be a silent data-correctness regression.
+    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
+    async fn prefetch_small_blobs(
+        &self,
+        source: &SourceSpec,
+        shas: Vec<String>,
+        symlink_shas: &std::collections::HashSet<String>,
+    ) -> Result<std::collections::HashMap<String, Vec<u8>>, CtxfsError> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let mut results: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        let mut in_flight = FuturesUnordered::new();
+        let mut iter = shas.into_iter();
+
+        // Prime the queue with up to PREFETCH_CONCURRENCY in-flight requests.
+        for _ in 0..Self::PREFETCH_CONCURRENCY {
+            if let Some(sha) = iter.next() {
+                in_flight.push(self.fetch_blob_with_sha(source, sha));
+            }
+        }
+
+        while let Some((sha, result)) = in_flight.next().await {
+            match result {
+                Ok(bytes) => {
+                    let _ = results.insert(sha, bytes);
+                }
+                Err(e) => {
+                    // Symlink: fail the prefetch (no lazy fallback for readlink).
+                    if symlink_shas.contains(&sha) {
+                        return Err(CtxfsError::Provider(format!(
+                            "symlink prefetch failed for sha {sha}: {e}"
+                        )));
+                    }
+                    // File: log + counter + skip; lazy fetch will retry on read.
+                    if let Some(key) = self.counter_key.lock().unwrap().clone() {
+                        self.observability
+                            .counters_for(key)
+                            .record_prefetch_failure();
+                    }
+                    tracing::warn!(
+                        target: "ctxfs.provider.fetch",
+                        sha = sha.as_str(),
+                        error = format!("{e:?}").as_str(),
+                        "prefetch_small_blobs: per-file fetch failed; falling back to lazy"
+                    );
+                }
+            }
+            if let Some(next_sha) = iter.next() {
+                in_flight.push(self.fetch_blob_with_sha(source, next_sha));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Wrapper that pairs the SHA with the fetch result, so the caller can map
+    /// back after `FuturesUnordered` completes them out of order.
+    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
+    async fn fetch_blob_with_sha(
+        &self,
+        source: &SourceSpec,
+        sha: String,
+    ) -> (String, Result<Vec<u8>, CtxfsError>) {
+        let result = self.fetch_blob_content(source, &sha).await;
+        (sha, result)
+    }
+
     /// Build directory tree from flat GitHub tree entries.
     pub fn build_directories(
         entries: &[TreeEntry],
@@ -779,5 +902,105 @@ mod tests {
         let _ = headers.insert("x-ratelimit-remaining".to_string(), "100".to_string());
         let _ = headers.insert("x-ratelimit-resource".to_string(), "core".to_string());
         assert!(GitHubProvider::classify_response(200, &headers).is_ok());
+    }
+
+    #[test]
+    fn small_blobs_filter_picks_under_4kb_files_and_symlinks() {
+        let entries = vec![
+            TreeEntry {
+                path: "a.rs".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "aaa".into(),
+                size: Some(100),
+            },
+            TreeEntry {
+                path: "big.bin".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "bbb".into(),
+                size: Some(10_000),
+            },
+            TreeEntry {
+                path: "link".into(),
+                mode: "120000".into(),
+                entry_type: "blob".into(),
+                sha: "ccc".into(),
+                size: Some(20),
+            },
+            TreeEntry {
+                path: "subtree".into(),
+                mode: "040000".into(),
+                entry_type: "tree".into(),
+                sha: "ddd".into(),
+                size: None,
+            },
+            TreeEntry {
+                path: "dup.rs".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "aaa".into(),
+                size: Some(100),
+            },
+        ];
+        let shas = GitHubProvider::small_blob_shas(&entries);
+        // Sorted + deduped: "aaa" (small file, dup eliminated), "ccc" (symlink).
+        // Big file "bbb" excluded by size; tree "ddd" excluded by entry_type.
+        assert_eq!(shas, vec!["aaa".to_string(), "ccc".to_string()]);
+    }
+
+    /// Empty-shas test to keep `prefetch_small_blobs` (and via it,
+    /// `fetch_blob_with_sha` and `PREFETCH_CONCURRENCY`) reachable from the
+    /// static call graph until M2.T6 wires them into `fetch_snapshot`. With
+    /// no shas, no HTTP is performed.
+    #[tokio::test]
+    async fn prefetch_small_blobs_empty_shas_returns_empty_map_without_http() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(ctxfs_cache::BlobCache::new(cache_dir.path().to_path_buf(), 1024).unwrap());
+        let provider = GitHubProvider::new(None, cache, None, None, Arc::new(Observability::new()));
+        let source = SourceSpec::parse("github:test/repo@main").unwrap();
+        let result = provider
+            .prefetch_small_blobs(&source, vec![], &std::collections::HashSet::new())
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn symlink_shas_picks_only_mode_120000_blobs() {
+        let entries = vec![
+            TreeEntry {
+                path: "regular.rs".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "aaa".into(),
+                size: Some(100),
+            },
+            TreeEntry {
+                path: "link1".into(),
+                mode: "120000".into(),
+                entry_type: "blob".into(),
+                sha: "lnk1".into(),
+                size: Some(20),
+            },
+            TreeEntry {
+                path: "exec.sh".into(),
+                mode: "100755".into(),
+                entry_type: "blob".into(),
+                sha: "exe".into(),
+                size: Some(50),
+            },
+            TreeEntry {
+                path: "submod".into(),
+                mode: "160000".into(),
+                entry_type: "commit".into(),
+                sha: "mod".into(),
+                size: None,
+            },
+        ];
+        let set = GitHubProvider::symlink_shas(&entries);
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("lnk1"));
     }
 }
