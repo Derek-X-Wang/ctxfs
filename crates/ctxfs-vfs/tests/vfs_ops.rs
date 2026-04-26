@@ -279,9 +279,9 @@ async fn lookup_populates_parent_inode() {
 
 // ---------------------------------------------------------------------------
 // Rate-limit propagation: provider RateLimited must surface as
-// VfsError::RateLimited (not VfsError::Io). This is the M2.T3 (B4 part 2)
-// guarantee that downstream adapters can map to NFS3ERR_JUKEBOX / EAGAIN
-// instead of EIO.
+// VfsError::RateLimited (not VfsError::Io). Without this guarantee,
+// downstream adapters can't map to NFS3ERR_JUKEBOX / EAGAIN — the user
+// would see EIO under any throttle.
 // ---------------------------------------------------------------------------
 
 /// Mock provider that always returns `CtxfsError::RateLimited` from

@@ -19,6 +19,23 @@ pub fn registry_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+/// Extract HTTP response headers into a `HashMap<lowercase_key, value>`.
+///
+/// Skips headers whose values aren't valid UTF-8. Used by both the registry
+/// fetch path here and the GitHub provider's rate-limit check to avoid
+/// duplicating the lowercase-and-collect dance.
+#[must_use]
+pub fn response_headers_map(resp: &reqwest::Response) -> std::collections::HashMap<String, String> {
+    resp.headers()
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+        })
+        .collect()
+}
+
 /// Fetch JSON from a registry URL with standard error handling.
 ///
 /// - 404 → `CtxfsError::NotFound(not_found_label)`
@@ -37,15 +54,7 @@ pub async fn fetch_registry_json(
         .map_err(|e| CtxfsError::Provider(format!("{registry_name} request failed: {e}")))?;
 
     let status = resp.status();
-    let headers: std::collections::HashMap<String, String> = resp
-        .headers()
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
-        })
-        .collect();
+    let headers = response_headers_map(&resp);
 
     tracing::debug!(
         target: "ctxfs.provider.fetch",

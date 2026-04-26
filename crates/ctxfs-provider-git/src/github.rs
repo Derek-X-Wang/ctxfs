@@ -19,9 +19,10 @@ use tracing::{debug, warn};
 
 const USER_AGENT_STR: &str = "ctxfs/0.1";
 
-/// Hardcoded for now; M3+ may make this configurable via `CTXFS_GITHUB_HOST`
-/// for GHE support and tarball-redirect host validation.
-pub const GITHUB_HOST: &str = "api.github.com";
+/// Hardcoded for now; M3+ may promote this to `pub` and make it configurable
+/// via `CTXFS_GITHUB_HOST` for GHE support and tarball-redirect host
+/// validation. No external consumer needs it today, so keep the surface tight.
+pub(crate) const GITHUB_HOST: &str = "api.github.com";
 
 // Git file mode constants from the GitHub Trees API
 const MODE_SYMLINK: &str = "120000";
@@ -268,25 +269,24 @@ impl GitHubProvider {
     /// secondary-throttle verdicts; `Ok(())` otherwise (HTTP-status checks for
     /// non-throttle errors live in the caller).
     fn check_rate_limit(&self, resp: &reqwest::Response) -> Result<(), CtxfsError> {
+        use ctxfs_provider_common::http::response_headers_map;
         use ctxfs_provider_common::rate_limit::{
             RateLimitVerdict, ResourceClass, ThrottleClassifier,
         };
 
         let status = resp.status().as_u16();
-        let headers: std::collections::HashMap<String, String> = resp
-            .headers()
-            .iter()
-            .filter_map(|(k, v)| {
-                v.to_str()
-                    .ok()
-                    .map(|s| (k.as_str().to_lowercase(), s.to_string()))
-            })
-            .collect();
+        let headers = response_headers_map(resp);
+
+        // Hoist the counter_key clone so `record_rest_call` and the optional
+        // throttle-event branch share one mutex acquisition per response.
+        let key_for_counters = self.counter_key.lock().unwrap().clone();
 
         // Always increment rest_calls_total for quota-bearing GitHub API calls.
         // (Codeload tarball downloads aren't quota-bearing and don't go through here.)
-        if let Some(key) = self.counter_key.lock().unwrap().clone() {
-            self.observability.counters_for(key).record_rest_call();
+        if let Some(ref key) = key_for_counters {
+            self.observability
+                .counters_for(key.clone())
+                .record_rest_call();
         }
 
         // Update the gauge from response headers (best-effort; missing headers
@@ -306,7 +306,7 @@ impl GitHubProvider {
                 resource,
                 retry_after,
             );
-            if let Some(key) = self.counter_key.lock().unwrap().clone() {
+            if let Some(key) = key_for_counters {
                 self.observability.counters_for(key).record_throttle_event();
             }
             tracing::warn!(
@@ -633,14 +633,13 @@ impl Provider for GitHubProvider {
         // 1. Pre-seed counter_key with a "<resolving:ref>" placeholder commit
         //    so the upcoming `resolve_ref` API call is attributed to this
         //    mount in `rest_calls_total`. Without this, resolve_ref runs with
-        //    counter_key=None and the API call is silently un-counted (the
-        //    M2.T2 quality-review gap).
+        //    counter_key=None and the API call is silently un-counted.
         //
-        //    The placeholder produces a separate transient `CounterKey` bucket
-        //    visible to `ctxfs status` for ~1 API call; the bulk of counter
-        //    activity attributes to the real commit (set in step 3 below).
+        //    The placeholder bucket is filtered out of `ctxfs status` mount
+        //    summaries via `Observability::status_report`; the per-key
+        //    telemetry counter still accumulates for full fidelity.
         *self.counter_key.lock().unwrap() = Some(CounterKey {
-            source: "github".to_string(),
+            source: source.provider_type.to_string(),
             repo: source.name.clone(),
             commit: format!("<resolving:{}>", source.version),
             mount_id: source.id(),
@@ -654,7 +653,7 @@ impl Provider for GitHubProvider {
         //    know it. All subsequent fetch_tree / prefetch / fetch_blob calls
         //    attribute to the real (source, repo, commit, mount_id) bucket.
         *self.counter_key.lock().unwrap() = Some(CounterKey {
-            source: "github".to_string(),
+            source: source.provider_type.to_string(),
             repo: source.name.clone(),
             commit: commit_sha.clone(),
             mount_id: source.id(),
@@ -702,10 +701,9 @@ impl Provider for GitHubProvider {
 
         // 6. Record prefetch_hits per successfully prefetched blob.
         if let Some(key) = self.counter_key.lock().unwrap().clone() {
-            let counters = self.observability.counters_for(key);
-            for _ in 0..inline.len() {
-                counters.record_prefetch_hit();
-            }
+            self.observability
+                .counters_for(key)
+                .record_prefetch_hits(inline.len() as u64);
         }
 
         // 7. Build directories with inline content (B1) and resolved

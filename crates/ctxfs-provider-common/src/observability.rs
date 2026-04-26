@@ -109,9 +109,17 @@ impl Observability {
             })
             .collect();
 
+        // Suppress transient `<resolving:ref>` placeholder buckets from the
+        // user-visible mount list. Providers seed a placeholder commit before
+        // resolving a ref so the resolve_ref API call is attributed in
+        // `rest_calls_total`; once the real commit is known the placeholder
+        // is no longer interesting for the per-mount summary. Per-key
+        // counters (including the placeholder) stay in `counters` for full
+        // telemetry fidelity.
         #[allow(clippy::cast_precision_loss)]
         let mut mounts: Vec<MountSummary> = counters
             .iter()
+            .filter(|c| !c.key.commit.starts_with("<resolving:"))
             .map(|c| {
                 let total_cache_ops = c.counters.cache_hits + c.counters.cache_misses;
                 let cache_hit_ratio = if total_cache_ops > 0 {
@@ -265,6 +273,36 @@ mod tests {
             resource_class_string(&ResourceClass::Other("audit_log".to_string())),
             "other:audit_log"
         );
+    }
+
+    #[test]
+    fn resolving_placeholder_bucket_is_suppressed_from_mounts() {
+        // Providers seed a `<resolving:ref>` placeholder CounterKey before
+        // resolve_ref so its API call is attributed; once the real commit
+        // is known the placeholder bucket should not show in the user-visible
+        // mount summary. Per-key telemetry counters keep accumulating.
+        let o = Observability::new();
+        let placeholder = CounterKey {
+            source: "github".to_string(),
+            repo: "foo/bar".to_string(),
+            commit: "<resolving:main>".to_string(),
+            mount_id: "mnt-1".to_string(),
+        };
+        let real = CounterKey {
+            source: "github".to_string(),
+            repo: "foo/bar".to_string(),
+            commit: "abc123".to_string(),
+            mount_id: "mnt-1".to_string(),
+        };
+        o.counters_for(placeholder.clone()).record_rest_call();
+        o.counters_for(real.clone()).record_rest_call();
+
+        let r = o.status_report();
+        // mounts list excludes the placeholder.
+        assert_eq!(r.mounts.len(), 1);
+        assert_eq!(r.mounts[0].commit, "abc123");
+        // counters list still has both (telemetry fidelity).
+        assert_eq!(r.counters.len(), 2);
     }
 
     #[test]

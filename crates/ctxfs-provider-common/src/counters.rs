@@ -80,6 +80,13 @@ impl MountCounters {
         let _ = self.prefetch_hits.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Batch-add `delta` to the prefetch_hits counter. Useful when a caller
+    /// has already aggregated the count (e.g., post-prefetch the inline-map
+    /// length) and would otherwise loop a single-event helper.
+    pub fn record_prefetch_hits(&self, delta: u64) {
+        let _ = self.prefetch_hits.fetch_add(delta, Ordering::Relaxed);
+    }
+
     pub fn record_prefetch_failure(&self) {
         let _ = self.prefetch_failures.fetch_add(1, Ordering::Relaxed);
     }
@@ -180,6 +187,28 @@ mod tests {
         let k1 = key();
         let k2 = key();
         assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn record_prefetch_hits_batch_matches_single_event_loop() {
+        let single = MountCounters::new();
+        for _ in 0..7 {
+            single.record_prefetch_hit();
+        }
+        let batch = MountCounters::new();
+        batch.record_prefetch_hits(7);
+        assert_eq!(
+            single.snapshot().prefetch_hits,
+            batch.snapshot().prefetch_hits
+        );
+        assert_eq!(batch.snapshot().prefetch_hits, 7);
+    }
+
+    #[test]
+    fn record_prefetch_hits_zero_is_noop() {
+        let c = MountCounters::new();
+        c.record_prefetch_hits(0);
+        assert_eq!(c.snapshot().prefetch_hits, 0);
     }
 
     #[test]
