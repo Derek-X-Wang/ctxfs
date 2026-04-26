@@ -19,6 +19,10 @@ use tracing::{debug, warn};
 
 const USER_AGENT_STR: &str = "ctxfs/0.1";
 
+/// Hardcoded for now; M3+ may make this configurable via `CTXFS_GITHUB_HOST`
+/// for GHE support and tarball-redirect host validation.
+pub const GITHUB_HOST: &str = "api.github.com";
+
 // Git file mode constants from the GitHub Trees API
 const MODE_SYMLINK: &str = "120000";
 const MODE_EXECUTABLE: &str = "100755";
@@ -28,17 +32,19 @@ pub struct GitHubProvider {
     cache: Arc<BlobCache>,
     tree_cache: Option<Arc<TreeCache>>,
     shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
-    // M2.T1 plumbs these; M2.T2 wires them into the rate-limit path.
-    // Allow dead-code so this commit (T1) is independently buildable without
-    // dragging the T2 changes forward.
-    #[allow(dead_code)]
+    /// Daemon-side registry shared across all mounts. Used by
+    /// [`Self::check_rate_limit`] to record `rest_calls_total`,
+    /// `throttle_events`, gauge updates, and secondary-throttle state.
     observability: Arc<Observability>,
-    #[allow(dead_code)]
+    /// Computed once from the token at construction time so every gauge update
+    /// keys to the same bucket.
     auth_identity: AuthIdentity,
     /// Set in `fetch_snapshot` AFTER `resolve_ref`, using the resolved commit SHA
-    /// (not `source.version`). Read by `check_rate_limit` and `fetch_blob` to
-    /// attribute counters to the right `(source, repo, commit, mount_id)` bucket.
-    #[allow(dead_code)]
+    /// (not `source.version`). Read by `check_rate_limit` (and later, M2.T6
+    /// onwards, by `fetch_blob`) to attribute counters to the right
+    /// `(source, repo, commit, mount_id)` bucket. `None` until the first
+    /// `fetch_snapshot` completes — early calls (none expected today) are
+    /// silently un-attributed rather than blocking on registration.
     counter_key: std::sync::Mutex<Option<CounterKey>>,
     /// The most-recently-fetched source. `fetch_snapshot` records it so that
     /// subsequent `fetch_blob` calls (which only receive a `Digest`) can locate
@@ -105,8 +111,8 @@ impl GitHubProvider {
         observability: Arc<Observability>,
     ) -> Self {
         let auth_identity = match token {
-            Some(t) => AuthIdentity::pat("api.github.com", t),
-            None => AuthIdentity::anonymous("api.github.com"),
+            Some(t) => AuthIdentity::pat(GITHUB_HOST, t),
+            None => AuthIdentity::anonymous(GITHUB_HOST),
         };
 
         let mut default_headers = HeaderMap::new();
@@ -135,7 +141,7 @@ impl GitHubProvider {
     }
 
     fn api_url(owner: &str, repo: &str, path: &str) -> String {
-        format!("https://api.github.com/repos/{owner}/{repo}/{path}")
+        format!("https://{GITHUB_HOST}/repos/{owner}/{repo}/{path}")
     }
 
     /// Send a GET request, check rate limits and status, and parse the JSON response.
@@ -151,7 +157,7 @@ impl GitHubProvider {
             .await
             .map_err(|e| CtxfsError::Provider(format!("HTTP error {context}: {e}")))?;
 
-        Self::check_rate_limit(&resp)?;
+        self.check_rate_limit(&resp)?;
 
         if !resp.status().is_success() {
             return Err(CtxfsError::Provider(format!(
@@ -226,38 +232,90 @@ impl GitHubProvider {
         Ok(data)
     }
 
-    fn check_rate_limit(resp: &reqwest::Response) -> Result<(), CtxfsError> {
-        if resp.status() == reqwest::StatusCode::FORBIDDEN
-            || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
-            let remaining = resp
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
-
-            if remaining == 0 {
-                let reset = resp
-                    .headers()
-                    .get("x-ratelimit-reset")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(0);
-
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                let retry_after = if reset > now { reset - now } else { 60 };
-
-                return Err(CtxfsError::RateLimited {
-                    retry_after_secs: retry_after,
-                });
+    /// Pure-logic classifier on (status, headers map). Unit-testable. Used by
+    /// the [`Self::check_rate_limit`] adapter that operates on a real
+    /// `reqwest::Response`.
+    fn classify_response(
+        status: u16,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<(), CtxfsError> {
+        use ctxfs_provider_common::rate_limit::{RateLimitVerdict, ThrottleClassifier};
+        match ThrottleClassifier::classify(status, headers) {
+            RateLimitVerdict::Ok { .. } => Ok(()),
+            RateLimitVerdict::SecondaryThrottle { retry_after, .. } => {
+                Err(CtxfsError::RateLimited {
+                    retry_after_secs: retry_after.as_secs(),
+                })
             }
+            RateLimitVerdict::PrimaryExhausted { reset_at, .. } => {
+                let now = std::time::SystemTime::now();
+                let secs = reset_at
+                    .duration_since(now)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(60);
+                Err(CtxfsError::RateLimited {
+                    retry_after_secs: secs,
+                })
+            }
+            RateLimitVerdict::Other { .. } => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Adapter: extracts headers from a `reqwest::Response`, classifies, updates
+    /// the daemon-side gauge, increments `rest_calls_total`, and records throttle
+    /// events. Returns `CtxfsError::RateLimited` for both primary-exhausted and
+    /// secondary-throttle verdicts; `Ok(())` otherwise (HTTP-status checks for
+    /// non-throttle errors live in the caller).
+    fn check_rate_limit(&self, resp: &reqwest::Response) -> Result<(), CtxfsError> {
+        use ctxfs_provider_common::rate_limit::{
+            RateLimitVerdict, ResourceClass, ThrottleClassifier,
+        };
+
+        let status = resp.status().as_u16();
+        let headers: std::collections::HashMap<String, String> = resp
+            .headers()
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+            })
+            .collect();
+
+        // Always increment rest_calls_total for quota-bearing GitHub API calls.
+        // (Codeload tarball downloads aren't quota-bearing and don't go through here.)
+        if let Some(key) = self.counter_key.lock().unwrap().clone() {
+            self.observability.counters_for(key).record_rest_call();
+        }
+
+        // Update the gauge from response headers (best-effort; missing headers
+        // leave the gauge unchanged per RateLimitGauge::update_from_headers).
+        let resource = headers
+            .get("x-ratelimit-resource")
+            .map(|s| ResourceClass::parse(s))
+            .unwrap_or_else(|| ResourceClass::Other("unknown".to_string()));
+        self.observability
+            .update_gauge(self.auth_identity.clone(), resource.clone(), &headers);
+
+        // Classify and act on secondary throttle.
+        let verdict = ThrottleClassifier::classify(status, &headers);
+        if let RateLimitVerdict::SecondaryThrottle { retry_after, .. } = verdict {
+            self.observability.mark_secondary_throttle(
+                self.auth_identity.clone(),
+                resource,
+                retry_after,
+            );
+            if let Some(key) = self.counter_key.lock().unwrap().clone() {
+                self.observability.counters_for(key).record_throttle_event();
+            }
+            tracing::warn!(
+                target: "ctxfs.provider.throttle",
+                retry_after_secs = retry_after.as_secs(),
+                "secondary throttle in provider-git"
+            );
+        }
+
+        Self::classify_response(status, &headers)
     }
 
     /// Build directory tree from flat GitHub tree entries.
@@ -677,5 +735,49 @@ mod tests {
         assert!(!root_digest.hex.is_empty());
         let root = &directories[""];
         assert!(root.entries.is_empty());
+    }
+
+    #[test]
+    fn classify_response_secondary_throttle_with_remaining_nonzero_returns_rate_limited() {
+        use std::collections::HashMap;
+        let mut headers = HashMap::new();
+        let _ = headers.insert("retry-after".to_string(), "60".to_string());
+        let _ = headers.insert("x-ratelimit-remaining".to_string(), "4500".to_string());
+        let _ = headers.insert("x-ratelimit-resource".to_string(), "core".to_string());
+
+        let err = GitHubProvider::classify_response(429, &headers).unwrap_err();
+        match err {
+            CtxfsError::RateLimited { retry_after_secs } => assert_eq!(retry_after_secs, 60),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_response_primary_exhausted_returns_rate_limited() {
+        use std::collections::HashMap;
+        let mut headers = HashMap::new();
+        let _ = headers.insert("x-ratelimit-remaining".to_string(), "0".to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let _ = headers.insert("x-ratelimit-reset".to_string(), (now + 120).to_string());
+
+        let err = GitHubProvider::classify_response(403, &headers).unwrap_err();
+        match err {
+            CtxfsError::RateLimited { retry_after_secs } => {
+                assert!(retry_after_secs > 100 && retry_after_secs <= 120);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_response_ok_returns_ok() {
+        use std::collections::HashMap;
+        let mut headers = HashMap::new();
+        let _ = headers.insert("x-ratelimit-remaining".to_string(), "100".to_string());
+        let _ = headers.insert("x-ratelimit-resource".to_string(), "core".to_string());
+        assert!(GitHubProvider::classify_response(200, &headers).is_ok());
     }
 }

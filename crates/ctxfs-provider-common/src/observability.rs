@@ -54,6 +54,23 @@ impl Observability {
         g.update_from_headers(headers);
     }
 
+    /// Marks the gauge for `(auth, resource)` as secondary-throttled for
+    /// `retry_after` from now. Creates the entry if absent. Used by providers
+    /// when [`crate::rate_limit::ThrottleClassifier`] returns
+    /// [`crate::rate_limit::RateLimitVerdict::SecondaryThrottle`].
+    pub fn mark_secondary_throttle(
+        &self,
+        auth: AuthIdentity,
+        resource: ResourceClass,
+        retry_after: std::time::Duration,
+    ) {
+        let mut g = self
+            .gauges
+            .entry((auth, resource))
+            .or_insert_with(RateLimitGauge::unknown);
+        g.set_secondary_throttle(retry_after);
+    }
+
     /// Assemble a StatusReportV1 payload for IPC.
     #[must_use]
     pub fn status_report(&self) -> StatusReportV1 {
@@ -248,5 +265,22 @@ mod tests {
             resource_class_string(&ResourceClass::Other("audit_log".to_string())),
             "other:audit_log"
         );
+    }
+
+    #[test]
+    fn mark_secondary_throttle_sets_active_state() {
+        let o = Observability::new();
+        let auth = AuthIdentity::anonymous("api.github.com");
+        let resource = ResourceClass::Core;
+        o.mark_secondary_throttle(
+            auth.clone(),
+            resource.clone(),
+            std::time::Duration::from_secs(60),
+        );
+        let g = o.gauge_for(&auth, &resource);
+        assert!(matches!(
+            g.secondary_throttle_state,
+            ThrottleState::Active { .. }
+        ));
     }
 }
