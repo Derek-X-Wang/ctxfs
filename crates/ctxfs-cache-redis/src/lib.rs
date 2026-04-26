@@ -176,11 +176,12 @@ mod tests {
 
     #[test]
     fn unwrap_versioned_rejects_pre_prefix_payloads() {
-        // Pre-M2 daemons stored raw zstd-compressed bytes with no prefix.
-        // Such bytes start with the zstd magic 0x28B52FFD (in LE: FD 2F B5 28).
-        // u32::from_le_bytes([0xFD, 0x2F, 0xB5, 0x28]) = 0x28B52FFD = 681_398_269,
-        // which is not equal to SCHEMA_VERSION; the equality check rejects it.
-        let zstd_magic = [0xFDu8, 0x2F, 0xB5, 0x28, /* body */ 0xAA, 0xBB];
-        assert!(RedisTreeCache::unwrap_versioned(&zstd_magic).is_none());
+        // Per RFC 8478 § 3.1.1, zstd's magic value is 0xFD2FB528 stored
+        // little-endian on disk as [0x28, 0xB5, 0x2F, 0xFD]. Reading those
+        // bytes via u32::from_le_bytes recovers 0xFD2FB528 = 4_247_762_216,
+        // which is ≠ SCHEMA_VERSION (2), so a pre-M2 raw-zstd payload is
+        // correctly rejected as a stale entry.
+        let pre_prefix = [0x28u8, 0xB5, 0x2F, 0xFD, /* body */ 0xAA, 0xBB];
+        assert!(RedisTreeCache::unwrap_versioned(&pre_prefix).is_none());
     }
 }

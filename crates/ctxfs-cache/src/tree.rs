@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use tracing::warn;
 
 /// Tree-cache serialization schema version. Bumped when the manifest shape
 /// changes in a way that older cached snapshots would mis-render.
@@ -45,12 +46,25 @@ impl TreeCache {
             .join(format!("{commit_sha}.json"))
     }
 
+    /// Returns the cached snapshot bytes for `(owner, repo, commit_sha)` if
+    /// present and at the current schema version, else `None`.
+    ///
+    /// **Side effect:** cache files at a stale schema version are deleted on
+    /// read; subsequent calls treat them as miss. The current version is
+    /// [`SCHEMA_VERSION`].
     pub fn get(&self, owner: &str, repo: &str, commit_sha: &str) -> Option<Vec<u8>> {
         let path = self.file_path(owner, repo, commit_sha);
         let raw = fs::read(&path).ok()?;
 
         let versioned: VersionedTree = serde_json::from_slice(&raw).ok()?;
         if versioned.version != SCHEMA_VERSION {
+            warn!(
+                target: "ctxfs.cache.tree",
+                path = %path.display(),
+                stale_version = versioned.version,
+                expected = SCHEMA_VERSION,
+                "tree cache: dropping local entry with stale schema version"
+            );
             let _ = fs::remove_file(&path);
             return None;
         }
