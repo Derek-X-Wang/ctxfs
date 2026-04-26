@@ -39,12 +39,13 @@ pub struct GitHubProvider {
     /// Computed once from the token at construction time so every gauge update
     /// keys to the same bucket.
     auth_identity: AuthIdentity,
-    /// Set in `fetch_snapshot` AFTER `resolve_ref`, using the resolved commit SHA
-    /// (not `source.version`). Read by `check_rate_limit` (and later, M2.T6
-    /// onwards, by `fetch_blob`) to attribute counters to the right
-    /// `(source, repo, commit, mount_id)` bucket. `None` until the first
-    /// `fetch_snapshot` completes — early calls (none expected today) are
-    /// silently un-attributed rather than blocking on registration.
+    /// Set in `fetch_snapshot`. Pre-seeded with a `<resolving:ref>` placeholder
+    /// commit BEFORE `resolve_ref` runs so that API call is attributed to this
+    /// mount in `rest_calls_total`; replaced with the resolved commit SHA
+    /// AFTER `resolve_ref` returns so all subsequent fetch_tree / prefetch /
+    /// fetch_blob calls attribute to the real
+    /// `(source, repo, commit, mount_id)` bucket. `None` only on a fresh
+    /// provider instance before its first `fetch_snapshot` call.
     counter_key: std::sync::Mutex<Option<CounterKey>>,
     /// The most-recently-fetched source. `fetch_snapshot` records it so that
     /// subsequent `fetch_blob` calls (which only receive a `Digest`) can locate
@@ -326,13 +327,14 @@ impl GitHubProvider {
     /// 8 is the GitHub-best-practices recommendation for batched fetches;
     /// higher concurrencies risk tripping secondary rate limits.
     /// See https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api
-    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
     const PREFETCH_CONCURRENCY: usize = 8;
 
-    /// Returns deduplicated SHAs for entries that should be prefetched: any blob
-    /// ≤ 4 KB, plus any mode-120000 (symlink) entry regardless of size. Trees
-    /// and submodules are excluded. Result is sorted for deterministic ordering.
-    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
+    /// Returns deduplicated SHAs for blob entries (regular or symlink)
+    /// ≤ [`Self::SMALL_BLOB_THRESHOLD_BYTES`]. Trees and submodules are
+    /// excluded. Symlinks are size-checked because hostile remotes could
+    /// otherwise send oversized "symlink" blobs (legitimate git symlinks
+    /// are always < PATH_MAX, well under 4 KB) to bypass the cap.
+    /// Result is sorted for deterministic ordering.
     fn small_blob_shas(entries: &[TreeEntry]) -> Vec<String> {
         use std::collections::BTreeSet;
         let mut seen = BTreeSet::new();
@@ -340,11 +342,14 @@ impl GitHubProvider {
             if e.entry_type != "blob" {
                 continue;
             }
-            let is_symlink = e.mode == MODE_SYMLINK;
+            // Apply the size threshold uniformly to regular blobs and
+            // symlinks. Without the size check on symlinks, a hostile
+            // remote could send a 5 MB "symlink" blob and force us to
+            // fetch + inline the entire payload as the link target.
             let is_small = e
                 .size
                 .is_some_and(|s| s <= Self::SMALL_BLOB_THRESHOLD_BYTES);
-            if is_symlink || is_small {
+            if is_small {
                 let _ = seen.insert(e.sha.clone());
             }
         }
@@ -355,7 +360,6 @@ impl GitHubProvider {
     /// Used by `prefetch_small_blobs` to apply the strict-failure policy to
     /// symlinks (which have no lazy fallback in the read path: `readlink`
     /// just returns the stored target string).
-    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
     fn symlink_shas(entries: &[TreeEntry]) -> std::collections::HashSet<String> {
         entries
             .iter()
@@ -375,7 +379,6 @@ impl GitHubProvider {
     ///   entire prefetch** and propagate as the returned error. Symlinks have
     ///   no lazy provider path (readlink returns the stored target string),
     ///   so an empty target would be a silent data-correctness regression.
-    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
     async fn prefetch_small_blobs(
         &self,
         source: &SourceSpec,
@@ -404,6 +407,12 @@ impl GitHubProvider {
                 Err(e) => {
                     // Symlink: fail the prefetch (no lazy fallback for readlink).
                     if symlink_shas.contains(&sha) {
+                        // Note: in-flight `FuturesUnordered` futures are dropped
+                        // here. Their connections may have hit GitHub already
+                        // (consuming quota) but won't tick `rest_calls_total`
+                        // because they never reach `check_rate_limit`. Acceptable
+                        // for M2 (symlink-fail path is rare); revisit in M3+ if
+                        // telemetry shows meaningful undercount.
                         return Err(CtxfsError::Provider(format!(
                             "symlink prefetch failed for sha {sha}: {e}"
                         )));
@@ -431,7 +440,6 @@ impl GitHubProvider {
 
     /// Wrapper that pairs the SHA with the fetch result, so the caller can map
     /// back after `FuturesUnordered` completes them out of order.
-    #[allow(dead_code)] // wired into fetch_snapshot in M2.T6
     async fn fetch_blob_with_sha(
         &self,
         source: &SourceSpec,
@@ -507,11 +515,26 @@ impl GitHubProvider {
 
             // Check mode first: symlinks are entry_type "blob" with mode "120000"
             let dir_entry = if entry.mode == MODE_SYMLINK {
-                let target = inline
-                    .and_then(|m| m.get(&entry.sha))
-                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                    .map(String::from)
-                    .unwrap_or_default();
+                let target = match inline.and_then(|m| m.get(&entry.sha)) {
+                    Some(bytes) => match std::str::from_utf8(bytes) {
+                        Ok(s) => s.to_string(),
+                        Err(e) => {
+                            // Defensive: real-world git symlinks are always
+                            // valid UTF-8. If we ever see otherwise, log and
+                            // fall through to empty target rather than crashing
+                            // the snapshot build.
+                            tracing::warn!(
+                                target: "ctxfs.provider.fetch",
+                                path = entry.path.as_str(),
+                                sha = entry.sha.as_str(),
+                                error = format!("{e:?}").as_str(),
+                                "symlink target bytes are not valid UTF-8; using empty target"
+                            );
+                            String::new()
+                        }
+                    },
+                    None => String::new(),
+                };
                 DirEntry::Symlink(SymlinkEntry { name, target })
             } else {
                 match entry.entry_type.as_str() {
@@ -607,12 +630,41 @@ impl Provider for GitHubProvider {
         // Record the source so later `fetch_blob` calls know which repo to hit.
         *self.active_source.lock().unwrap() = Some(source.clone());
 
+        // 1. Pre-seed counter_key with a "<resolving:ref>" placeholder commit
+        //    so the upcoming `resolve_ref` API call is attributed to this
+        //    mount in `rest_calls_total`. Without this, resolve_ref runs with
+        //    counter_key=None and the API call is silently un-counted (the
+        //    M2.T2 quality-review gap).
+        //
+        //    The placeholder produces a separate transient `CounterKey` bucket
+        //    visible to `ctxfs status` for ~1 API call; the bulk of counter
+        //    activity attributes to the real commit (set in step 3 below).
+        *self.counter_key.lock().unwrap() = Some(CounterKey {
+            source: "github".to_string(),
+            repo: source.name.clone(),
+            commit: format!("<resolving:{}>", source.version),
+            mount_id: source.id(),
+        });
+
+        // 2. Resolve the ref to a concrete commit sha.
         let commit_sha = self.resolve_ref(source).await?;
         debug!("resolved ref {} -> {}", source.version, commit_sha);
 
+        // 3. Replace counter_key with the resolved commit sha now that we
+        //    know it. All subsequent fetch_tree / prefetch / fetch_blob calls
+        //    attribute to the real (source, repo, commit, mount_id) bucket.
+        *self.counter_key.lock().unwrap() = Some(CounterKey {
+            source: "github".to_string(),
+            repo: source.name.clone(),
+            commit: commit_sha.clone(),
+            mount_id: source.id(),
+        });
+
         let (owner, repo) = owner_repo(source)?;
 
-        // Tier 2a: local tree cache
+        // Tier 2a: local tree cache. counter_key is already set (step 3) so
+        // any subsequent `fetch_blob` calls on the cached snapshot attribute
+        // correctly to the real commit bucket.
         if let Some(ref tc) = self.tree_cache {
             if let Some(data) = tc.get(owner, repo, &commit_sha) {
                 debug!("tree cache HIT for {owner}/{repo}@{commit_sha}");
@@ -620,7 +672,7 @@ impl Provider for GitHubProvider {
             }
         }
 
-        // Tier 2b: shared (Redis) tree cache
+        // Tier 2b: shared (Redis) tree cache.
         if let Some(ref stc) = self.shared_tree_cache {
             if let Some(data) = stc.get_tree(owner, repo, &commit_sha).await {
                 debug!("shared tree cache HIT for {owner}/{repo}@{commit_sha}");
@@ -632,10 +684,34 @@ impl Provider for GitHubProvider {
             }
         }
 
+        // 4. Fetch tree.
         let tree = self.fetch_tree(source, &commit_sha).await?;
         debug!("fetched tree with {} entries", tree.tree.len());
 
-        let (root_digest, directories) = Self::build_directories(&tree.tree, source);
+        // 5. Prefetch small blobs + symlink targets for B1/B7 inlining.
+        //    Skip the call entirely if no entries are eligible (avoids a
+        //    no-op futures-stream construction).
+        let symlink_set = Self::symlink_shas(&tree.tree);
+        let small_shas = Self::small_blob_shas(&tree.tree);
+        let inline = if small_shas.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            self.prefetch_small_blobs(source, small_shas, &symlink_set)
+                .await?
+        };
+
+        // 6. Record prefetch_hits per successfully prefetched blob.
+        if let Some(key) = self.counter_key.lock().unwrap().clone() {
+            let counters = self.observability.counters_for(key);
+            for _ in 0..inline.len() {
+                counters.record_prefetch_hit();
+            }
+        }
+
+        // 7. Build directories with inline content (B1) and resolved
+        //    symlink targets (B7).
+        let (root_digest, directories) =
+            Self::build_directories_with_inline(&tree.tree, source, &inline);
 
         // Cache all directory objects
         for (path, dir) in &directories {
@@ -981,6 +1057,16 @@ mod tests {
                 sha: "ccc".into(),
                 size: Some(20),
             },
+            // Adversarial: a hostile remote could declare a symlink with a
+            // 5 MB body. small_blob_shas must exclude it because the prefetch
+            // path would otherwise inline 5 MB as the link target.
+            TreeEntry {
+                path: "huge_link".into(),
+                mode: "120000".into(),
+                entry_type: "blob".into(),
+                sha: "huge".into(),
+                size: Some(5_000_000),
+            },
             TreeEntry {
                 path: "subtree".into(),
                 mode: "040000".into(),
@@ -997,15 +1083,17 @@ mod tests {
             },
         ];
         let shas = GitHubProvider::small_blob_shas(&entries);
-        // Sorted + deduped: "aaa" (small file, dup eliminated), "ccc" (symlink).
-        // Big file "bbb" excluded by size; tree "ddd" excluded by entry_type.
+        // "aaa" (small file, dup eliminated), "ccc" (small symlink). NOT
+        // included: "bbb" (size > 4 KB), "huge" (adversarial 5 MB symlink),
+        // "ddd" (tree, not a blob).
         assert_eq!(shas, vec!["aaa".to_string(), "ccc".to_string()]);
     }
 
-    /// Empty-shas test to keep `prefetch_small_blobs` (and via it,
-    /// `fetch_blob_with_sha` and `PREFETCH_CONCURRENCY`) reachable from the
-    /// static call graph until M2.T6 wires them into `fetch_snapshot`. With
-    /// no shas, no HTTP is performed.
+    /// With no shas, no HTTP is performed and the returned map is empty.
+    /// Behavioral test: `fetch_snapshot` skips the prefetch call entirely
+    /// when `small_blob_shas` is empty, so this is mostly defense-in-depth,
+    /// but it still locks down the contract that the helper is a no-op for
+    /// empty input regardless of provider state.
     #[tokio::test]
     async fn prefetch_small_blobs_empty_shas_returns_empty_map_without_http() {
         let cache_dir = tempfile::tempdir().unwrap();
@@ -1117,6 +1205,35 @@ mod tests {
         match link_entry {
             DirEntry::Symlink(s) => assert_eq!(s.target, "path/to/target"),
             _ => panic!("expected symlink"),
+        }
+    }
+
+    #[test]
+    fn build_directories_size_guard_excludes_large_blob_even_if_in_map() {
+        // Even if the inline map mistakenly contains bytes for a >4 KB SHA,
+        // the size guard in build_directories_inner short-circuits BEFORE
+        // the map lookup, so inline_content stays None. This locks down
+        // the size-guard contract that the docs promise.
+        let source = make_test_source();
+        let entries = vec![TreeEntry {
+            path: "big.bin".into(),
+            mode: "100644".into(),
+            entry_type: "blob".into(),
+            sha: "def".into(),
+            size: Some(99_999),
+        }];
+        let mut inline = std::collections::HashMap::new();
+        let _ = inline.insert("def".to_string(), b"this should NOT be inlined".to_vec());
+
+        let (_, dirs) = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        let root = dirs.get("").unwrap();
+        let big_entry = root.entries.iter().find(|e| e.name() == "big.bin").unwrap();
+        match big_entry {
+            DirEntry::File(f) => assert_eq!(
+                f.inline_content, None,
+                "size guard should exclude >4 KB blobs even if the map has bytes"
+            ),
+            _ => panic!("expected file"),
         }
     }
 
