@@ -1,10 +1,14 @@
 //! Redis-backed [`SharedTreeCache`] implementation with zstd compression.
 
 use async_trait::async_trait;
-use ctxfs_cache::SharedTreeCache;
+use ctxfs_cache::{SharedTreeCache, SCHEMA_VERSION};
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use tracing::warn;
+
+/// Length of the schema-version prefix prepended to every redis-cached
+/// payload. Stored as a little-endian `u32`.
+const VERSION_PREFIX_LEN: usize = 4;
 
 /// Redis-backed tree cache with zstd compression.
 ///
@@ -44,6 +48,33 @@ impl RedisTreeCache {
     fn cache_key(owner: &str, repo: &str, commit_sha: &str) -> String {
         format!("ctxfs:tree:{owner}/{repo}@{commit_sha}")
     }
+
+    /// Prepend a 4-byte little-endian schema version to `compressed` so we can
+    /// detect and discard payloads written by an older daemon after a manifest
+    /// schema change. Pairs with [`Self::unwrap_versioned`].
+    fn wrap_with_version(compressed: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(VERSION_PREFIX_LEN + compressed.len());
+        out.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
+        out.extend_from_slice(compressed);
+        out
+    }
+
+    /// Inverse of [`Self::wrap_with_version`]. Returns the inner zstd-compressed
+    /// bytes if the prefix matches the current `SCHEMA_VERSION`; otherwise
+    /// returns `None` (treated as cache miss). Older payloads stored before the
+    /// prefix was introduced (no version bytes at all) are also rejected — they
+    /// will deserialize as a different `u32` and fail the equality check.
+    fn unwrap_versioned(blob: &[u8]) -> Option<&[u8]> {
+        if blob.len() < VERSION_PREFIX_LEN {
+            return None;
+        }
+        let (version_bytes, rest) = blob.split_at(VERSION_PREFIX_LEN);
+        let version = u32::from_le_bytes(version_bytes.try_into().ok()?);
+        if version != SCHEMA_VERSION {
+            return None;
+        }
+        Some(rest)
+    }
 }
 
 #[async_trait]
@@ -51,15 +82,24 @@ impl SharedTreeCache for RedisTreeCache {
     async fn get_tree(&self, owner: &str, repo: &str, commit_sha: &str) -> Option<Vec<u8>> {
         let key = Self::cache_key(owner, repo, commit_sha);
         let mut conn = self.client.clone();
-        let compressed: Vec<u8> = conn
+        let blob: Vec<u8> = conn
             .get(&key)
             .await
             .map_err(|e| warn!("redis get error for {key}: {e}"))
             .ok()?;
-        if compressed.is_empty() {
+        if blob.is_empty() {
             return None;
         }
-        zstd::decode_all(compressed.as_slice())
+        // Reject payloads with a missing or stale schema-version prefix.
+        // These are silently skipped (treated as cache miss) so the caller
+        // falls back to a fresh fetch via the current code path.
+        let compressed = Self::unwrap_versioned(&blob).or_else(|| {
+            warn!(
+                "redis: dropping cache entry for {key} with stale schema version (expected {SCHEMA_VERSION})"
+            );
+            None
+        })?;
+        zstd::decode_all(compressed)
             .map_err(|e| warn!("zstd decompress error for {key}: {e}"))
             .ok()
     }
@@ -73,8 +113,9 @@ impl SharedTreeCache for RedisTreeCache {
                 return;
             }
         };
+        let payload = Self::wrap_with_version(&compressed);
         let mut conn = self.client.clone();
-        let result: Result<(), _> = conn.set(&key, compressed).await;
+        let result: Result<(), _> = conn.set(&key, payload).await;
         if let Err(e) = result {
             warn!("redis set error for {key}: {e}");
         }
@@ -97,5 +138,49 @@ mod tests {
         let compressed = zstd::encode_all(original.as_slice(), 3).unwrap();
         let decompressed = zstd::decode_all(compressed.as_slice()).unwrap();
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn version_prefix_roundtrips_current_schema() {
+        let payload = b"compressed-snapshot-bytes";
+        let wrapped = RedisTreeCache::wrap_with_version(payload);
+        // First 4 bytes are the LE schema version.
+        assert_eq!(
+            &wrapped[..4],
+            &SCHEMA_VERSION.to_le_bytes(),
+            "wrap must prepend current SCHEMA_VERSION"
+        );
+        let unwrapped = RedisTreeCache::unwrap_versioned(&wrapped).expect("matching version");
+        assert_eq!(unwrapped, payload);
+    }
+
+    #[test]
+    fn unwrap_versioned_rejects_old_version() {
+        // Simulate a payload written by a previous daemon version (v1).
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(b"old-payload");
+        assert!(
+            RedisTreeCache::unwrap_versioned(&blob).is_none(),
+            "v1 payload must be rejected after M2 bump"
+        );
+    }
+
+    #[test]
+    fn unwrap_versioned_rejects_short_blob() {
+        // Pre-prefix payloads (no version bytes at all) shorter than 4 bytes
+        // are treated as cache miss.
+        assert!(RedisTreeCache::unwrap_versioned(&[]).is_none());
+        assert!(RedisTreeCache::unwrap_versioned(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn unwrap_versioned_rejects_pre_prefix_payloads() {
+        // Pre-M2 daemons stored raw zstd-compressed bytes with no prefix.
+        // Such bytes start with the zstd magic 0x28B52FFD (in LE: FD 2F B5 28).
+        // u32::from_le_bytes([0xFD, 0x2F, 0xB5, 0x28]) = 0x28B52FFD = 681_398_269,
+        // which is not equal to SCHEMA_VERSION; the equality check rejects it.
+        let zstd_magic = [0xFDu8, 0x2F, 0xB5, 0x28, /* body */ 0xAA, 0xBB];
+        assert!(RedisTreeCache::unwrap_versioned(&zstd_magic).is_none());
     }
 }

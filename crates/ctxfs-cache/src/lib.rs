@@ -2,7 +2,7 @@ mod resolution;
 pub use resolution::{CachedResolution, ResolutionCache};
 
 mod tree;
-pub use tree::TreeCache;
+pub use tree::{TreeCache, SCHEMA_VERSION};
 
 mod shared;
 pub use shared::SharedTreeCache;

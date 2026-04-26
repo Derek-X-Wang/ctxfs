@@ -3,7 +3,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const SCHEMA_VERSION: u32 = 1;
+/// Tree-cache serialization schema version. Bumped when the manifest shape
+/// changes in a way that older cached snapshots would mis-render.
+///
+/// History:
+/// - v1: initial format (pre-M2). Manifests had `inline_content: None` and
+///   empty `target` for symlinks; reads from these would bypass M2's prefetch
+///   path and serve broken manifests.
+/// - v2: M2 — `FileEntry::inline_content` populated for ≤4 KB blobs and
+///   `SymlinkEntry::target` decoded from prefetched bytes.
+///
+/// Public so the redis-backed [`crate::SharedTreeCache`] implementation can
+/// share one source of truth for the version envelope.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub struct TreeCache {
@@ -206,6 +218,27 @@ mod tests {
         assert!(cache.get("owner", "repo", "sha1").is_none());
         // File should have been deleted.
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn pre_m2_v1_cache_file_is_invalidated() {
+        // Regression: M2 bumped SCHEMA_VERSION from 1 to 2 specifically to
+        // invalidate cached snapshots whose manifests pre-date the prefetch
+        // path (inline_content=None, empty symlink target). A v1 cache file
+        // must be treated as a miss.
+        let dir = tempdir().unwrap();
+        let cache = TreeCache::new(dir.path(), 1024 * 1024);
+
+        let path = cache.file_path("owner", "repo", "sha1");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let v1 = serde_json::json!({"version": 1, "data": {"snapshot": "pre-m2"}});
+        fs::write(&path, serde_json::to_vec(&v1).unwrap()).unwrap();
+
+        assert!(
+            cache.get("owner", "repo", "sha1").is_none(),
+            "v1 cache file must be treated as miss after M2 bump"
+        );
+        assert!(!path.exists(), "stale v1 file should be removed on read");
     }
 
     #[test]
