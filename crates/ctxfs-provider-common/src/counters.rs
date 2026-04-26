@@ -27,6 +27,9 @@ pub struct MountCounters {
     throttle_events: AtomicU64,
     prefetch_hits: AtomicU64,
     prefetch_failures: AtomicU64,
+    prefetch_skipped_oversized: AtomicU64,
+    tarball_digest_mismatch: AtomicU64,
+    tarball_invalid_entries: AtomicU64,
     truncated_tree_fallbacks: AtomicU64,
     cache_hits: AtomicU64,
     cache_misses: AtomicU64,
@@ -42,6 +45,9 @@ pub struct CounterSnapshot {
     pub throttle_events: u64,
     pub prefetch_hits: u64,
     pub prefetch_failures: u64,
+    pub prefetch_skipped_oversized: u64,
+    pub tarball_digest_mismatch: u64,
+    pub tarball_invalid_entries: u64,
     pub truncated_tree_fallbacks: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
@@ -78,6 +84,20 @@ impl MountCounters {
         let _ = self.prefetch_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_prefetch_skipped_oversized(&self) {
+        let _ = self
+            .prefetch_skipped_oversized
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tarball_digest_mismatch(&self) {
+        let _ = self.tarball_digest_mismatch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tarball_invalid_entries(&self) {
+        let _ = self.tarball_invalid_entries.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_truncated_tree_fallback(&self) {
         let _ = self
             .truncated_tree_fallbacks
@@ -105,6 +125,9 @@ impl MountCounters {
             throttle_events: self.throttle_events.load(Ordering::Relaxed),
             prefetch_hits: self.prefetch_hits.load(Ordering::Relaxed),
             prefetch_failures: self.prefetch_failures.load(Ordering::Relaxed),
+            prefetch_skipped_oversized: self.prefetch_skipped_oversized.load(Ordering::Relaxed),
+            tarball_digest_mismatch: self.tarball_digest_mismatch.load(Ordering::Relaxed),
+            tarball_invalid_entries: self.tarball_invalid_entries.load(Ordering::Relaxed),
             truncated_tree_fallbacks: self.truncated_tree_fallbacks.load(Ordering::Relaxed),
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
@@ -157,5 +180,18 @@ mod tests {
         let k1 = key();
         let k2 = key();
         assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn new_counters_increment_independently() {
+        let c = MountCounters::new();
+        c.record_prefetch_skipped_oversized();
+        c.record_tarball_digest_mismatch();
+        c.record_tarball_invalid_entries();
+        c.record_tarball_invalid_entries();
+        let s = c.snapshot();
+        assert_eq!(s.prefetch_skipped_oversized, 1);
+        assert_eq!(s.tarball_digest_mismatch, 1);
+        assert_eq!(s.tarball_invalid_entries, 2);
     }
 }
