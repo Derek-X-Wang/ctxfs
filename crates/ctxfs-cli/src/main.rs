@@ -64,10 +64,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show status of a specific mount
+    /// Show observability status. With no argument, prints the global view
+    /// (rate-limit budgets per (host, resource), top-N consumed mounts,
+    /// recent throttle events). With --mount, prints per-mount detail.
     Status {
-        /// Mount ID
-        mount_id: String,
+        /// Optional: limit output to a specific mount.
+        #[arg(long = "mount")]
+        mount_id: Option<String>,
     },
     /// Daemon management
     Daemon {
@@ -270,20 +273,24 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Status { mount_id } => {
-            let client = connect(&config).await?;
-            let info = client
-                .status(tarpc::context::current(), mount_id)
-                .await?
-                .map_err(|e| anyhow::anyhow!(e))?;
-
-            println!("Mount: {}", info.id);
-            println!("  Source:      {}", info.source);
-            println!("  Mount point: {}", info.mount_point);
-            println!("  Commit:      {}", info.commit_sha);
-            println!("  Status:      {}", info.status);
-            println!("  Mounted at:  {}", info.mounted_at);
-        }
+        Commands::Status { mount_id } => match mount_id {
+            Some(id) => {
+                let client = connect(&config).await?;
+                let info = client
+                    .status(tarpc::context::current(), id)
+                    .await?
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                print_mount_status(&info);
+            }
+            None => {
+                let client = connect(&config).await?;
+                let report = client
+                    .get_status(tarpc::context::current())
+                    .await?
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                print_global_status(&report);
+            }
+        },
 
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {
@@ -754,6 +761,69 @@ fn print_server_only_info(info: &ctxfs_ipc::service::MountInfo) {
         p = info.nfs_port.unwrap_or(0)
     );
     println!("    127.0.0.1:/ {}", info.mount_point);
+}
+
+fn print_mount_status(info: &ctxfs_ipc::service::MountInfo) {
+    println!("Mount: {}", info.id);
+    println!("  Source:      {}", info.source);
+    println!("  Mount point: {}", info.mount_point);
+    println!("  Commit:      {}", info.commit_sha);
+    println!("  Status:      {}", info.status);
+    println!("  Mounted at:  {}", info.mounted_at);
+}
+
+fn print_global_status(report: &ctxfs_ipc::service::StatusReportV1) {
+    println!(
+        "ContextFS observability — schema v{}",
+        report.schema_version
+    );
+    println!();
+
+    if report.budgets.is_empty() {
+        println!("Rate-limit budgets: (none yet — make a request to populate)");
+    } else {
+        println!("Rate-limit budgets:");
+        for b in &report.budgets {
+            let remaining = b
+                .remaining
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "?".into());
+            let limit = b.limit.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
+            let throttled = if b.throttle_active_until_unix.is_some() {
+                " [SECONDARY THROTTLE ACTIVE]"
+            } else {
+                ""
+            };
+            println!(
+                "  {} {}/{}: {}/{}{}",
+                b.host, b.auth_kind, b.resource_class, remaining, limit, throttled
+            );
+        }
+    }
+    println!();
+
+    if report.mounts.is_empty() {
+        println!("Mounts: (none active)");
+    } else {
+        println!("Top mounts by REST calls:");
+        for m in report.mounts.iter().take(10) {
+            let ratio_str = m
+                .cache_hit_ratio
+                .map(|r| format!("{:.1}% cache", r * 100.0))
+                .unwrap_or_else(|| "no cache ops".into());
+            println!(
+                "  {} ({}/{} @ {}): {} calls, {} bytes, {} prefetch hits, {}",
+                m.mount_id,
+                m.source,
+                m.repo,
+                &m.commit[..8.min(m.commit.len())],
+                m.rest_calls_total,
+                m.bytes_total,
+                m.prefetch_hits,
+                ratio_str
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
