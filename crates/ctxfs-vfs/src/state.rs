@@ -274,7 +274,7 @@ impl VfsState {
                 .provider
                 .fetch_directory(&current_digest)
                 .await
-                .map_err(|e| provider_err_to_vfs(e, "fetching directory for subpath"))?;
+                .map_err(|e| provider_err_to_vfs(e, "fetch_directory_for_subpath"))?;
 
             let directory: Directory = serde_json::from_slice(&data)
                 .map_err(|e| VfsError::Io(format!("parsing directory: {e}")))?;

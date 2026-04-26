@@ -125,9 +125,10 @@ fn attr_to_fattr3(attr: &NodeAttr) -> fattr3 {
 ///
 /// `RateLimited` maps to `NFS3ERR_JUKEBOX` (RFC 1813: server busy, retry).
 /// Most NFS clients automatically retry on JUKEBOX, which is the right
-/// behavior for a transient provider rate-limit. We do *not* surface the
-/// `retry_after_secs` to the client — NFSv3 has no such field — but it is
-/// logged when the original VFS error is constructed.
+/// behavior for a transient provider rate-limit. The `retry_after_secs`
+/// value is not propagated to NFS clients (NFSv3 has no such field); it
+/// is logged at the `ctxfs.provider.throttle` tracing target by
+/// `provider-git::check_rate_limit` for diagnosis.
 fn vfs_err_to_nfs(e: &VfsError) -> nfsstat3 {
     match e {
         VfsError::NotFound => nfsstat3::NFS3ERR_NOENT,

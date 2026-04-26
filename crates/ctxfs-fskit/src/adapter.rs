@@ -84,8 +84,9 @@ pub(crate) fn make_item(name: &str, attr: &NodeAttr) -> Item {
 ///
 /// `RateLimited` maps to `EAGAIN` so macOS Finder / userspace clients see
 /// a retryable signal rather than `EIO`. The `retry_after_secs` value is
-/// not propagated to FSKit (no field for it); it is logged when the VFS
-/// error is constructed.
+/// not propagated to FSKit (no field for it in the POSIX error shape); it
+/// is logged at the `ctxfs.provider.throttle` tracing target by
+/// `provider-git::check_rate_limit` for diagnosis.
 pub(crate) fn vfs_err_to_fskit(err: &VfsError) -> FsKitError {
     let errno = match err {
         VfsError::NotFound => libc::ENOENT,
@@ -210,8 +211,8 @@ mod tests {
         assert!(
             matches!(vfs_err_to_fskit(&VfsError::Io("x".into())), FsKitError::Posix(e) if e == libc::EIO)
         );
-        // RateLimited must map to EAGAIN, NOT EIO — that's the whole point of
-        // M2.T3. EIO would defeat the spec's "zero EIO under 429" criterion.
+        // RateLimited must map to EAGAIN, NOT EIO — EIO would defeat the
+        // spec's "zero EIO under 429" criterion.
         assert!(matches!(
             vfs_err_to_fskit(&VfsError::RateLimited { retry_after_secs: 30 }),
             FsKitError::Posix(e) if e == libc::EAGAIN
