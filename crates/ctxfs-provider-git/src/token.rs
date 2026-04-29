@@ -18,16 +18,18 @@ pub async fn validate_github_token(token: &str) -> Result<TokenInfo, String> {
     if token.is_empty() {
         return Err("token is empty".to_string());
     }
+    let auth =
+        ctxfs_provider_common::http::bearer_header(token).ok_or("invalid token encoding")?;
     let client = reqwest::Client::new();
     let rate_limit_fut = client
         .get("https://api.github.com/rate_limit")
-        .header("Authorization", format!("Bearer {token}"))
+        .header(reqwest::header::AUTHORIZATION, auth.clone())
         .header("User-Agent", concat!("ctxfs/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .send();
     let user_fut = client
         .get("https://api.github.com/user")
-        .header("Authorization", format!("Bearer {token}"))
+        .header(reqwest::header::AUTHORIZATION, auth)
         .header("User-Agent", concat!("ctxfs/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .send();

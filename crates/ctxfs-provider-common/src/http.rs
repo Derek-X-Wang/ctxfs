@@ -1,13 +1,39 @@
 //! Shared HTTP client and helpers for registry API calls.
 
 use ctxfs_core::error::CtxfsError;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
 
 const USER_AGENT: &str = "ctxfs/0.1";
 
 /// Default retry-after seconds when a 429 response has no Retry-After header.
 pub const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
+
+/// Build an `Authorization: Bearer <token>` header value.
+///
+/// Returns `None` if `token` is empty or contains characters that are
+/// not valid in an HTTP header value (non-ASCII or control bytes).
+/// The latter is defensive — real GitHub tokens are always printable ASCII.
+#[must_use]
+pub fn bearer_header(token: &str) -> Option<HeaderValue> {
+    if token.is_empty() {
+        return None;
+    }
+    format!("Bearer {token}").parse().ok()
+}
+
+/// Build an `Authorization: Bearer <token>` header value from a known-valid
+/// token, inserting it into `headers` under [`AUTHORIZATION`].
+///
+/// No-op when `token` is `None`.  Silently skips the insert if the token
+/// string produces an invalid `HeaderValue` (shouldn't happen in practice
+/// since GitHub tokens are printable ASCII).
+pub fn insert_bearer_header(headers: &mut HeaderMap, token: Option<&str>) {
+    let Some(token) = token else { return };
+    if let Some(hv) = bearer_header(token) {
+        let _ = headers.insert(AUTHORIZATION, hv);
+    }
+}
 
 /// Build a reqwest client with standard headers for registry API calls.
 pub fn registry_client() -> reqwest::Client {

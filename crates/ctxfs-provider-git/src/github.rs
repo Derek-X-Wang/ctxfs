@@ -10,7 +10,7 @@ use ctxfs_provider_common::counters::CounterKey;
 use ctxfs_provider_common::fetcher::{SlotClaim, TarballKey, TarballSingleflightMap};
 use ctxfs_provider_common::observability::Observability;
 use ctxfs_provider_common::rate_limit::AuthIdentity;
-use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION};
+use reqwest::header::{HeaderMap, ACCEPT};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -268,10 +268,7 @@ impl GitHubProvider {
 
         let mut default_headers = HeaderMap::new();
         let _ = default_headers.insert(ACCEPT, "application/vnd.github.v3+json".parse().unwrap());
-        if let Some(token) = token {
-            let _ =
-                default_headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        }
+        ctxfs_provider_common::http::insert_bearer_header(&mut default_headers, token);
 
         // Build the client with redirect::Policy::none() so reqwest does NOT
         // auto-follow the tarball 302 with the Authorization header attached.
@@ -725,6 +722,7 @@ impl GitHubProvider {
         source: &SourceSpec,
     ) -> (Digest, HashMap<String, Directory>) {
         Self::build_directories_inner(entries, source, None)
+            .expect("build_directories with no inline map is infallible")
     }
 
     /// Like [`Self::build_directories`], but populates `FileEntry::inline_content`
@@ -739,11 +737,19 @@ impl GitHubProvider {
     /// Symlinks (B7): no size guard — symlinks are always small in practice,
     /// and the prefetch path's strict-on-symlink failure policy ensures the
     /// map already contains the target before this function runs in production.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a symlink entry's SHA is absent from `inline` or
+    /// its stored bytes are not valid UTF-8.  Both indicate a mismatch between
+    /// what `prefetch_small_blobs` was expected to fetch and what it actually
+    /// returned, and are treated as hard failures so the snapshot build fails
+    /// loudly rather than silently producing stale empty symlink targets.
     pub fn build_directories_with_inline(
         entries: &[TreeEntry],
         source: &SourceSpec,
         inline: &std::collections::HashMap<String, Vec<u8>>,
-    ) -> (Digest, HashMap<String, Directory>) {
+    ) -> Result<(Digest, HashMap<String, Directory>), CtxfsError> {
         Self::build_directories_inner(entries, source, Some(inline))
     }
 
@@ -751,13 +757,14 @@ impl GitHubProvider {
     /// [`Self::build_directories_with_inline`]. When `inline` is `Some`, file
     /// entries ≤ [`Self::SMALL_BLOB_THRESHOLD_BYTES`] whose SHA appears in the
     /// map get `inline_content` populated, and symlink entries decode their
-    /// target from the same map. When `inline` is `None`, behavior matches the
-    /// pre-M2 path: empty target, no inline content.
+    /// target from the same map — a missing SHA or invalid UTF-8 is an error.
+    /// When `inline` is `None`, behavior matches the pre-M2 path: empty target,
+    /// no inline content (never errors).
     fn build_directories_inner(
         entries: &[TreeEntry],
         _source: &SourceSpec,
         inline: Option<&std::collections::HashMap<String, Vec<u8>>>,
-    ) -> (Digest, HashMap<String, Directory>) {
+    ) -> Result<(Digest, HashMap<String, Directory>), CtxfsError> {
         // Group entries by parent path
         let mut dir_children: HashMap<String, Vec<DirEntry>> = HashMap::new();
         let _ = dir_children.insert(String::new(), Vec::new()); // root
@@ -781,25 +788,30 @@ impl GitHubProvider {
 
             // Check mode first: symlinks are entry_type "blob" with mode "120000"
             let dir_entry = if entry.mode == MODE_SYMLINK {
-                let target = match inline.and_then(|m| m.get(&entry.sha)) {
-                    Some(bytes) => match std::str::from_utf8(bytes) {
-                        Ok(s) => s.to_string(),
-                        Err(e) => {
-                            // Defensive: real-world git symlinks are always
-                            // valid UTF-8. If we ever see otherwise, log and
-                            // fall through to empty target rather than crashing
-                            // the snapshot build.
-                            tracing::warn!(
-                                target: "ctxfs.provider.fetch",
-                                path = entry.path.as_str(),
-                                sha = entry.sha.as_str(),
-                                error = format!("{e:?}").as_str(),
-                                "symlink target bytes are not valid UTF-8; using empty target"
-                            );
-                            String::new()
-                        }
-                    },
-                    None => String::new(),
+                let target = if let Some(map) = inline {
+                    // Inline map is present (build_directories_with_inline):
+                    // the symlink MUST have been prefetched.  A missing SHA or
+                    // non-UTF-8 target is a hard error — the snapshot would
+                    // otherwise silently contain a broken empty symlink.
+                    let bytes = map.get(&entry.sha).ok_or_else(|| {
+                        CtxfsError::Provider(format!(
+                            "symlink sha {} (path '{}') missing from inline map; \
+                             prefetch must include all symlink SHAs",
+                            entry.sha, entry.path
+                        ))
+                    })?;
+                    std::str::from_utf8(bytes)
+                        .map_err(|e| {
+                            CtxfsError::Provider(format!(
+                                "symlink target for '{}' (sha {}) is not valid UTF-8: {e}",
+                                entry.path, entry.sha
+                            ))
+                        })?
+                        .to_string()
+                } else {
+                    // No inline map (build_directories lazy path): leave target
+                    // empty; the read path resolves lazily.
+                    String::new()
                 };
                 DirEntry::Symlink(SymlinkEntry { name, target })
             } else {
@@ -884,7 +896,7 @@ impl GitHubProvider {
             .cloned()
             .unwrap_or_else(|| Digest::sha256(b"empty"));
 
-        (root_digest, directories)
+        Ok((root_digest, directories))
     }
 
     // ---- Tarball auto-gate + singleflight dispatch ----
@@ -1595,9 +1607,10 @@ impl GitHubProvider {
         }
 
         // 7. Build directories with inline content (B1) and resolved
-        //    symlink targets (B7).
+        //    symlink targets (B7). Fails if a symlink SHA is absent from the
+        //    inline map (indicates a prefetch gap — hard error per B7 policy).
         let (root_digest, directories) =
-            Self::build_directories_with_inline(&tree.tree, source, &inline);
+            Self::build_directories_with_inline(&tree.tree, source, &inline)?;
 
         // Cache all directory objects
         for (path, dir) in &directories {
@@ -2134,7 +2147,8 @@ mod tests {
         let mut inline = std::collections::HashMap::new();
         let _ = inline.insert("abc".to_string(), b"hello!".to_vec());
 
-        let (_, dirs) = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        let (_, dirs) =
+            GitHubProvider::build_directories_with_inline(&entries, &source, &inline).unwrap();
         let root = dirs.get("").unwrap();
         let small_entry = root
             .entries
@@ -2166,7 +2180,8 @@ mod tests {
         let mut inline = std::collections::HashMap::new();
         let _ = inline.insert("lnk".to_string(), b"path/to/target".to_vec());
 
-        let (_, dirs) = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        let (_, dirs) =
+            GitHubProvider::build_directories_with_inline(&entries, &source, &inline).unwrap();
         let root = dirs.get("").unwrap();
         let link_entry = root.entries.iter().find(|e| e.name() == "link").unwrap();
         match link_entry {
@@ -2192,7 +2207,8 @@ mod tests {
         let mut inline = std::collections::HashMap::new();
         let _ = inline.insert("def".to_string(), b"this should NOT be inlined".to_vec());
 
-        let (_, dirs) = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        let (_, dirs) =
+            GitHubProvider::build_directories_with_inline(&entries, &source, &inline).unwrap();
         let root = dirs.get("").unwrap();
         let big_entry = root.entries.iter().find(|e| e.name() == "big.bin").unwrap();
         match big_entry {
@@ -2242,6 +2258,33 @@ mod tests {
             DirEntry::Symlink(s) => assert_eq!(s.target, ""),
             _ => panic!("expected symlink"),
         }
+    }
+
+    #[test]
+    fn build_directories_with_inline_errors_on_symlink_missing_from_map() {
+        // When build_directories_with_inline is called with an inline map that
+        // does NOT contain the symlink's SHA, the function must return Err.
+        // This exercises the fail-strict policy introduced in M3 carry-forward.
+        let source = make_test_source();
+        let entries = vec![TreeEntry {
+            path: "link".into(),
+            mode: "120000".into(),
+            entry_type: "blob".into(),
+            sha: "missing-sha".into(),
+            size: Some(10),
+        }];
+        // Inline map is present but does NOT contain "missing-sha".
+        let inline = std::collections::HashMap::new();
+        let result = GitHubProvider::build_directories_with_inline(&entries, &source, &inline);
+        assert!(
+            result.is_err(),
+            "missing symlink SHA must produce Err, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("missing-sha"),
+            "error message must include the SHA, got: {msg}"
+        );
     }
 
     // ---- path-validation and redirect-validation tests ----
