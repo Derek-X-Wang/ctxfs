@@ -26,42 +26,70 @@ fn commit_atomic_writes_via_tmp_then_renames() {
     }
 }
 
+/// The streaming writer persists content under whatever digest name the caller
+/// supplies — it does NOT verify content-vs-digest internally.
 #[test]
-fn commit_atomic_with_writer_streams_and_verifies() {
+fn commit_atomic_with_writer_persists_under_named_digest() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
 
+    // Use an arbitrary digest (SHA-256 of a different string) to prove the
+    // writer doesn't enforce content-vs-digest correspondence.
     let payload = b"streaming-content";
-    let expected_digest = Digest::sha256(payload);
+    let named_digest = Digest::sha256(b"some-other-key");
 
     let mut writer = cache.commit_atomic_with_writer().unwrap();
     writer.write_all(payload).unwrap();
-    writer.finalize(&expected_digest).unwrap();
+    writer.finalize(&named_digest).unwrap();
 
-    assert!(cache.contains(&expected_digest));
-    assert_eq!(cache.get(&expected_digest).unwrap(), payload);
+    // Content is retrievable under the caller-supplied name.
+    assert!(cache.contains(&named_digest));
+    assert_eq!(cache.get(&named_digest).unwrap(), payload);
 }
 
+/// The bytes-in-memory entry point (`commit_atomic`) verifies externally
+/// before writing; mismatched digest returns Err and leaves the cache clean.
 #[test]
-fn commit_atomic_with_writer_rejects_digest_mismatch() {
-    use std::io::Write;
+fn commit_atomic_rejects_digest_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
 
     let actual = b"actual-content";
     let lying_digest = Digest::sha256(b"different-content");
 
-    let mut writer = cache.commit_atomic_with_writer().unwrap();
-    writer.write_all(actual).unwrap();
-    let res = writer.finalize(&lying_digest);
+    let res = cache.commit_atomic(&lying_digest, actual);
     assert!(res.is_err(), "expected DigestMismatch error");
     assert!(!cache.contains(&lying_digest));
-    // No leftover temp file.
-    let tmp = std::fs::read_dir(dir.path().join("tmp"))
+    // No leftover temp file (verification failed before writer was even used).
+    let tmp_count = std::fs::read_dir(dir.path().join("tmp"))
         .map(|d| d.count())
         .unwrap_or(0);
-    assert_eq!(tmp, 0);
+    assert_eq!(tmp_count, 0);
+}
+
+/// Explicitly documents the trust-the-caller contract: the streaming writer
+/// persists content even when the caller supplies a digest whose SHA-256
+/// doesn't match the written bytes. Verification is the caller's job.
+#[test]
+fn commit_atomic_with_writer_trusts_caller_no_verification() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+
+    let content = b"real-content";
+    // A digest whose hex doesn't match SHA-256 of content — simulates a
+    // Git-SHA-1 key passed by the tarball path.
+    let git_sha1_style_digest = Digest::sha256(b"completely-different");
+
+    let mut writer = cache.commit_atomic_with_writer().unwrap();
+    writer.write_all(content).unwrap();
+    // Writer trusts the caller — no mismatch error.
+    writer.finalize(&git_sha1_style_digest).unwrap();
+
+    // Content is persisted under the caller-supplied key.
+    assert!(cache.contains(&git_sha1_style_digest));
+    assert_eq!(cache.get(&git_sha1_style_digest).unwrap(), content);
 }
 
 #[test]

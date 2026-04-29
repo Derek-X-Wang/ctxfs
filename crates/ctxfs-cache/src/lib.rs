@@ -10,7 +10,6 @@ pub use shared::SharedTreeCache;
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;
-use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,17 +150,29 @@ impl BlobCache {
             .all(|d| state.entries.contains_key(&d.hex))
     }
 
-    /// Atomically commit `data` under `digest`. Writes to a temp file under
-    /// `<root>/tmp/<rand>`, fsyncs the file, renames into the canonical
-    /// fan-out path, then fsyncs the parent directory so the rename is
-    /// durable across crash. POSIX rename(2) is atomic — either the
-    /// canonical path holds the full content or it doesn't exist; partial
-    /// files only ever live in tmp/ and are cleaned by `cleanup_orphan_temps`.
+    /// Bytes-in-memory atomic commit. Verifies `Digest::sha256(data) == digest`
+    /// **before** writing — if the check fails the cache is not modified.
+    ///
+    /// Use this for content you have fully buffered and wish to verify before
+    /// persisting. For streaming content (e.g. tarball entries), use
+    /// [`commit_atomic_with_writer`] and verify externally with the
+    /// appropriate algorithm.
     ///
     /// LRU bookkeeping mirrors `put`. Use this method (not `put`) for content
     /// where corruption is a real risk — bulk tarball hydration, concurrent
     /// prefetch, etc.
     pub fn commit_atomic(&self, digest: &Digest, data: &[u8]) -> Result<(), CtxfsError> {
+        // External verify: bytes-in-memory variant has the data in hand.
+        // Compares SHA-256 because non-Git callers store with Digest::sha256.
+        // (Git callers go through the streaming path with their own SHA-1
+        // verification.)
+        let computed = Digest::sha256(data);
+        if computed.hex != digest.hex {
+            return Err(CtxfsError::Cache(format!(
+                "blob digest mismatch: expected {}, got {}",
+                digest.hex, computed.hex
+            )));
+        }
         let mut writer = self.commit_atomic_with_writer()?;
         use std::io::Write;
         writer
@@ -170,9 +181,13 @@ impl BlobCache {
         writer.finalize(digest)
     }
 
-    /// Streaming variant: returns a writer the caller fills incrementally.
-    /// `BlobTempWriter::finalize(expected_digest)` does fsync + verify +
-    /// rename + parent-fsync in one shot.
+    /// Streaming variant. Trust-the-caller: caller must verify content matches
+    /// the digest passed to [`BlobTempWriter::finalize`]. The writer does not
+    /// hash content internally — different M3 callers verify against different
+    /// algorithms (SHA-256 for the bytes-in-memory [`commit_atomic`]; Git blob
+    /// SHA-1 for the tarball path's external hasher + tee).
+    ///
+    /// See [`commit_atomic`] for the self-verifying entry point.
     pub fn commit_atomic_with_writer(&self) -> Result<BlobTempWriter, CtxfsError> {
         let tmp_dir = self.root.join("tmp");
         fs::create_dir_all(&tmp_dir)
@@ -183,7 +198,6 @@ impl BlobCache {
             cache_root: self.root.clone(),
             cache: self,
             temp: Some(temp),
-            hasher: Sha256::new(),
             bytes_written: 0,
         })
     }
@@ -372,20 +386,22 @@ impl BlobCache {
     }
 }
 
-/// Streaming writer returned by [`BlobCache::commit_atomic_with_writer`].
+/// Content-agnostic transactional blob writer returned by
+/// [`BlobCache::commit_atomic_with_writer`].
 ///
 /// Implements [`std::io::Write`] so callers can use [`std::io::copy`] or any
-/// other reader pipeline directly. Hashes content as it's written; on
-/// [`BlobTempWriter::finalize`], verifies against the expected digest,
-/// fsyncs, atomically renames into the canonical cache path, and fsyncs the
-/// parent dir.
+/// reader pipeline directly. Does **not** hash content internally — different
+/// M3 callers verify against different algorithms (SHA-256 for the in-memory
+/// [`BlobCache::commit_atomic`]; Git blob SHA-1 for the tarball path's
+/// external hasher + tee). [`BlobTempWriter::finalize`] does fsync → rename →
+/// parent-dir fsync → LRU update only.
 ///
-/// Drop without finalizing → temp file is cleaned via [`tempfile::NamedTempFile`]'s RAII.
+/// Drop without finalizing → temp file is cleaned via
+/// [`tempfile::NamedTempFile`]'s RAII.
 pub struct BlobTempWriter<'a> {
     cache_root: PathBuf,
     cache: &'a BlobCache,
     temp: Option<tempfile::NamedTempFile>,
-    hasher: Sha256,
     bytes_written: u64,
 }
 
@@ -400,10 +416,8 @@ impl std::fmt::Debug for BlobTempWriter<'_> {
 
 impl std::io::Write for BlobTempWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        use sha2::Digest as _;
         let f = self.temp.as_mut().expect("writer used after finalize");
         let n = f.as_file_mut().write(buf)?;
-        self.hasher.update(&buf[..n]);
         self.bytes_written += n as u64;
         Ok(n)
     }
@@ -415,19 +429,14 @@ impl std::io::Write for BlobTempWriter<'_> {
 }
 
 impl BlobTempWriter<'_> {
-    /// Verify SHA-256 against `expected`, fsync the temp file, rename(2)
-    /// into the canonical path, fsync the parent directory.
+    /// Trust-the-caller finalize: fsync the temp file, rename(2) into the
+    /// canonical path derived from `expected`, fsync the parent directory,
+    /// then update LRU bookkeeping.
+    ///
+    /// Does **not** verify content against `expected` — the caller is
+    /// responsible for verification (see [`BlobCache::commit_atomic`] for the
+    /// self-verifying entry point, or verify externally before calling this).
     pub fn finalize(mut self, expected: &Digest) -> Result<(), CtxfsError> {
-        use sha2::Digest as _;
-        let actual_hex = hex::encode(self.hasher.clone().finalize());
-        if actual_hex != expected.hex {
-            // Temp file unlinks on Drop via NamedTempFile.
-            return Err(CtxfsError::Cache(format!(
-                "blob digest mismatch: expected {} got {}",
-                expected.hex, actual_hex
-            )));
-        }
-
         let temp = self.temp.take().expect("temp present until finalize");
         temp.as_file()
             .sync_all()
@@ -476,9 +485,6 @@ impl BlobTempWriter<'_> {
                 }
             }
         }
-        // cache_root is kept as a struct field for future extensions
-        // (e.g., reservation-aware paths in M5).
-        let _ = self.cache_root;
         for (k, _) in evicted {
             self.cache.remove_blob_file(&k);
         }
