@@ -69,8 +69,6 @@ pub struct GitHubProvider {
     /// constructed fresh in `prepare_mount` (B8 constraint). Two concurrent
     /// mounts of the same `(host, owner, repo, commit)` await the same
     /// `OnceCell` so only one tarball download happens.
-    // Suppress until dispatch_fetch_policy (Commit D) calls claim_singleflight_slot.
-    #[allow(dead_code)]
     tarball_singleflight: Arc<TarballSingleflightMap>,
 }
 
@@ -114,9 +112,6 @@ struct BlobResponse {
 
 /// Outcome of one tarball extraction. Returned to the caller for telemetry
 /// and auto-gate-fallback decisions.
-// Task 7 calls fetch_tarball_into_cache which constructs this; until then
-// the struct is unused in production paths.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct TarballOutcome {
     pub blobs_committed: u64,
@@ -130,9 +125,6 @@ pub(crate) struct TarballOutcome {
 ///
 /// Feed bytes via [`Self::update`]; call [`Self::finalize_hex`] once to get the
 /// 40-char hex digest. Size header is emitted lazily on the first `update` call.
-// Task 7 wires fetch_tarball_into_cache; until then this struct is unused in
-// production paths (pure-function tests call the validators, not the hasher).
-#[allow(dead_code)]
 pub(crate) struct GitBlobSha1 {
     h: sha1::Sha1,
     size_written: u64,
@@ -149,7 +141,6 @@ impl std::fmt::Debug for GitBlobSha1 {
     }
 }
 
-#[allow(dead_code)]
 impl GitBlobSha1 {
     pub fn new(expected_size: u64) -> Self {
         use sha1::Digest as _;
@@ -888,6 +879,168 @@ impl GitHubProvider {
         (root_digest, directories)
     }
 
+    // ---- Tarball auto-gate + singleflight dispatch ----
+
+    /// Run the auto-gate and, if it elects tarball, fetch it (with singleflight
+    /// dedupe + cache pre-check). Tarball failure is non-fatal — the snapshot
+    /// still completes; lazy reads pick up uncached blobs.
+    ///
+    /// Counters:
+    /// - `prefetch_hits` — incremented per committed blob *inside*
+    ///   `fetch_tarball_into_cache`'s per-entry loop (Codex M3-plan-v1 #7).
+    /// - `prefetch_failures` — one tick per failed tarball attempt.
+    /// - `prefetch_skipped_oversized` — auto-gate said no (byte cap exceeded).
+    async fn dispatch_fetch_policy(
+        &self,
+        source: &SourceSpec,
+        commit_sha: &str,
+        tree_entries: &[TreeEntry],
+        policy: ctxfs_provider_common::fetcher::PrefetchPolicy,
+        threshold_count: u64,
+        max_bytes: u64,
+    ) -> Result<(), CtxfsError> {
+        use ctxfs_provider_common::fetcher::{decide_policy, FetchPolicy, PrefetchPolicy};
+
+        // Count blobs and sum estimated bytes. Treat any entry with size==None
+        // as "unknown size" — forces Lazy when policy==Auto (fail-closed so the
+        // byte cap cannot be underestimated). (Codex M3-plan-v1 #8.)
+        let blob_iter = tree_entries.iter().filter(|e| e.entry_type == "blob");
+        let blob_count = blob_iter.clone().count() as u64;
+        let any_unknown_size = blob_iter.clone().any(|e| e.size.is_none());
+        let estimated_bytes: u64 = blob_iter.clone().map(|e| e.size.unwrap_or(0)).sum();
+
+        let effective_policy = if any_unknown_size && policy == PrefetchPolicy::Auto {
+            tracing::info!(
+                target: "ctxfs.provider.tarball",
+                "manifest has entries with unknown size; degrading auto-gate to Lazy"
+            );
+            PrefetchPolicy::Disabled
+        } else {
+            policy
+        };
+
+        let decision = decide_policy(
+            blob_count,
+            estimated_bytes,
+            effective_policy,
+            threshold_count,
+            max_bytes,
+        );
+
+        match decision {
+            FetchPolicy::Lazy => Ok(()),
+
+            FetchPolicy::LazyOversized {
+                estimated_bytes,
+                blob_count,
+                cap,
+            } => {
+                if let Some(key) = self.counter_key.lock().unwrap().clone() {
+                    self.observability
+                        .counters_for(key)
+                        .record_prefetch_skipped_oversized();
+                }
+                tracing::warn!(
+                    target: "ctxfs.provider.tarball",
+                    estimated_bytes,
+                    blob_count,
+                    cap,
+                    "tarball auto-gate skipped: estimated_bytes > prefetch_max_bytes"
+                );
+                Ok(())
+            }
+
+            FetchPolicy::Tarball {
+                estimated_bytes,
+                blob_count,
+            } => {
+                // Pre-claim cache check: if every manifest blob is already
+                // cached, skip the tarball entirely (one lock acquire, cheap).
+                let blob_digests: Vec<Digest> = tree_entries
+                    .iter()
+                    .filter(|e| e.entry_type == "blob")
+                    .map(|e| Digest::from_sha256_hex(&e.sha))
+                    .collect();
+                if self.cache.contains_all(blob_digests.iter()) {
+                    tracing::info!(
+                        target: "ctxfs.provider.tarball",
+                        blob_count,
+                        "all manifest blobs already cached; skipping tarball"
+                    );
+                    return Ok(());
+                }
+
+                // Singleflight: claim slot for this (host, owner, repo, commit).
+                let (owner, repo) = owner_repo(source)?;
+                let key = TarballKey {
+                    host: self.api_host.clone(),
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                    commit_sha: commit_sha.to_string(),
+                };
+                let claim = self.claim_singleflight_slot(key);
+
+                // Leader populates the cell; waiters await the same result.
+                // get_or_init guarantees the closure runs exactly once.
+                let outcome_res: Result<(), String> = claim
+                    .slot
+                    .cell
+                    .get_or_init(|| async {
+                        match self
+                            .fetch_tarball_into_cache(source, commit_sha, tree_entries)
+                            .await
+                        {
+                            Ok(out) => {
+                                // prefetch_hits already recorded per-entry in
+                                // fetch_tarball_into_cache (Codex M3-plan-v1 #7).
+                                if let Some(k) = self.counter_key.lock().unwrap().clone() {
+                                    let counters = self.observability.counters_for(k);
+                                    counters.record_bytes_transferred(out.total_bytes);
+                                    counters.record_http_transfer();
+                                }
+                                tracing::info!(
+                                    target: "ctxfs.provider.tarball",
+                                    blob_count,
+                                    estimated_bytes,
+                                    blobs_committed = out.blobs_committed,
+                                    blobs_skipped_invalid = out.blobs_skipped_invalid,
+                                    blobs_skipped_digest = out.blobs_skipped_digest,
+                                    total_bytes = out.total_bytes,
+                                    "tarball prefetch ok"
+                                );
+                                Ok(())
+                            }
+                            Err(e) => {
+                                // Tarball failed mid-stream. Blobs committed so far
+                                // are kept (they're already in BlobCache under their
+                                // own SHA-1 keys — correct by content-addressing).
+                                // Record one failure tick; prefetch_hits already
+                                // recorded incrementally for committed blobs.
+                                if let Some(k) = self.counter_key.lock().unwrap().clone() {
+                                    self.observability.counters_for(k).record_prefetch_failure();
+                                }
+                                tracing::warn!(
+                                    target: "ctxfs.provider.tarball",
+                                    error = format!("{e:?}").as_str(),
+                                    "tarball prefetch failed; falling back to lazy"
+                                );
+                                Err(format!("{e}"))
+                            }
+                        }
+                    })
+                    .await
+                    .clone();
+
+                // Leader removes its slot; waiters' release() is no-op.
+                claim.release();
+
+                // Tarball failure is non-fatal: lazy reads fill any gaps.
+                let _ = outcome_res;
+                Ok(())
+            }
+        }
+    }
+
     // ---- Singleflight helpers ----
 
     /// Claim a singleflight slot for the given `TarballKey`.
@@ -900,8 +1053,6 @@ impl GitHubProvider {
     /// waiters call the same method and block until the cell is filled. The
     /// leader's `claim.release()` removes the slot via `Arc::ptr_eq` so a
     /// stale leader cannot remove a newer slot for the same key.
-    // Suppress until dispatch_fetch_policy (Commit D) calls this.
-    #[allow(dead_code)]
     fn claim_singleflight_slot(&self, key: TarballKey) -> SlotClaim {
         use ctxfs_provider_common::fetcher::TarballSlot;
         let mut is_leader = false;
@@ -926,8 +1077,6 @@ impl GitHubProvider {
     // ---- Tarball helpers ----
 
     /// Maximum redirect-chain depth when following the tarball 302.
-    // Suppress until Task 7 calls fetch_tarball_into_cache.
-    #[allow(dead_code)]
     const TARBALL_REDIRECT_MAX_DEPTH: u8 = 3;
 
     /// Derive the codeload host from the API host. For `api.github.com` →
@@ -1055,7 +1204,6 @@ impl GitHubProvider {
     /// Used by `fetch_tarball_into_cache` to look up the expected digest for
     /// each tar entry and to compute the Git blob SHA-1 (which prefixes the
     /// size in the hash header).
-    #[allow(dead_code)]
     fn build_path_to_sha_size(entries: &[TreeEntry]) -> HashMap<std::path::PathBuf, (String, u64)> {
         entries
             .iter()
@@ -1084,8 +1232,6 @@ impl GitHubProvider {
     /// cache budget commit blobs successfully but trigger LRU evictions of
     /// earlier entries — that's the documented "warm-cache guarantee will not
     /// hold" warning.
-    // Task 7 calls this from fetch_snapshot; suppressed until then.
-    #[allow(dead_code)]
     async fn fetch_tarball_into_cache(
         &self,
         source: &SourceSpec,
@@ -1390,10 +1536,18 @@ impl GitHubProvider {
         }
         debug!("fetched tree with {} entries", tree.tree.len());
 
-        // 4a. Tarball auto-gate / dispatch (wired in Commit D).
-        // dispatch_fetch_policy call injected here by Commit D, using
-        // options.prefetch / threshold_count / max_bytes. Non-fatal on failure.
-        let _ = options; // consumed by dispatch_fetch_policy in Commit D
+        // 4a. Tarball auto-gate / dispatch. May commit blobs into BlobCache;
+        //     does not affect the manifest. Failures are non-fatal — the
+        //     snapshot still completes; lazy reads pick up uncached blobs.
+        self.dispatch_fetch_policy(
+            source,
+            &commit_sha,
+            &tree.tree,
+            options.prefetch,
+            options.prefetch_threshold_count,
+            options.prefetch_max_bytes,
+        )
+        .await?;
 
         // 5. Prefetch small blobs + symlink targets for B1/B7 inlining.
         //    Skip the call entirely if no entries are eligible (avoids a
@@ -2277,6 +2431,60 @@ mod tests {
     fn assemble_walked_tree_empty_root() {
         let assembled = GitHubProvider::assemble_walked_tree("empty_sha", |_sha| vec![]);
         assert!(assembled.is_empty());
+    }
+
+    // ---- dispatch_fetch_policy unit tests ----
+
+    /// PrefetchPolicy::Disabled → dispatch returns Ok(()) without touching the
+    /// singleflight registry or making any HTTP calls.
+    #[tokio::test]
+    async fn dispatch_fetch_policy_disabled_returns_ok() {
+        use ctxfs_provider_common::fetcher::PrefetchPolicy;
+        let provider = make_test_provider();
+        let source = SourceSpec::parse("github:owner/repo@main").unwrap();
+        let result = provider
+            .dispatch_fetch_policy(
+                &source,
+                "abc123",
+                &[],
+                PrefetchPolicy::Disabled,
+                30,
+                256 * 1024 * 1024,
+            )
+            .await;
+        assert!(result.is_ok(), "Disabled policy must return Ok immediately");
+    }
+
+    /// Auto-gate: blob count below threshold → Lazy → Ok(()) immediately.
+    #[tokio::test]
+    async fn dispatch_fetch_policy_auto_below_threshold_returns_ok() {
+        use ctxfs_provider_common::fetcher::PrefetchPolicy;
+        let provider = make_test_provider();
+        let source = SourceSpec::parse("github:owner/repo@main").unwrap();
+        // 5 blob entries, threshold = 30 → below threshold → Lazy
+        let entries: Vec<TreeEntry> = (0..5)
+            .map(|i| TreeEntry {
+                path: format!("file{i}.txt"),
+                mode: "100644".to_string(),
+                entry_type: "blob".to_string(),
+                sha: format!("{i:040x}"),
+                size: Some(100),
+            })
+            .collect();
+        let result = provider
+            .dispatch_fetch_policy(
+                &source,
+                "abc123",
+                &entries,
+                PrefetchPolicy::Auto,
+                30,
+                256 * 1024 * 1024,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "Auto/below-threshold must return Ok immediately"
+        );
     }
 
     // ---- FetchOptions tests ----
