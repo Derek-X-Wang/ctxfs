@@ -28,11 +28,12 @@ struct ConfigFile {
 /// Tracks which prefetch fields were explicitly set by file or env so
 /// `recompute_derived_defaults` knows whether `prefetch_max_bytes` is
 /// safe to re-derive after `cache_max_bytes` changed.
+///
+/// Only `max_bytes` is tracked because `recompute_derived_defaults`
+/// consumes it; the other prefetch fields have no derived defaults.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct PrefetchExplicit {
     pub max_bytes: bool,
-    pub threshold_count: bool,
-    pub github_host: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +130,6 @@ impl Config {
         if let Ok(v) = read("CTXFS_PREFETCH_THRESHOLD_COUNT") {
             if let Ok(n) = v.parse() {
                 config.prefetch_threshold_count = n;
-                explicit.threshold_count = true;
             }
         }
         if let Ok(v) = read("CTXFS_PREFETCH_MAX_BYTES") {
@@ -141,7 +141,6 @@ impl Config {
         if let Ok(v) = read("CTXFS_GITHUB_HOST") {
             if !v.is_empty() {
                 config.github_host = v;
-                explicit.github_host = true;
             }
         }
     }
@@ -245,7 +244,6 @@ impl Config {
         }
         if let Some(v) = file.prefetch_threshold_count {
             config.prefetch_threshold_count = v;
-            explicit.threshold_count = true;
         }
         if let Some(v) = file.prefetch_max_bytes {
             config.prefetch_max_bytes = v;
@@ -254,7 +252,6 @@ impl Config {
         if let Some(ref v) = file.github_host {
             if !v.is_empty() {
                 config.github_host = v.clone();
-                explicit.github_host = true;
             }
         }
     }
@@ -630,7 +627,7 @@ socket_path = "/tmp/test.sock"
     }
 
     // -----------------------------------------------------------------------
-    // M3 Task 1 — prefetch_threshold_count, prefetch_max_bytes, github_host
+    // Prefetch config — prefetch_threshold_count, prefetch_max_bytes, github_host
     // -----------------------------------------------------------------------
 
     #[test]
@@ -699,10 +696,7 @@ socket_path = "/tmp/test.sock"
             prefetch_max_bytes: 50,              // user-explicit
             ..Config::default()
         };
-        let explicit = PrefetchExplicit {
-            max_bytes: true,
-            ..PrefetchExplicit::default()
-        };
+        let explicit = PrefetchExplicit { max_bytes: true };
         Config::recompute_derived_defaults(&mut c, &explicit);
         assert_eq!(c.prefetch_max_bytes, 50);
     }
