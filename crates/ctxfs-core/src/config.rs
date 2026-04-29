@@ -20,6 +20,19 @@ struct ConfigFile {
     tree_cache_max_bytes: Option<u64>,
     backend: Option<String>,
     fskit_bundle_id: Option<String>,
+    prefetch_threshold_count: Option<u64>,
+    prefetch_max_bytes: Option<u64>,
+    github_host: Option<String>,
+}
+
+/// Tracks which prefetch fields were explicitly set by file or env so
+/// `recompute_derived_defaults` knows whether `prefetch_max_bytes` is
+/// safe to re-derive after `cache_max_bytes` changed.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PrefetchExplicit {
+    pub max_bytes: bool,
+    pub threshold_count: bool,
+    pub github_host: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +49,20 @@ pub struct Config {
     pub default_backend: Option<Backend>,
     /// Bundle ID of the installed `ContextFS` appex.
     pub fskit_bundle_id: Option<String>,
+    /// Auto-gate threshold for tarball prefetch. When the manifest reports at
+    /// least this many blob entries AND `estimated_bytes <= prefetch_max_bytes`,
+    /// `PrefetchPolicy::Auto` fires the tarball path. Default 30.
+    pub prefetch_threshold_count: u64,
+    /// Auto-gate byte cap for tarball prefetch. When the manifest's estimated
+    /// bytes exceeds this value, `PrefetchPolicy::Auto` skips the tarball path
+    /// and increments `prefetch_skipped_oversized`.
+    /// Default = `min(cache_max / 4, 256 MB)`.
+    pub prefetch_max_bytes: u64,
+    /// Hostname of the GitHub API. Override for GHE deployments. Used by
+    /// provider-git for both API URLs and tarball-redirect host validation
+    /// (the codeload host is derived from this — see provider-git).
+    /// Default `"api.github.com"`.
+    pub github_host: String,
 }
 
 impl Default for Config {
@@ -43,11 +70,12 @@ impl Default for Config {
         let base = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(".ctxfs");
+        let cache_max_bytes: u64 = 512 * 1024 * 1024; // 512 MB
         Self {
             socket_path: base.join("ctxfs.sock"),
             pid_file: base.join("ctxfs.pid"),
             cache_dir: base.join("cache"),
-            cache_max_bytes: 512 * 1024 * 1024, // 512 MB
+            cache_max_bytes,
             log_level: "info".to_string(),
             github_token: None,
             redis_url: None,
@@ -55,11 +83,69 @@ impl Default for Config {
             tree_cache_max_bytes: 500 * 1024 * 1024, // 500 MB
             default_backend: None,
             fskit_bundle_id: Some("ai.ctxfs.companion.fskitext".to_string()),
+            prefetch_threshold_count: 30,
+            prefetch_max_bytes: Self::default_prefetch_max_bytes(cache_max_bytes),
+            github_host: "api.github.com".to_string(),
         }
     }
 }
 
 impl Config {
+    /// Default cap for tarball-prefetch bytes: `min(cache_max / 4, 256 MB)`.
+    ///
+    /// Public so the CLI's `ctxfs status` global view can report the active cap
+    /// without re-deriving it.
+    #[must_use]
+    pub fn default_prefetch_max_bytes(cache_max_bytes: u64) -> u64 {
+        let quarter = cache_max_bytes / 4;
+        let cap: u64 = 256 * 1024 * 1024;
+        quarter.min(cap)
+    }
+
+    /// After file + env apply, re-derive `prefetch_max_bytes` from the
+    /// (possibly-updated) `cache_max_bytes` IF the user did not explicitly set
+    /// it. Without this, a config that changes only `cache_max_bytes` keeps the
+    /// stale 128 MB default derived from the original 512 MB cache.
+    pub(crate) fn recompute_derived_defaults(config: &mut Self, explicit: &PrefetchExplicit) {
+        if !explicit.max_bytes {
+            config.prefetch_max_bytes = Self::default_prefetch_max_bytes(config.cache_max_bytes);
+        }
+    }
+
+    /// Closure-injected env reader (test seam) — single source of truth for
+    /// the three M3 env vars. Records into `explicit` whether each field was
+    /// touched, so the caller can re-derive defaults that depend on these.
+    ///
+    /// Callers pass `|k| std::env::var(k)` for production; tests inject a
+    /// deterministic closure to avoid the parallel-env-var race documented in
+    /// the M2 handoff.
+    pub(crate) fn apply_prefetch_env<F>(
+        config: &mut Self,
+        explicit: &mut PrefetchExplicit,
+        mut read: F,
+    ) where
+        F: FnMut(&str) -> Result<String, std::env::VarError>,
+    {
+        if let Ok(v) = read("CTXFS_PREFETCH_THRESHOLD_COUNT") {
+            if let Ok(n) = v.parse() {
+                config.prefetch_threshold_count = n;
+                explicit.threshold_count = true;
+            }
+        }
+        if let Ok(v) = read("CTXFS_PREFETCH_MAX_BYTES") {
+            if let Ok(n) = v.parse() {
+                config.prefetch_max_bytes = n;
+                explicit.max_bytes = true;
+            }
+        }
+        if let Ok(v) = read("CTXFS_GITHUB_HOST") {
+            if !v.is_empty() {
+                config.github_host = v;
+                explicit.github_host = true;
+            }
+        }
+    }
+
     /// Parse a TOML string and return a `Config` with file values applied on
     /// top of defaults.  Env vars are NOT read here; call `load()` for the
     /// full precedence chain.
@@ -71,7 +157,9 @@ impl Config {
     pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
         let file: ConfigFile = toml::from_str(s)?;
         let mut config = Self::default();
-        Self::apply_file(&mut config, &file);
+        let mut explicit = PrefetchExplicit::default();
+        Self::apply_file(&mut config, &file, &mut explicit);
+        Self::recompute_derived_defaults(&mut config, &explicit);
         Ok(config)
     }
 
@@ -80,6 +168,7 @@ impl Config {
     /// A missing or unreadable config file is silently ignored.
     pub fn load() -> Self {
         let mut config = Self::default();
+        let mut explicit = PrefetchExplicit::default();
 
         // Try to load the config file.  Missing file is not an error.
         if let Some(home) = dirs::home_dir() {
@@ -87,7 +176,7 @@ impl Config {
             if path.exists() {
                 match std::fs::read_to_string(&path) {
                     Ok(contents) => match toml::from_str::<ConfigFile>(&contents) {
-                        Ok(file) => Self::apply_file(&mut config, &file),
+                        Ok(file) => Self::apply_file(&mut config, &file, &mut explicit),
                         Err(e) => {
                             // Warn but don't abort — env vars still work.
                             tracing::warn!("failed to parse {}: {e}", path.display());
@@ -100,14 +189,21 @@ impl Config {
             }
         }
 
-        // Env vars win over file values.
-        Self::apply_env(&mut config);
+        // Env vars win over file values. The shared `explicit` accumulates
+        // across both layers so `recompute_derived_defaults` below sees the
+        // combined picture (file + env).
+        Self::apply_env(&mut config, &mut explicit);
+        // Re-derive prefetch_max_bytes from (possibly updated) cache_max_bytes
+        // IF neither file nor env explicitly set it.
+        Self::recompute_derived_defaults(&mut config, &explicit);
         config
     }
 
     /// Apply `ConfigFile` values on top of an existing config (file over
-    /// defaults, but not yet env vars).
-    fn apply_file(config: &mut Self, file: &ConfigFile) {
+    /// defaults, but not yet env vars). Updates `explicit` with which prefetch
+    /// fields the file touched so callers can correctly re-derive dependent
+    /// defaults.
+    fn apply_file(config: &mut Self, file: &ConfigFile, explicit: &mut PrefetchExplicit) {
         if let Some(v) = &file.github_token {
             if !v.is_empty() {
                 config.github_token = Some(v.clone());
@@ -147,12 +243,26 @@ impl Config {
                 config.fskit_bundle_id = Some(v.clone());
             }
         }
+        if let Some(v) = file.prefetch_threshold_count {
+            config.prefetch_threshold_count = v;
+            explicit.threshold_count = true;
+        }
+        if let Some(v) = file.prefetch_max_bytes {
+            config.prefetch_max_bytes = v;
+            explicit.max_bytes = true;
+        }
+        if let Some(ref v) = file.github_host {
+            if !v.is_empty() {
+                config.github_host = v.clone();
+                explicit.github_host = true;
+            }
+        }
     }
 
     /// Apply environment-variable overrides in place (the "env always wins"
-    /// layer).  Extracted from `from_env()` so both `from_env()` and `load()`
-    /// share the same logic.
-    fn apply_env(config: &mut Self) {
+    /// layer). `explicit` accumulates which prefetch fields the env touched so
+    /// the caller can re-derive derived defaults correctly.
+    fn apply_env(config: &mut Self, explicit: &mut PrefetchExplicit) {
         if let Ok(v) = std::env::var("CTXFS_SOCKET") {
             config.socket_path = PathBuf::from(v);
         }
@@ -208,6 +318,8 @@ impl Config {
         {
             config.fskit_bundle_id = Some(v);
         }
+        // Prefetch env vars use a closure-injected seam for test isolation.
+        Self::apply_prefetch_env(config, explicit, |k| std::env::var(k));
     }
 
     /// Build a `Config` from defaults + env vars only (no config file).
@@ -216,7 +328,9 @@ impl Config {
     /// use prefer `Config::load()`, which also reads `~/.ctxfs/config.toml`.
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        Self::apply_env(&mut config);
+        let mut explicit = PrefetchExplicit::default();
+        Self::apply_env(&mut config, &mut explicit);
+        Self::recompute_derived_defaults(&mut config, &explicit);
         config
     }
 
@@ -513,5 +627,106 @@ socket_path = "/tmp/test.sock"
         assert_eq!(config.redis_url, config2.redis_url);
         assert_eq!(config.latest_ttl_secs, config2.latest_ttl_secs);
         assert_eq!(config.tree_cache_max_bytes, config2.tree_cache_max_bytes);
+    }
+
+    // -----------------------------------------------------------------------
+    // M3 Task 1 — prefetch_threshold_count, prefetch_max_bytes, github_host
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prefetch_threshold_count_default_is_30() {
+        let c = Config::default();
+        assert_eq!(c.prefetch_threshold_count, 30);
+    }
+
+    #[test]
+    fn prefetch_max_bytes_default_is_min_quarter_cache_or_256mb() {
+        let c = Config::default();
+        // cache_max_bytes default = 512 MB, so quarter = 128 MB.
+        // min(128 MB, 256 MB) = 128 MB.
+        assert_eq!(c.prefetch_max_bytes, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn prefetch_max_bytes_capped_at_256mb_when_cache_is_huge() {
+        // Exercise the helper directly with a 100 GB cache budget.
+        let computed = Config::default_prefetch_max_bytes(100 * 1024 * 1024 * 1024);
+        assert_eq!(computed, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn github_host_default_is_api_github_com() {
+        let c = Config::default();
+        assert_eq!(c.github_host, "api.github.com");
+    }
+
+    #[test]
+    fn env_overrides_for_prefetch_and_host() {
+        // Use a closure-injected env reader to avoid touching real env vars in
+        // tests — avoids the parallel-env-var race documented in M2 handoff.
+        let mut c = Config::default();
+        let mut explicit = PrefetchExplicit::default();
+        Config::apply_prefetch_env(&mut c, &mut explicit, |k| match k {
+            "CTXFS_PREFETCH_THRESHOLD_COUNT" => Ok("100".to_string()),
+            "CTXFS_PREFETCH_MAX_BYTES" => Ok("9999".to_string()),
+            "CTXFS_GITHUB_HOST" => Ok("ghe.example.com".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        });
+        assert_eq!(c.prefetch_threshold_count, 100);
+        assert_eq!(c.prefetch_max_bytes, 9999);
+        assert!(explicit.max_bytes);
+        assert_eq!(c.github_host, "ghe.example.com");
+    }
+
+    #[test]
+    fn prefetch_max_bytes_recomputes_when_cache_changed_but_max_not_set() {
+        // Simulate: file/env sets cache_max_bytes=1 GB but does NOT set
+        // prefetch_max_bytes. After recompute, prefetch_max_bytes should be
+        // re-derived as min(1GB/4, 256MB) = 256MB, not the 128MB default.
+        let mut c = Config {
+            cache_max_bytes: 1024 * 1024 * 1024, // 1 GB
+            ..Config::default()
+        };
+        let explicit = PrefetchExplicit::default(); // max_bytes NOT set
+        Config::recompute_derived_defaults(&mut c, &explicit);
+        assert_eq!(c.prefetch_max_bytes, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn prefetch_max_bytes_explicit_set_is_preserved_after_cache_change() {
+        let mut c = Config {
+            cache_max_bytes: 1024 * 1024 * 1024, // 1 GB
+            prefetch_max_bytes: 50,              // user-explicit
+            ..Config::default()
+        };
+        let explicit = PrefetchExplicit {
+            max_bytes: true,
+            ..PrefetchExplicit::default()
+        };
+        Config::recompute_derived_defaults(&mut c, &explicit);
+        assert_eq!(c.prefetch_max_bytes, 50);
+    }
+
+    #[test]
+    fn prefetch_fields_readable_from_toml() {
+        let toml = r#"
+prefetch_threshold_count = 100
+prefetch_max_bytes = 52428800
+github_host = "ghe.corp.example.com"
+"#;
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.prefetch_threshold_count, 100);
+        assert_eq!(config.prefetch_max_bytes, 52_428_800);
+        assert_eq!(config.github_host, "ghe.corp.example.com");
+    }
+
+    #[test]
+    fn from_toml_recomputes_prefetch_max_when_cache_set_but_not_prefetch() {
+        // TOML sets cache_max_bytes=2 GB but not prefetch_max_bytes.
+        // recompute_derived_defaults should re-derive: min(2GB/4, 256MB) = 256MB.
+        let toml = "cache_max_bytes = 2147483648\n"; // 2 GB
+        let config = Config::from_toml_str(toml).unwrap();
+        assert_eq!(config.cache_max_bytes, 2_147_483_648);
+        assert_eq!(config.prefetch_max_bytes, 256 * 1024 * 1024);
     }
 }
