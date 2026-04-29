@@ -1,4 +1,5 @@
 pub mod counters;
+pub mod fetcher;
 pub mod http;
 pub mod mock;
 pub mod observability;
