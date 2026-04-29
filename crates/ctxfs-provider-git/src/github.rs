@@ -926,11 +926,16 @@ impl GitHubProvider {
         policy: ctxfs_provider_common::fetcher::PrefetchPolicy,
     ) -> ctxfs_provider_common::fetcher::PrefetchPolicy {
         use ctxfs_provider_common::fetcher::PrefetchPolicy;
+        // Only Auto can degrade — Force and Disabled are returned as-is,
+        // skipping the blob-size scan entirely.
+        if policy != PrefetchPolicy::Auto {
+            return policy;
+        }
         let any_unknown = entries
             .iter()
             .filter(|e| e.entry_type == "blob")
             .any(|e| e.size.is_none());
-        if any_unknown && policy == PrefetchPolicy::Auto {
+        if any_unknown {
             PrefetchPolicy::Disabled
         } else {
             policy
