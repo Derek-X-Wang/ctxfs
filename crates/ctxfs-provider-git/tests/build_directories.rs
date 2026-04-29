@@ -1,6 +1,9 @@
 //! Integration test: End-to-end snapshot construction from GitHub tree entries
 //! through directory building, cache storage, and manifest deserialization.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use ctxfs_cache::BlobCache;
 use ctxfs_core::source::SourceSpec;
 use ctxfs_manifest::{DirEntry, Directory, Snapshot};
@@ -219,4 +222,121 @@ fn make_tree(path: &str) -> ctxfs_provider_git::TreeEntry {
         sha: format!("tree_{path}"),
         size: None,
     }
+}
+
+// ── Assembled-path test (M2 carry-forward) ─────────────────────────────────
+//
+// Verifies that the full `fetch_snapshot_with_options` path (commit resolve →
+// tree fetch → build_directories → cache store) produces a correctly assembled
+// directory hierarchy accessible via cache lookups.
+
+const AP_OWNER: &str = "ap-owner";
+const AP_REPO: &str = "ap-repo";
+const AP_GIT_REF: &str = "main";
+const AP_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const AP_TREE_SHA: &str = "tree444444444444444444444444444444444444";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assembled_path_snapshot_has_correct_directory_hierarchy() {
+    use common::{commit_json, make_provider, tree_json, MockRoute, MockServer};
+    use ctxfs_provider_common::fetcher::{PrefetchPolicy, TarballSingleflightMap};
+    use ctxfs_provider_common::observability::Observability;
+    use ctxfs_provider_git::FetchOptions;
+
+    // Tree: README.md at root + src/ subtree with main.rs + lib.rs.
+    let tree_entries: Vec<serde_json::Value> = vec![
+        serde_json::json!({"path": "README.md", "mode": "100644", "type": "blob",
+                           "sha": "sha_readme", "size": 100u64}),
+        serde_json::json!({"path": "src",       "mode": "040000", "type": "tree",
+                           "sha": "tree_src"}),
+        serde_json::json!({"path": "src/main.rs","mode": "100644", "type": "blob",
+                           "sha": "sha_main",   "size": 200u64}),
+        serde_json::json!({"path": "src/lib.rs", "mode": "100644", "type": "blob",
+                           "sha": "sha_lib",    "size": 150u64}),
+    ];
+
+    let server = MockServer::spawn(vec![
+        MockRoute {
+            method: "GET",
+            path_prefix: format!("/repos/{AP_OWNER}/{AP_REPO}/commits"),
+            status: 200,
+            headers: vec![("Content-Type", "application/json".to_string())],
+            body: commit_json(AP_COMMIT),
+            hit_count: None,
+            delay_ms: None,
+        },
+        MockRoute {
+            method: "GET",
+            path_prefix: format!("/repos/{AP_OWNER}/{AP_REPO}/git/trees"),
+            status: 200,
+            headers: vec![("Content-Type", "application/json".to_string())],
+            body: tree_json(AP_TREE_SHA, &tree_entries, false),
+            hit_count: None,
+            delay_ms: None,
+        },
+    ])
+    .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = Arc::new(BlobCache::new(tmp.path().to_path_buf(), 64 * 1024 * 1024).unwrap());
+    let obs = Arc::new(Observability::new());
+    let sf = Arc::new(TarballSingleflightMap::new());
+    let provider = make_provider(&server, cache.clone(), obs, sf);
+
+    let source = SourceSpec::parse(&format!("github:{AP_OWNER}/{AP_REPO}@{AP_GIT_REF}")).unwrap();
+    let opts = FetchOptions {
+        prefetch: PrefetchPolicy::Disabled,
+        prefetch_threshold_count: 30,
+        prefetch_max_bytes: 256 * 1024 * 1024,
+    };
+
+    let snapshot_bytes = provider
+        .fetch_snapshot_with_options(&source, &opts)
+        .await
+        .expect("fetch_snapshot_with_options must succeed");
+
+    let snapshot: Snapshot = serde_json::from_slice(&snapshot_bytes).unwrap();
+    assert_eq!(
+        snapshot.commit_sha, AP_COMMIT,
+        "snapshot must reference resolved commit"
+    );
+
+    // ── Root directory has README.md and src/ ──────────────────────────────
+    let root_data = cache
+        .get(&snapshot.root_directory)
+        .expect("root directory digest must be in cache");
+    let root_dir: Directory = serde_json::from_slice(&root_data).unwrap();
+    let root_names: Vec<&str> = root_dir.entries.iter().map(DirEntry::name).collect();
+    assert!(
+        root_names.contains(&"README.md"),
+        "root must contain README.md; got {root_names:?}"
+    );
+    assert!(
+        root_names.contains(&"src"),
+        "root must contain src/; got {root_names:?}"
+    );
+
+    // ── src/ directory has main.rs and lib.rs ──────────────────────────────
+    let src_entry = root_dir
+        .entries
+        .iter()
+        .find(|e| e.name() == "src")
+        .expect("src entry must exist");
+    let src_digest = match src_entry {
+        DirEntry::Directory(d) => d.digest.clone(),
+        _ => panic!("expected DirEntry::Directory for 'src'"),
+    };
+    let src_data = cache
+        .get(&src_digest)
+        .expect("src/ directory digest must be in cache");
+    let src_dir: Directory = serde_json::from_slice(&src_data).unwrap();
+    let src_names: Vec<&str> = src_dir.entries.iter().map(DirEntry::name).collect();
+    assert!(
+        src_names.contains(&"main.rs"),
+        "src/ must contain main.rs; got {src_names:?}"
+    );
+    assert!(
+        src_names.contains(&"lib.rs"),
+        "src/ must contain lib.rs; got {src_names:?}"
+    );
 }
