@@ -1,8 +1,8 @@
 ## v0.1.3-m3 — 2026-04-28
 
-### Phase 4 M3: Tarball prefetch with smart gate (B2, B5, B6)
+### Phase 4 M3: Tarball prefetch with smart gate (B2)
 
-- **Fix B5 / tarball prefetch**: Cold scan of a repo with ≥ `prefetch_threshold_count`
+- **Tarball prefetch**: Cold scan of a repo with ≥ `prefetch_threshold_count`
   blobs (default: 30) and total estimated bytes ≤ `prefetch_max_bytes` (default:
   `min(cache_max_bytes / 4, 256 MB)`) triggers a single
   `GET /repos/{o}/{r}/tarball/{sha}` call instead of one REST call per blob.
@@ -14,12 +14,12 @@
   (`fetch_subtree` calls) to assemble a complete manifest. Counter
   `truncated_tree_fallbacks` increments once per fallback. Manifest entries
   with `size=None` force `Lazy` on the auto-gate (fail-closed).
-- **Fix B6 / tarball hardening**: Path-traversal entries (`..`, absolute,
-  NUL/control bytes) are rejected (`tarball_invalid_entries` counter); LFS
-  pointer files are skipped (`lfs_pointer_files` counter). Codeload
-  redirect-target is validated against `codeload_host` (or `codeload_*`
-  prefix for GHE). Redirect depth capped at 3. Digest mismatches skip the
-  entry (`tarball_digest_mismatch` counter).
+- **Tarball hardening**: Path-traversal entries (`..`, absolute, NUL/control
+  bytes) are rejected (`tarball_invalid_entries` counter). Codeload redirect
+  target is validated against `codeload_host` (exact match; GHE support is
+  planned for a later milestone). Redirect depth capped at 3. Digest mismatches
+  skip the entry (`tarball_digest_mismatch` counter). LFS pointer bytes are
+  stored verbatim (LFS-aware handling is a future milestone).
 - **Singleflight dedupe**: Daemon-level `Arc<TarballSingleflightMap>` shared
   across all per-mount providers prevents duplicate tarball downloads for the
   same `(host, owner, repo, commit)`. Leader downloads; waiters get the

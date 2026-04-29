@@ -632,7 +632,13 @@ impl GitHubProvider {
     }
 
     /// Fetches blob SHAs in `shas` in parallel (capped at
-    /// [`Self::PREFETCH_CONCURRENCY`]) and returns a map sha → bytes.
+    /// [`Self::PREFETCH_CONCURRENCY`]) and returns a map sha → bytes plus the
+    /// count of blobs that were **network-fetched** (vs served from BlobCache).
+    ///
+    /// Cache-bypass: each SHA is checked in `BlobCache` first. Hits are served
+    /// directly (no REST call). Misses are fetched via the GitHub blobs API.
+    /// This prevents double-counting `prefetch_hits` when the tarball path
+    /// already committed the same blobs to cache.
     ///
     /// Failure policy:
     /// - Files (non-symlink): per-blob errors are logged and the
@@ -647,14 +653,28 @@ impl GitHubProvider {
         source: &SourceSpec,
         shas: Vec<String>,
         symlink_shas: &std::collections::HashSet<String>,
-    ) -> Result<std::collections::HashMap<String, Vec<u8>>, CtxfsError> {
+    ) -> Result<(std::collections::HashMap<String, Vec<u8>>, usize), CtxfsError> {
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let mut results: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
+        let mut network_fetched: usize = 0;
         let mut in_flight = FuturesUnordered::new();
-        let mut iter = shas.into_iter();
 
+        // Partition shas into cache hits (served immediately) and misses
+        // (queued for REST). This avoids redundant network calls when the
+        // tarball path already hydrated the BlobCache.
+        let mut misses: Vec<String> = Vec::new();
+        for sha in shas {
+            let digest = Digest::from_sha256_hex(&sha);
+            if let Some(bytes) = self.cache.get(&digest) {
+                let _ = results.insert(sha, bytes);
+            } else {
+                misses.push(sha);
+            }
+        }
+
+        let mut iter = misses.into_iter();
         // Prime the queue with up to PREFETCH_CONCURRENCY in-flight requests.
         for _ in 0..Self::PREFETCH_CONCURRENCY {
             if let Some(sha) = iter.next() {
@@ -665,17 +685,12 @@ impl GitHubProvider {
         while let Some((sha, result)) = in_flight.next().await {
             match result {
                 Ok(bytes) => {
+                    network_fetched += 1;
                     let _ = results.insert(sha, bytes);
                 }
                 Err(e) => {
                     // Symlink: fail the prefetch (no lazy fallback for readlink).
                     if symlink_shas.contains(&sha) {
-                        // Note: in-flight `FuturesUnordered` futures are dropped
-                        // here. Their connections may have hit GitHub already
-                        // (consuming quota) but won't tick `rest_calls_total`
-                        // because they never reach `check_rate_limit`. Acceptable
-                        // for M2 (symlink-fail path is rare); revisit in M3+ if
-                        // telemetry shows meaningful undercount.
                         return Err(CtxfsError::Provider(format!(
                             "symlink prefetch failed for sha {sha}: {e}"
                         )));
@@ -698,7 +713,7 @@ impl GitHubProvider {
                 in_flight.push(self.fetch_blob_with_sha(source, next_sha));
             }
         }
-        Ok(results)
+        Ok((results, network_fetched))
     }
 
     /// Wrapper that pairs the SHA with the fetch result, so the caller can map
@@ -1560,22 +1575,32 @@ impl GitHubProvider {
         // Tier 2a: local tree cache. counter_key is already set (step 3) so
         // any subsequent `fetch_blob` calls on the cached snapshot attribute
         // correctly to the real commit bucket.
-        if let Some(ref tc) = self.tree_cache {
-            if let Some(data) = tc.get(owner, repo, &commit_sha) {
-                debug!("tree cache HIT for {owner}/{repo}@{commit_sha}");
-                return Ok(data);
-            }
-        }
-
-        // Tier 2b: shared (Redis) tree cache.
-        if let Some(ref stc) = self.shared_tree_cache {
-            if let Some(data) = stc.get_tree(owner, repo, &commit_sha).await {
-                debug!("shared tree cache HIT for {owner}/{repo}@{commit_sha}");
-                // Populate local cache
-                if let Some(ref tc) = self.tree_cache {
-                    let _ = tc.put(owner, repo, &commit_sha, &data);
+        //
+        // Skip tree-cache on Force: if the user explicitly requested tarball
+        // prefetch, we must fall through to dispatch_fetch_policy even after a
+        // tree-cache hit. Otherwise a `ctxfs cache prune` + remount with
+        // `--prefetch=force` would silently skip the tarball and leave
+        // BlobCache empty (lazy reads instead of the requested prefetch).
+        let skip_tree_cache =
+            options.prefetch == ctxfs_provider_common::fetcher::PrefetchPolicy::Force;
+        if !skip_tree_cache {
+            if let Some(ref tc) = self.tree_cache {
+                if let Some(data) = tc.get(owner, repo, &commit_sha) {
+                    debug!("tree cache HIT for {owner}/{repo}@{commit_sha}");
+                    return Ok(data);
                 }
-                return Ok(data);
+            }
+
+            // Tier 2b: shared (Redis) tree cache.
+            if let Some(ref stc) = self.shared_tree_cache {
+                if let Some(data) = stc.get_tree(owner, repo, &commit_sha).await {
+                    debug!("shared tree cache HIT for {owner}/{repo}@{commit_sha}");
+                    // Populate local cache
+                    if let Some(ref tc) = self.tree_cache {
+                        let _ = tc.put(owner, repo, &commit_sha, &data);
+                    }
+                    return Ok(data);
+                }
             }
         }
 
@@ -1617,18 +1642,20 @@ impl GitHubProvider {
         //    no-op futures-stream construction).
         let symlink_set = Self::symlink_shas(&tree.tree);
         let small_shas = Self::small_blob_shas(&tree.tree);
-        let inline = if small_shas.is_empty() {
-            std::collections::HashMap::new()
+        let (inline, small_blob_network_fetched) = if small_shas.is_empty() {
+            (std::collections::HashMap::new(), 0usize)
         } else {
             self.prefetch_small_blobs(source, small_shas, &symlink_set)
                 .await?
         };
 
-        // 6. Record prefetch_hits per successfully prefetched blob.
+        // 6. Record prefetch_hits only for blobs fetched via REST (not those
+        //    served from BlobCache). Avoids double-counting when the tarball
+        //    path already committed the same blobs and incremented per-entry.
         if let Some(key) = self.counter_key.lock().unwrap().clone() {
             self.observability
                 .counters_for(key)
-                .record_prefetch_hits(inline.len() as u64);
+                .record_prefetch_hits(small_blob_network_fetched as u64);
         }
 
         // 7. Build directories with inline content (B1) and resolved
@@ -2106,11 +2133,12 @@ mod tests {
             make_singleflight(),
         );
         let source = SourceSpec::parse("github:test/repo@main").unwrap();
-        let result = provider
+        let (result, network_fetched) = provider
             .prefetch_small_blobs(&source, vec![], &std::collections::HashSet::new())
             .await
             .unwrap();
         assert!(result.is_empty());
+        assert_eq!(network_fetched, 0);
     }
 
     #[test]

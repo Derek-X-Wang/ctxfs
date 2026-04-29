@@ -657,7 +657,7 @@ async fn handle_mount(
             })
             .collect();
 
-        let results = deps::mount::batch_mount(&client, &mounts, server_only).await;
+        let results = deps::mount::batch_mount(&client, &mounts, server_only, prefetch).await;
         deps::mount::print_mount_summary(&results);
 
         let failures = results.iter().filter(|r| !r.success).count();
@@ -1007,7 +1007,8 @@ async fn handle_deps(config: &Config, action: DepsAction) -> Result<()> {
 
             let mounts = deps::compute_mount_paths(&selected, &mount_dir);
             let client = connect(config).await?;
-            let results = deps::mount::batch_mount(&client, &mounts, server_only).await;
+            let results =
+                deps::mount::batch_mount(&client, &mounts, server_only, PrefetchPolicy::Auto).await;
             deps::mount::print_mount_summary(&results);
 
             let failures = results.iter().filter(|r| !r.success).count();

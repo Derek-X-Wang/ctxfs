@@ -3,7 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use ctxfs_core::Backend;
-use ctxfs_ipc::service::{CtxfsServiceClient, MountOptions};
+use ctxfs_ipc::service::{CtxfsServiceClient, MountOptions, PrefetchPolicy};
 use futures::StreamExt;
 
 /// Max concurrent daemon mount RPCs to avoid overwhelming the daemon.
@@ -36,6 +36,7 @@ pub async fn batch_mount(
     client: &CtxfsServiceClient,
     mounts: &HashMap<String, PathBuf>,
     server_only: bool,
+    prefetch: PrefetchPolicy,
 ) -> Vec<MountResult> {
     // Collect into a stable order for deterministic output.
     let mut entries: Vec<(&String, &PathBuf)> = mounts.iter().collect();
@@ -88,7 +89,7 @@ pub async fn batch_mount(
                         src.clone(),
                         mp_str.clone(),
                         Backend::Nfs,
-                        MountOptions::default(),
+                        MountOptions { prefetch },
                     )
                     .await
                 {
