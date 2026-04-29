@@ -91,7 +91,7 @@ pub enum FetchPolicy {
 
 /// Cost-estimate signal a `ContentFetcher` can offer up front. M3 uses only
 /// `total_bytes` and `request_count` — the rest are reserved for M4.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CostEstimate {
     pub total_bytes: Option<u64>,
     pub request_count: usize,
@@ -106,8 +106,11 @@ pub struct TarballKey {
     /// API host: `api.github.com`, or the configured `CTXFS_GITHUB_HOST` for
     /// GHE. Differentiates so a single daemon serving multiple hosts is fine.
     pub host: String,
+    /// GitHub organization or user that owns the repository.
     pub owner: String,
+    /// Repository name (without the owner prefix).
     pub repo: String,
+    /// Full 40-character commit SHA that the tarball was fetched at.
     pub commit_sha: String,
 }
 
