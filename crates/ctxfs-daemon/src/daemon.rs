@@ -475,6 +475,7 @@ impl DaemonServer {
 
         let provider = Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),
+            self.config.github_host.clone(),
             self.cache.clone(),
             Some(self.tree_cache.clone()),
             self.shared_tree_cache.clone(),

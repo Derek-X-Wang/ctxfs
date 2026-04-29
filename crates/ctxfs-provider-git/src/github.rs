@@ -12,17 +12,12 @@ use ctxfs_provider_common::rate_limit::AuthIdentity;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-// sha2 used indirectly via ctxfs_core::Digest
 use std::collections::HashMap;
 use std::sync::Arc;
+use tar::EntryType;
 use tracing::{debug, warn};
 
 const USER_AGENT_STR: &str = "ctxfs/0.1";
-
-/// Hardcoded for now; M3+ may promote this to `pub` and make it configurable
-/// via `CTXFS_GITHUB_HOST` for GHE support and tarball-redirect host
-/// validation. No external consumer needs it today, so keep the surface tight.
-pub(crate) const GITHUB_HOST: &str = "api.github.com";
 
 // Git file mode constants from the GitHub Trees API
 const MODE_SYMLINK: &str = "120000";
@@ -53,6 +48,18 @@ pub struct GitHubProvider {
     /// the right repo for the GitHub blob API. A provider instance is scoped
     /// to a single mount, so this is always consistent at read time.
     active_source: std::sync::Mutex<Option<SourceSpec>>,
+    /// GitHub API host (e.g. `api.github.com` for public GitHub; the configured
+    /// `CTXFS_GITHUB_HOST` value for GHE deployments). Used in `api_url`,
+    /// `AuthIdentity`, and redirect-target validation.
+    api_host: String,
+    /// Codeload host derived from `api_host` (or explicitly overridden via
+    /// [`Self::new_with_codeload_host`]). Tarball 302 redirects must land on
+    /// this host. Override is used by Task 8 replay tests that point both the
+    /// API and codeload at a local mock server.
+    /// Task 7 wires `fetch_tarball_into_cache`; until then this field is set
+    /// but not yet read in production paths.
+    #[allow(dead_code)]
+    codeload_host: String,
 }
 
 impl std::fmt::Debug for GitHubProvider {
@@ -93,6 +100,74 @@ struct BlobResponse {
     sha: String,
 }
 
+/// Outcome of one tarball extraction. Returned to the caller for telemetry
+/// and auto-gate-fallback decisions.
+// Task 7 calls fetch_tarball_into_cache which constructs this; until then
+// the struct is unused in production paths.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub(crate) struct TarballOutcome {
+    pub blobs_committed: u64,
+    pub blobs_skipped_invalid: u64,
+    pub blobs_skipped_digest: u64,
+    pub total_bytes: u64,
+}
+
+/// Incremental Git-blob SHA-1 hasher. Computes `sha1("blob <size>\0" || content)`
+/// in streaming fashion so we never buffer a whole entry in memory.
+///
+/// Feed bytes via [`Self::update`]; call [`Self::finalize_hex`] once to get the
+/// 40-char hex digest. Size header is emitted lazily on the first `update` call.
+// Task 7 wires fetch_tarball_into_cache; until then this struct is unused in
+// production paths (pure-function tests call the validators, not the hasher).
+#[allow(dead_code)]
+pub(crate) struct GitBlobSha1 {
+    h: sha1::Sha1,
+    size_written: u64,
+    size_header_emitted: bool,
+    expected_size: u64,
+}
+
+impl std::fmt::Debug for GitBlobSha1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitBlobSha1")
+            .field("size_written", &self.size_written)
+            .field("expected_size", &self.expected_size)
+            .finish()
+    }
+}
+
+#[allow(dead_code)]
+impl GitBlobSha1 {
+    pub fn new(expected_size: u64) -> Self {
+        use sha1::Digest as _;
+        let h = sha1::Sha1::new();
+        Self {
+            h,
+            size_written: 0,
+            size_header_emitted: false,
+            expected_size,
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        use sha1::Digest as _;
+        if !self.size_header_emitted {
+            self.h
+                .update(format!("blob {}", self.expected_size).as_bytes());
+            self.h.update(b"\0");
+            self.size_header_emitted = true;
+        }
+        self.h.update(bytes);
+        self.size_written += bytes.len() as u64;
+    }
+
+    pub fn finalize_hex(self) -> String {
+        use sha1::Digest as _;
+        hex::encode(self.h.finalize())
+    }
+}
+
 /// Extract (owner, repo) from `SourceSpec.name`, which is `"owner/repo"` for GitHub sources.
 fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
     source.name.split_once('/').ok_or_else(|| {
@@ -104,16 +179,43 @@ fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
 }
 
 impl GitHubProvider {
+    /// Production constructor. Derives the codeload host automatically from
+    /// `api_host` (e.g. `api.github.com` → `codeload.github.com`).
     pub fn new(
         token: Option<&str>,
+        api_host: String,
+        cache: Arc<BlobCache>,
+        tree_cache: Option<Arc<TreeCache>>,
+        shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
+        observability: Arc<Observability>,
+    ) -> Self {
+        Self::new_with_codeload_host(
+            token,
+            api_host,
+            None,
+            cache,
+            tree_cache,
+            shared_tree_cache,
+            observability,
+        )
+    }
+
+    /// Construct with an explicit codeload host override. Production code
+    /// calls [`Self::new`] which derives the codeload host from `api_host`.
+    /// Primarily for tests (e.g. Task 8 replay tests) that need both API
+    /// calls and tarball redirects to point at a local mock server.
+    pub fn new_with_codeload_host(
+        token: Option<&str>,
+        api_host: String,
+        codeload_host_override: Option<String>,
         cache: Arc<BlobCache>,
         tree_cache: Option<Arc<TreeCache>>,
         shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
         observability: Arc<Observability>,
     ) -> Self {
         let auth_identity = match token {
-            Some(t) => AuthIdentity::pat(GITHUB_HOST, t),
-            None => AuthIdentity::anonymous(GITHUB_HOST),
+            Some(t) => AuthIdentity::pat(&api_host, t),
+            None => AuthIdentity::anonymous(&api_host),
         };
 
         let mut default_headers = HeaderMap::new();
@@ -123,11 +225,22 @@ impl GitHubProvider {
                 default_headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         }
 
+        // Build the client with redirect::Policy::none() so reqwest does NOT
+        // auto-follow the tarball 302 with the Authorization header attached.
+        // Manual redirect handling (host whitelist, Authorization strip, depth
+        // ≤ 3) lives in fetch_tarball_into_cache. Non-tarball REST endpoints
+        // (commits, trees, blobs) don't redirect in practice; a stray 3xx on
+        // those paths returns an HTTP-status error from get_json — which is the
+        // right behavior for unhandled redirects.
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT_STR)
             .default_headers(default_headers)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build HTTP client");
+
+        let codeload_host =
+            codeload_host_override.unwrap_or_else(|| Self::codeload_host_for(&api_host));
 
         Self {
             client,
@@ -136,13 +249,15 @@ impl GitHubProvider {
             shared_tree_cache,
             observability,
             auth_identity,
+            api_host,
+            codeload_host,
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
         }
     }
 
-    fn api_url(owner: &str, repo: &str, path: &str) -> String {
-        format!("https://{GITHUB_HOST}/repos/{owner}/{repo}/{path}")
+    fn api_url(&self, owner: &str, repo: &str, path: &str) -> String {
+        format!("https://{}/repos/{owner}/{repo}/{path}", self.api_host)
     }
 
     /// Send a GET request, check rate limits and status, and parse the JSON response.
@@ -174,7 +289,7 @@ impl GitHubProvider {
 
     async fn resolve_ref(&self, source: &SourceSpec) -> Result<String, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
-        let url = Self::api_url(owner, repo, &format!("commits/{}", source.version));
+        let url = self.api_url(owner, repo, &format!("commits/{}", source.version));
 
         let commit: CommitResponse = self
             .get_json(&url, &format!("resolve ref '{}'", source.version))
@@ -189,7 +304,7 @@ impl GitHubProvider {
         tree_sha: &str,
     ) -> Result<TreeResponse, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
-        let url = Self::api_url(owner, repo, &format!("git/trees/{tree_sha}?recursive=1"));
+        let url = self.api_url(owner, repo, &format!("git/trees/{tree_sha}?recursive=1"));
         self.get_json(&url, "fetch tree").await
     }
 
@@ -203,6 +318,8 @@ impl GitHubProvider {
     ///
     /// Test-only: production uses `fetch_tree_walked` which drives the DFS
     /// asynchronously via `fetch_subtree`.
+    ///
+    /// **If you change the DFS loop body, mirror the change in `fetch_tree_walked`.**
     #[cfg(test)]
     fn assemble_walked_tree<F>(root_sha: &str, mut get_subtree: F) -> Vec<TreeEntry>
     where
@@ -235,7 +352,7 @@ impl GitHubProvider {
         tree_sha: &str,
     ) -> Result<Vec<TreeEntry>, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
-        let url = Self::api_url(owner, repo, &format!("git/trees/{tree_sha}"));
+        let url = self.api_url(owner, repo, &format!("git/trees/{tree_sha}"));
         let tree: TreeResponse = self.get_json(&url, "fetch subtree").await?;
         Ok(tree.tree)
     }
@@ -295,7 +412,7 @@ impl GitHubProvider {
         sha: &str,
     ) -> Result<Vec<u8>, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
-        let url = Self::api_url(owner, repo, &format!("git/blobs/{sha}"));
+        let url = self.api_url(owner, repo, &format!("git/blobs/{sha}"));
 
         let blob: BlobResponse = self.get_json(&url, &format!("fetch blob {sha}")).await?;
 
@@ -704,6 +821,358 @@ impl GitHubProvider {
             .unwrap_or_else(|| Digest::sha256(b"empty"));
 
         (root_digest, directories)
+    }
+
+    // ---- Tarball helpers (Task 6 plumbing; Task 7 wires the call site) ----
+
+    /// Maximum redirect-chain depth when following the tarball 302.
+    // Suppress until Task 7 calls fetch_tarball_into_cache.
+    #[allow(dead_code)]
+    const TARBALL_REDIRECT_MAX_DEPTH: u8 = 3;
+
+    /// Derive the codeload host from the API host. For `api.github.com` →
+    /// `codeload.github.com`. For GHE deployments the convention is
+    /// `codeload.<host>`.
+    pub(crate) fn codeload_host_for(api_host: &str) -> String {
+        if api_host == "api.github.com" {
+            "codeload.github.com".to_string()
+        } else {
+            format!("codeload.{api_host}")
+        }
+    }
+
+    /// Validate a 302 Location target against the explicitly supplied codeload
+    /// host. Requires scheme=https and that the URL host equals
+    /// `expected_codeload_host`.
+    ///
+    /// Production calls this with `self.codeload_host` (derived in [`Self::new`]
+    /// or overridden via [`Self::new_with_codeload_host`]). Unit tests pass an
+    /// explicit value — no env lookup, no derivation.
+    pub(crate) fn validate_redirect_target(
+        location: &str,
+        expected_codeload_host: &str,
+    ) -> Result<reqwest::Url, CtxfsError> {
+        let url = reqwest::Url::parse(location)
+            .map_err(|e| CtxfsError::Provider(format!("invalid redirect URL: {e}")))?;
+        if url.scheme() != "https" {
+            return Err(CtxfsError::Provider(format!(
+                "tarball redirect rejected: scheme={} is not https",
+                url.scheme()
+            )));
+        }
+        let actual_host = url.host_str().unwrap_or("");
+        if actual_host != expected_codeload_host {
+            return Err(CtxfsError::Provider(format!(
+                "tarball redirect rejected: host {actual_host} is not codeload host \
+                 {expected_codeload_host}"
+            )));
+        }
+        Ok(url)
+    }
+
+    /// Validate a tarball entry's path. Takes raw bytes (not `&str`) so
+    /// invalid UTF-8 is caught explicitly rather than silently rewritten by
+    /// `to_string_lossy`. Takes the `tar::EntryType` so we can distinguish
+    /// "wrapper directory at root" from "stray regular file at root" (both
+    /// have no `/`; only the directory case is benign).
+    ///
+    /// Rules applied in order:
+    /// - reject invalid UTF-8
+    /// - reject leading `/` (absolute path)
+    /// - reject NUL or any control char < 0x20
+    /// - reject `..` segments anywhere
+    /// - require the codeload top-level wrapper dir (e.g. `owner-repo-sha/`);
+    ///   strip it and return the remainder
+    /// - no-slash + `Directory` → wrapper itself; return empty `PathBuf` (skip)
+    /// - no-slash + anything else → reject (codeload always wraps)
+    pub(crate) fn validate_tar_entry_path(
+        raw: &[u8],
+        entry_type: EntryType,
+    ) -> Result<std::path::PathBuf, CtxfsError> {
+        let s = std::str::from_utf8(raw)
+            .map_err(|_| CtxfsError::Provider("tar entry path is not UTF-8".into()))?;
+        if s.contains('\0') {
+            return Err(CtxfsError::Provider("tar entry path contains NUL".into()));
+        }
+        if s.starts_with('/') {
+            return Err(CtxfsError::Provider(format!("tar entry is absolute: {s}")));
+        }
+        if s.chars().any(|c| (c as u32) < 0x20) {
+            return Err(CtxfsError::Provider(format!(
+                "tar entry has control chars: {s}"
+            )));
+        }
+
+        let cleaned = match s.split_once('/') {
+            Some((_wrapper, rest)) => rest,
+            None => {
+                // No '/': only a directory entry (the wrapper itself) is acceptable.
+                return match entry_type {
+                    EntryType::Directory => Ok(std::path::PathBuf::new()),
+                    _ => Err(CtxfsError::Provider(format!(
+                        "tar entry not under wrapper dir: {s}"
+                    ))),
+                };
+            }
+        };
+
+        // After stripping the wrapper prefix, an empty remainder means this IS
+        // the wrapper directory itself (trailing-slash form: "owner-repo-sha/").
+        // Only a Directory entry is acceptable at that position; a Regular file
+        // claiming that path is malformed.
+        if cleaned.is_empty() {
+            return match entry_type {
+                EntryType::Directory => Ok(std::path::PathBuf::new()),
+                _ => Err(CtxfsError::Provider(format!(
+                    "tar entry not under wrapper dir: {s}"
+                ))),
+            };
+        }
+
+        for seg in cleaned.split('/') {
+            if seg == ".." {
+                return Err(CtxfsError::Provider(format!(
+                    "tar entry contains '..': {s}"
+                )));
+            }
+        }
+
+        Ok(std::path::PathBuf::from(cleaned))
+    }
+
+    /// Build a `path → (expected_sha, expected_size)` index from blob entries.
+    /// Used by `fetch_tarball_into_cache` to look up the expected digest for
+    /// each tar entry and to compute the Git blob SHA-1 (which prefixes the
+    /// size in the hash header).
+    #[allow(dead_code)]
+    fn build_path_to_sha_size(entries: &[TreeEntry]) -> HashMap<std::path::PathBuf, (String, u64)> {
+        entries
+            .iter()
+            .filter(|e| e.entry_type == "blob")
+            .map(|e| {
+                (
+                    std::path::PathBuf::from(&e.path),
+                    (e.sha.clone(), e.size.unwrap_or(0)),
+                )
+            })
+            .collect()
+    }
+
+    /// Download `/repos/{o}/{r}/tarball/{ref}`, follow the codeload 302
+    /// (with security checks), stream-extract via `tar::Archive`, and commit
+    /// each blob atomically into `BlobCache`.
+    ///
+    /// Streaming end-to-end:
+    /// - reqwest body → `bytes_stream` → `StreamReader` (async Read)
+    /// - `SyncIoBridge` → sync Read for `tar::Archive` (runs in `spawn_blocking`)
+    /// - Each entry pipes through `GitBlobSha1` (incremental hasher) AND
+    ///   `BlobCache::commit_atomic_with_writer` (streaming writer) in one
+    ///   `std::io::copy` via a `Tee` adapter.
+    ///
+    /// Memory ceiling: per-entry only. Force-mode tarballs that exceed the
+    /// cache budget commit blobs successfully but trigger LRU evictions of
+    /// earlier entries — that's the documented "warm-cache guarantee will not
+    /// hold" warning.
+    // Task 7 calls this from fetch_snapshot; suppressed until then.
+    #[allow(dead_code)]
+    async fn fetch_tarball_into_cache(
+        &self,
+        source: &SourceSpec,
+        commit_sha: &str,
+        tree_entries: &[TreeEntry],
+    ) -> Result<TarballOutcome, CtxfsError> {
+        // Tee adapter: copies bytes to both hasher and writer in one io::copy.
+        struct Tee<'a, W: std::io::Write> {
+            hasher: &'a mut GitBlobSha1,
+            writer: &'a mut W,
+        }
+        impl<W: std::io::Write> std::io::Write for Tee<'_, W> {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let n = self.writer.write(buf)?;
+                self.hasher.update(&buf[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.writer.flush()
+            }
+        }
+
+        let (owner, repo) = owner_repo(source)?;
+
+        // 1. Initial API call. check_rate_limit ticks rest_calls_total.
+        let api_url = self.api_url(owner, repo, &format!("tarball/{commit_sha}"));
+        let initial_resp = self
+            .client
+            .get(&api_url)
+            .send()
+            .await
+            .map_err(|e| CtxfsError::Provider(format!("HTTP error tarball: {e}")))?;
+        self.check_rate_limit(&initial_resp)?;
+
+        // 2. Manual redirect chain. The provider's client has
+        //    redirect::Policy::none(), so we control the chain. Authorization
+        //    is dropped on hop 1+ by using a fresh client with no default
+        //    headers. Host is validated against self.codeload_host.
+        let codeload_client = reqwest::Client::builder()
+            .user_agent(USER_AGENT_STR)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| CtxfsError::Provider(format!("codeload client build: {e}")))?;
+        let mut current = initial_resp;
+        let mut depth = 0u8;
+        let final_resp = loop {
+            if !current.status().is_redirection() {
+                break current;
+            }
+            if depth >= Self::TARBALL_REDIRECT_MAX_DEPTH {
+                return Err(CtxfsError::Provider(format!(
+                    "tarball redirect chain exceeded depth {}",
+                    Self::TARBALL_REDIRECT_MAX_DEPTH
+                )));
+            }
+            let location = current
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| CtxfsError::Provider("redirect without Location header".into()))?
+                .to_string();
+            let next_url = Self::validate_redirect_target(&location, &self.codeload_host)?;
+            current = codeload_client
+                .get(next_url)
+                .send()
+                .await
+                .map_err(|e| CtxfsError::Provider(format!("codeload GET: {e}")))?;
+            depth += 1;
+        };
+
+        if !final_resp.status().is_success() {
+            return Err(CtxfsError::Provider(format!(
+                "tarball download failed: HTTP {}",
+                final_resp.status()
+            )));
+        }
+
+        // 3. Build the streaming pipeline.
+        //    bytes_stream() is a Stream<Item = Result<Bytes, reqwest::Error>>.
+        //    map_err converts the error to io::Error so StreamReader accepts it.
+        //    StreamReader makes it AsyncRead; SyncIoBridge gives blocking Read
+        //    inside the spawn_blocking thread (Handle::current() is valid there).
+        use futures::TryStreamExt as _;
+        use tokio_util::io::{StreamReader, SyncIoBridge};
+
+        let body_stream = final_resp.bytes_stream().map_err(std::io::Error::other);
+        let async_reader = StreamReader::new(body_stream);
+
+        let path_to_sha_size = Self::build_path_to_sha_size(tree_entries);
+        let cache = Arc::clone(&self.cache);
+        let counter_key = self.counter_key.lock().unwrap().clone();
+        let observability = Arc::clone(&self.observability);
+
+        // 4. Run sync tar+gz extraction in spawn_blocking so the tokio runtime
+        //    is not blocked. Per-entry work is fully streaming: tar::Entry
+        //    implements Read, and we copy through GitBlobSha1 + BlobTempWriter.
+        let outcome = tokio::task::spawn_blocking(move || -> Result<TarballOutcome, CtxfsError> {
+            let sync_reader = SyncIoBridge::new(async_reader);
+            let gz = flate2::read::GzDecoder::new(sync_reader);
+            let mut archive = tar::Archive::new(gz);
+            let mut outcome = TarballOutcome::default();
+
+            for entry_result in archive
+                .entries()
+                .map_err(|e| CtxfsError::Provider(format!("tar entries iter: {e}")))?
+            {
+                let mut entry =
+                    entry_result.map_err(|e| CtxfsError::Provider(format!("tar entry: {e}")))?;
+
+                let entry_type = entry.header().entry_type();
+                let raw_bytes = entry.path_bytes().into_owned();
+
+                // Path validation. Failure → counter + skip.
+                let mount_path = match Self::validate_tar_entry_path(&raw_bytes, entry_type) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        outcome.blobs_skipped_invalid += 1;
+                        if let Some(ref key) = counter_key {
+                            observability
+                                .counters_for(key.clone())
+                                .record_tarball_invalid_entries();
+                        }
+                        tracing::warn!(
+                            target: "ctxfs.provider.tarball",
+                            path = String::from_utf8_lossy(&raw_bytes).as_ref(),
+                            error = format!("{e:?}").as_str(),
+                            "tarball entry rejected"
+                        );
+                        continue;
+                    }
+                };
+
+                // Skip non-regular entries (directories, symlinks, etc. are
+                // represented via the manifest; only regular files go to cache).
+                if entry_type != EntryType::Regular {
+                    continue;
+                }
+                // Empty PathBuf signals "this was the codeload wrapper dir" —
+                // already caught above, but belt-and-suspenders.
+                if mount_path.as_os_str().is_empty() {
+                    continue;
+                }
+
+                // Look up expected (sha, size). No manifest entry → orphaned
+                // tar entry we cannot verify; skip.
+                let (expected_sha, expected_size) = match path_to_sha_size.get(&mount_path) {
+                    Some(t) => t.clone(),
+                    None => continue,
+                };
+
+                // Pipe entry → hasher + writer in one std::io::copy.
+                let mut hasher = GitBlobSha1::new(expected_size);
+                let mut writer = cache.commit_atomic_with_writer()?;
+                {
+                    let mut tee = Tee {
+                        hasher: &mut hasher,
+                        writer: &mut writer,
+                    };
+                    let _ = std::io::copy(&mut entry, &mut tee)
+                        .map_err(|e| CtxfsError::Provider(format!("tar entry stream: {e}")))?;
+                }
+
+                // Verify SHA-1 against manifest before committing.
+                let actual_sha = hasher.finalize_hex();
+                if actual_sha != expected_sha {
+                    outcome.blobs_skipped_digest += 1;
+                    if let Some(ref key) = counter_key {
+                        observability
+                            .counters_for(key.clone())
+                            .record_tarball_digest_mismatch();
+                    }
+                    // Drop without finalizing — NamedTempFile RAII unlinks temp.
+                    drop(writer);
+                    tracing::warn!(
+                        target: "ctxfs.provider.tarball",
+                        path = mount_path.display().to_string().as_str(),
+                        expected = expected_sha.as_str(),
+                        actual = actual_sha.as_str(),
+                        "tarball blob SHA-1 mismatch"
+                    );
+                    continue;
+                }
+
+                // Manifest stores Git blob SHA-1 in the digest hex. The cache
+                // key uses Digest::from_sha256_hex (B3-label rename is M5;
+                // the stored hex is what matters, not the field name).
+                let digest = Digest::from_sha256_hex(&expected_sha);
+                writer.finalize(&digest)?;
+
+                outcome.blobs_committed += 1;
+                outcome.total_bytes += expected_size;
+            }
+            Ok(outcome)
+        })
+        .await
+        .map_err(|e| CtxfsError::Provider(format!("spawn_blocking join: {e}")))??;
+
+        Ok(outcome)
     }
 }
 
@@ -1196,7 +1665,14 @@ mod tests {
         let cache_dir = tempfile::tempdir().unwrap();
         let cache =
             Arc::new(ctxfs_cache::BlobCache::new(cache_dir.path().to_path_buf(), 1024).unwrap());
-        let provider = GitHubProvider::new(None, cache, None, None, Arc::new(Observability::new()));
+        let provider = GitHubProvider::new(
+            None,
+            "api.github.com".to_string(),
+            cache,
+            None,
+            None,
+            Arc::new(Observability::new()),
+        );
         let source = SourceSpec::parse("github:test/repo@main").unwrap();
         let result = provider
             .prefetch_small_blobs(&source, vec![], &std::collections::HashSet::new())
@@ -1372,6 +1848,85 @@ mod tests {
             DirEntry::Symlink(s) => assert_eq!(s.target, ""),
             _ => panic!("expected symlink"),
         }
+    }
+
+    // ---- Task 6: path-validation and redirect-validation tests ----
+
+    fn pv(raw: &str, et: tar::EntryType) -> Result<std::path::PathBuf, CtxfsError> {
+        GitHubProvider::validate_tar_entry_path(raw.as_bytes(), et)
+    }
+
+    #[test]
+    fn validate_tar_entry_path_strips_top_level_prefix_for_files() {
+        let p = pv("owner-repo-abc123/src/lib.rs", tar::EntryType::Regular).unwrap();
+        assert_eq!(p, std::path::PathBuf::from("src/lib.rs"));
+    }
+
+    #[test]
+    fn validate_tar_entry_path_accepts_wrapper_dir_only_for_directories() {
+        // The codeload wrapper dir itself appears as a directory entry.
+        // Returning empty PathBuf signals "skip — this is the wrapper".
+        let dir = pv("owner-repo-abc/", tar::EntryType::Directory).unwrap();
+        assert_eq!(dir, std::path::PathBuf::new());
+
+        // The same string with a regular-file entry is malformed.
+        assert!(pv("owner-repo-abc/", tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_no_slash_regular_file() {
+        // codeload always wraps; a regular file at the archive root is malformed.
+        assert!(pv("README.md", tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_dotdot() {
+        assert!(pv("owner-repo-abc/../escape", tar::EntryType::Regular).is_err());
+        assert!(pv("owner-repo-abc/sub/../../escape", tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_absolute() {
+        assert!(pv("/etc/passwd", tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_nul_and_control() {
+        assert!(pv("owner-repo-abc/foo\0bar", tar::EntryType::Regular).is_err());
+        assert!(pv("owner-repo-abc/foo\x01bar", tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_invalid_utf8() {
+        // Raw bytes (not str) are passed in so we can prove the rejection.
+        let mut bytes = Vec::from(b"owner-repo-abc/".as_slice());
+        bytes.push(0xFFu8);
+        bytes.extend_from_slice(b".rs");
+        assert!(GitHubProvider::validate_tar_entry_path(&bytes, tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn redirect_url_validates_codeload_only() {
+        // validate_redirect_target takes the explicit codeload host (already derived),
+        // not api_host.
+        assert!(GitHubProvider::validate_redirect_target(
+            "https://codeload.github.com/owner/repo/tar.gz/abc",
+            "codeload.github.com"
+        )
+        .is_ok());
+        assert!(GitHubProvider::validate_redirect_target(
+            "https://attacker.example.com/foo",
+            "codeload.github.com"
+        )
+        .is_err());
+        assert!(
+            GitHubProvider::validate_redirect_target(
+                "http://codeload.github.com/foo",
+                "codeload.github.com"
+            )
+            .is_err(),
+            "http rejected even on codeload"
+        );
     }
 
     // ---- Task 5: assemble_walked_tree unit tests ----

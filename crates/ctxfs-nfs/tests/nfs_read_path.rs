@@ -35,6 +35,7 @@ async fn build_fs_for(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, temp
     let token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
     let provider = Arc::new(GitHubProvider::new(
         token.as_deref(),
+        "api.github.com".to_string(),
         cache.clone(),
         None,
         None,
