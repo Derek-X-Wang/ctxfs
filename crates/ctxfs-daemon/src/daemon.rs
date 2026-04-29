@@ -2,7 +2,6 @@ use crate::observability::Observability;
 use anyhow::{bail, Context, Result};
 use ctxfs_cache::{BlobCache, ResolutionCache, SharedTreeCache, TreeCache};
 use ctxfs_core::config::Config;
-use ctxfs_core::provider::Provider;
 use ctxfs_core::source::{ProviderType, SourceSpec};
 use ctxfs_core::Backend;
 use ctxfs_ipc::service::{
@@ -11,8 +10,9 @@ use ctxfs_ipc::service::{
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
+use ctxfs_provider_common::fetcher::TarballSingleflightMap;
 use ctxfs_provider_common::resolver::RegistryResolver;
-use ctxfs_provider_git::GitHubProvider;
+use ctxfs_provider_git::{FetchOptions, GitHubProvider};
 use fskit_rs::session::Session as FsKitSession;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -116,6 +116,9 @@ struct DaemonServer {
     config: Config,
     rt_handle: tokio::runtime::Handle,
     observability: Arc<Observability>,
+    /// Singleflight registry shared across all mounts on this daemon instance.
+    /// Prevents concurrent tarball fetches for the same (owner/repo/sha) key.
+    tarball_singleflight: Arc<TarballSingleflightMap>,
 }
 
 impl Daemon {
@@ -178,6 +181,7 @@ impl Daemon {
             config: self.config.clone(),
             rt_handle: tokio::runtime::Handle::current(),
             observability: Arc::new(Observability::new()),
+            tarball_singleflight: Arc::new(TarballSingleflightMap::new()),
         };
 
         let cancel = self.cancel.clone();
@@ -385,11 +389,6 @@ struct MountPrep {
     snapshot: ctxfs_manifest::Snapshot,
     /// Optional subpath to re-root the mount at.
     subpath: Option<String>,
-    /// User-requested prefetch options. Stored here so Task 7 can route
-    /// `options.prefetch` into the tarball auto-gate without restructuring
-    /// the call shape. Not yet read in M3.
-    #[allow(dead_code)]
-    options: MountOptions,
 }
 
 impl DaemonServer {
@@ -480,13 +479,18 @@ impl DaemonServer {
             Some(self.tree_cache.clone()),
             self.shared_tree_cache.clone(),
             self.observability.clone(),
-            // Commit E replaces this with self.tarball_singleflight.clone().
-            Arc::new(dashmap::DashMap::new()),
+            self.tarball_singleflight.clone(),
         ));
+
+        let fetch_options = FetchOptions {
+            prefetch: options.prefetch,
+            prefetch_threshold_count: self.config.prefetch_threshold_count,
+            prefetch_max_bytes: self.config.prefetch_max_bytes,
+        };
 
         let snapshot_data = self
             .rt_handle
-            .block_on(provider.fetch_snapshot(&github_source))
+            .block_on(provider.fetch_snapshot_with_options(&github_source, &fetch_options))
             .map_err(|e| format!("failed to fetch snapshot: {e}"))?;
 
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
@@ -498,7 +502,6 @@ impl DaemonServer {
             provider,
             snapshot,
             subpath,
-            options,
         })
     }
 
@@ -968,6 +971,7 @@ mod tests {
             config,
             rt_handle: tokio::runtime::Handle::current(),
             observability: Arc::new(Observability::new()),
+            tarball_singleflight: Arc::new(TarballSingleflightMap::new()),
         }
     }
 
