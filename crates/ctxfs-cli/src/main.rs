@@ -1240,4 +1240,27 @@ mod tests {
             "clap should reject --prefetch and --no-prefetch together"
         );
     }
+
+    #[test]
+    fn mount_defaults_to_auto_prefetch() {
+        let cli = Cli::try_parse_from([
+            "ctxfs",
+            "mount",
+            "github:o/r@main",
+            "-p",
+            "/tmp/x",
+        ])
+        .expect("plain mount should parse without prefetch flags");
+        match cli.command {
+            Commands::Mount {
+                prefetch,
+                no_prefetch,
+                ..
+            } => {
+                assert!(!prefetch, "prefetch must default to false (Auto policy)");
+                assert!(!no_prefetch, "no_prefetch must default to false (Auto policy)");
+            }
+            _ => panic!("expected Mount command"),
+        }
+    }
 }
