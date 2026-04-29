@@ -901,43 +901,69 @@ impl GitHubProvider {
 
     // ---- Tarball auto-gate + singleflight dispatch ----
 
+    /// Compute the effective prefetch policy for the given tree entries.
+    ///
+    /// Degrades `Auto` → `Disabled` (fail-closed) when any blob entry has an
+    /// unknown size, preventing the byte-cap estimate from being underestimated.
+    /// `Force` and `Disabled` are returned unchanged regardless of entry sizes.
+    ///
+    /// Extracted as an associated function for unit-testability.
+    pub(crate) fn effective_prefetch_policy(
+        entries: &[TreeEntry],
+        policy: ctxfs_provider_common::fetcher::PrefetchPolicy,
+    ) -> ctxfs_provider_common::fetcher::PrefetchPolicy {
+        use ctxfs_provider_common::fetcher::PrefetchPolicy;
+        let any_unknown = entries
+            .iter()
+            .filter(|e| e.entry_type == "blob")
+            .any(|e| e.size.is_none());
+        if any_unknown && policy == PrefetchPolicy::Auto {
+            PrefetchPolicy::Disabled
+        } else {
+            policy
+        }
+    }
+
     /// Run the auto-gate and, if it elects tarball, fetch it (with singleflight
     /// dedupe + cache pre-check). Tarball failure is non-fatal — the snapshot
     /// still completes; lazy reads pick up uncached blobs.
+    ///
+    /// `owner` and `repo` are passed in (already extracted from `source` by the
+    /// caller) so this function is infallible — the only fallible operation was
+    /// the `owner_repo` parse, which already happened in `fetch_snapshot_inner`.
     ///
     /// Counters:
     /// - `prefetch_hits` — incremented per committed blob *inside*
     ///   `fetch_tarball_into_cache`'s per-entry loop (Codex M3-plan-v1 #7).
     /// - `prefetch_failures` — one tick per failed tarball attempt.
     /// - `prefetch_skipped_oversized` — auto-gate said no (byte cap exceeded).
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_fetch_policy(
         &self,
         source: &SourceSpec,
+        owner: &str,
+        repo: &str,
         commit_sha: &str,
         tree_entries: &[TreeEntry],
         policy: ctxfs_provider_common::fetcher::PrefetchPolicy,
         threshold_count: u64,
         max_bytes: u64,
-    ) -> Result<(), CtxfsError> {
-        use ctxfs_provider_common::fetcher::{decide_policy, FetchPolicy, PrefetchPolicy};
+    ) {
+        use ctxfs_provider_common::fetcher::{decide_policy, FetchPolicy};
 
-        // Count blobs and sum estimated bytes. Treat any entry with size==None
-        // as "unknown size" — forces Lazy when policy==Auto (fail-closed so the
-        // byte cap cannot be underestimated). (Codex M3-plan-v1 #8.)
+        // Count blobs and sum estimated bytes. Unknown-size entries have already
+        // been handled by effective_prefetch_policy (fail-closed degradation).
         let blob_iter = tree_entries.iter().filter(|e| e.entry_type == "blob");
         let blob_count = blob_iter.clone().count() as u64;
-        let any_unknown_size = blob_iter.clone().any(|e| e.size.is_none());
         let estimated_bytes: u64 = blob_iter.clone().map(|e| e.size.unwrap_or(0)).sum();
 
-        let effective_policy = if any_unknown_size && policy == PrefetchPolicy::Auto {
+        let effective_policy = Self::effective_prefetch_policy(tree_entries, policy);
+        if effective_policy != policy {
             tracing::info!(
                 target: "ctxfs.provider.tarball",
                 "manifest has entries with unknown size; degrading auto-gate to Lazy"
             );
-            PrefetchPolicy::Disabled
-        } else {
-            policy
-        };
+        }
 
         let decision = decide_policy(
             blob_count,
@@ -948,7 +974,7 @@ impl GitHubProvider {
         );
 
         match decision {
-            FetchPolicy::Lazy => Ok(()),
+            FetchPolicy::Lazy => {}
 
             FetchPolicy::LazyOversized {
                 estimated_bytes,
@@ -967,7 +993,6 @@ impl GitHubProvider {
                     cap,
                     "tarball auto-gate skipped: estimated_bytes > prefetch_max_bytes"
                 );
-                Ok(())
             }
 
             FetchPolicy::Tarball {
@@ -987,11 +1012,10 @@ impl GitHubProvider {
                         blob_count,
                         "all manifest blobs already cached; skipping tarball"
                     );
-                    return Ok(());
+                    return;
                 }
 
                 // Singleflight: claim slot for this (host, owner, repo, commit).
-                let (owner, repo) = owner_repo(source)?;
                 let key = TarballKey {
                     host: self.api_host.clone(),
                     owner: owner.to_string(),
@@ -1056,7 +1080,6 @@ impl GitHubProvider {
 
                 // Tarball failure is non-fatal: lazy reads fill any gaps.
                 let _ = outcome_res;
-                Ok(())
             }
         }
     }
@@ -1579,13 +1602,15 @@ impl GitHubProvider {
         //     snapshot still completes; lazy reads pick up uncached blobs.
         self.dispatch_fetch_policy(
             source,
+            owner,
+            repo,
             &commit_sha,
             &tree.tree,
             options.prefetch,
             options.prefetch_threshold_count,
             options.prefetch_max_bytes,
         )
-        .await?;
+        .await;
 
         // 5. Prefetch small blobs + symlink targets for B1/B7 inlining.
         //    Skip the call entirely if no entries are eligible (avoids a
@@ -2504,16 +2529,18 @@ mod tests {
 
     // ---- dispatch_fetch_policy unit tests ----
 
-    /// PrefetchPolicy::Disabled → dispatch returns Ok(()) without touching the
-    /// singleflight registry or making any HTTP calls.
+    /// PrefetchPolicy::Disabled → dispatch returns immediately without touching
+    /// the singleflight registry or making any HTTP calls.
     #[tokio::test]
     async fn dispatch_fetch_policy_disabled_returns_ok() {
         use ctxfs_provider_common::fetcher::PrefetchPolicy;
         let provider = make_test_provider();
         let source = SourceSpec::parse("github:owner/repo@main").unwrap();
-        let result = provider
+        provider
             .dispatch_fetch_policy(
                 &source,
+                "owner",
+                "repo",
                 "abc123",
                 &[],
                 PrefetchPolicy::Disabled,
@@ -2521,10 +2548,10 @@ mod tests {
                 256 * 1024 * 1024,
             )
             .await;
-        assert!(result.is_ok(), "Disabled policy must return Ok immediately");
+        // Infallible — completing without panic is the assertion.
     }
 
-    /// Auto-gate: blob count below threshold → Lazy → Ok(()) immediately.
+    /// Auto-gate: blob count below threshold → Lazy → returns immediately.
     #[tokio::test]
     async fn dispatch_fetch_policy_auto_below_threshold_returns_ok() {
         use ctxfs_provider_common::fetcher::PrefetchPolicy;
@@ -2540,9 +2567,11 @@ mod tests {
                 size: Some(100),
             })
             .collect();
-        let result = provider
+        provider
             .dispatch_fetch_policy(
                 &source,
+                "owner",
+                "repo",
                 "abc123",
                 &entries,
                 PrefetchPolicy::Auto,
@@ -2550,9 +2579,64 @@ mod tests {
                 256 * 1024 * 1024,
             )
             .await;
-        assert!(
-            result.is_ok(),
-            "Auto/below-threshold must return Ok immediately"
+        // Infallible — completing without panic is the assertion.
+    }
+
+    /// Auto-gate degrades to Lazy (fail-closed) when any blob has unknown size.
+    /// Directly exercises `effective_prefetch_policy` — the extracted logic.
+    #[test]
+    fn dispatch_policy_degrades_auto_on_unknown_size() {
+        use ctxfs_provider_common::fetcher::PrefetchPolicy;
+        // 31 blobs above the default threshold, but one has size=None.
+        let mut entries: Vec<TreeEntry> = (0..30_u32)
+            .map(|i| TreeEntry {
+                path: format!("file{i}.txt"),
+                mode: "100644".to_string(),
+                entry_type: "blob".to_string(),
+                sha: format!("{i:040x}"),
+                size: Some(1_000),
+            })
+            .collect();
+        entries.push(TreeEntry {
+            path: "unknown.bin".to_string(),
+            mode: "100644".to_string(),
+            entry_type: "blob".to_string(),
+            sha: "a".repeat(40),
+            size: None, // ← triggers fail-closed degradation
+        });
+
+        // Auto + unknown size → must degrade to Disabled
+        assert_eq!(
+            GitHubProvider::effective_prefetch_policy(&entries, PrefetchPolicy::Auto),
+            PrefetchPolicy::Disabled,
+            "Auto must degrade to Disabled when any blob has unknown size (fail-closed safety valve)"
+        );
+        // Force is unaffected by unknown sizes
+        assert_eq!(
+            GitHubProvider::effective_prefetch_policy(&entries, PrefetchPolicy::Force),
+            PrefetchPolicy::Force,
+            "Force must not be degraded by unknown sizes"
+        );
+        // Disabled stays Disabled
+        assert_eq!(
+            GitHubProvider::effective_prefetch_policy(&entries, PrefetchPolicy::Disabled),
+            PrefetchPolicy::Disabled,
+            "Disabled must remain Disabled"
+        );
+        // All-known sizes → Auto stays Auto
+        let known_entries: Vec<TreeEntry> = (0..5_u32)
+            .map(|i| TreeEntry {
+                path: format!("file{i}.txt"),
+                mode: "100644".to_string(),
+                entry_type: "blob".to_string(),
+                sha: format!("{i:040x}"),
+                size: Some(1_000),
+            })
+            .collect();
+        assert_eq!(
+            GitHubProvider::effective_prefetch_policy(&known_entries, PrefetchPolicy::Auto),
+            PrefetchPolicy::Auto,
+            "Auto must stay Auto when all blob sizes are known"
         );
     }
 

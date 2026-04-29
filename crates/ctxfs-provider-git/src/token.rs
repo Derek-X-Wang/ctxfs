@@ -18,8 +18,7 @@ pub async fn validate_github_token(token: &str) -> Result<TokenInfo, String> {
     if token.is_empty() {
         return Err("token is empty".to_string());
     }
-    let auth =
-        ctxfs_provider_common::http::bearer_header(token).ok_or("invalid token encoding")?;
+    let auth = ctxfs_provider_common::http::bearer_header(token).ok_or("invalid token encoding")?;
     let client = reqwest::Client::new();
     let rate_limit_fut = client
         .get("https://api.github.com/rate_limit")

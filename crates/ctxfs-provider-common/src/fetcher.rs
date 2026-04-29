@@ -121,7 +121,7 @@ pub struct TarballKey {
 /// Stored as `Arc<TarballSlot>` in [`TarballSingleflightMap`] so the leader can
 /// use [`Arc::ptr_eq`] in [`SlotClaim::release`] to ensure it removes *its own*
 /// slot and not a newer one inserted for the same key after the leader finished.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TarballSlot {
     /// Populated by the leader. Stores `Ok(())` on success, `Err(msg)` on
     /// failure so waiters can observe the error without retrying in-flight.
@@ -136,6 +136,15 @@ pub type TarballSingleflightMap = dashmap::DashMap<TarballKey, Arc<TarballSlot>>
 /// Returned by `claim_singleflight_slot`. Carries the slot Arc, whether this
 /// caller is the leader, and a reference to the registry so the leader can
 /// remove its slot when done.
+///
+/// ## Leader-cancellation semantics
+///
+/// If the leader task is cancelled before [`SlotClaim::release`] is called, the
+/// slot stays in the registry with an uninitialized cell. The next waiter on
+/// `get_or_init` becomes the de-facto initializer with `is_leader = false`, so
+/// its `release()` is a no-op and the slot persists for the daemon session.
+/// This is bounded — one slot per `(host, owner, repo, commit)` tuple — and
+/// causes at most one spurious no-op release per surviving waiter.
 #[derive(Debug)]
 pub struct SlotClaim {
     /// The key this claim is for — needed by [`SlotClaim::release`].
@@ -246,9 +255,7 @@ mod tests {
     fn slot_claim_release_leader_removes_slot() {
         let registry = make_registry();
         let key = make_key("abc123");
-        let slot = Arc::new(TarballSlot {
-            cell: tokio::sync::OnceCell::new(),
-        });
+        let slot = Arc::new(TarballSlot::default());
         let _ = registry.insert(key.clone(), Arc::clone(&slot));
 
         let claim = SlotClaim {
@@ -270,9 +277,7 @@ mod tests {
     fn slot_claim_release_waiter_is_noop() {
         let registry = make_registry();
         let key = make_key("abc123");
-        let slot = Arc::new(TarballSlot {
-            cell: tokio::sync::OnceCell::new(),
-        });
+        let slot = Arc::new(TarballSlot::default());
         let _ = registry.insert(key.clone(), Arc::clone(&slot));
 
         let claim = SlotClaim {
