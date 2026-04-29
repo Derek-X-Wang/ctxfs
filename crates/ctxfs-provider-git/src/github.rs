@@ -2447,7 +2447,7 @@ mod tests {
         );
     }
 
-    // ---- Task 5: assemble_walked_tree unit tests ----
+    // ---- assemble_walked_tree unit tests ----
 
     #[test]
     fn assemble_walked_tree_recurses_directories() {

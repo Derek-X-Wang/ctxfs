@@ -26,9 +26,9 @@ struct LruState {
 }
 
 impl LruState {
-    /// Evict the oldest (least-recently-used) entry. Returns `true` if an
-    /// entry was evicted, `false` if the cache was already empty.
-    /// NOTE: does NOT remove the on-disk file; callers must do that themselves.
+    /// Returns the `(key, size)` of the evicted entry, or `None` if the LRU
+    /// was already empty. Does NOT remove the on-disk file; callers must do
+    /// that themselves.
     fn evict_oldest(&mut self) -> Option<(String, u64)> {
         self.entries.pop_front().map(|(key, entry)| {
             self.total_bytes -= entry.size;
@@ -330,7 +330,7 @@ impl BlobCache {
                 if !algo_path.is_dir() {
                     continue;
                 }
-                // M3: skip tmp/ — partial blobs from in-flight commits never
+                // Skip tmp/ — partial blobs from in-flight commits never
                 // belong in the LRU. cleanup_orphan_temps removes stale ones.
                 if algo_path.file_name().is_some_and(|n| n == "tmp") {
                     continue;
