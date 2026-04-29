@@ -107,7 +107,18 @@ impl BlobCache {
 
         let size = data.len() as u64;
         let key = digest.hex.clone();
-        let mut evicted = Vec::new();
+        for k in self.lru_insert_evict(key, size) {
+            self.remove_blob_file(&k);
+        }
+
+        Ok(())
+    }
+
+    /// Insert `(key, size)` into the LRU, then evict entries until the total
+    /// is within `max_bytes`. Returns the keys of evicted entries (callers
+    /// must remove the corresponding on-disk files).
+    fn lru_insert_evict(&self, key: String, size: u64) -> Vec<String> {
+        let mut evicted_keys = Vec::new();
         {
             let mut state = self.state.lock().unwrap();
             if let Some(existing) = state.entries.get(&key) {
@@ -115,20 +126,14 @@ impl BlobCache {
             }
             let _ = state.entries.insert(key, CacheEntry { size });
             state.total_bytes += size;
-
-            // Collect eviction candidates while holding the lock, then delete after.
             let limit = self.max_bytes.load(Ordering::Relaxed);
             while state.total_bytes > limit && !state.entries.is_empty() {
-                if let Some(entry) = state.evict_oldest() {
-                    evicted.push(entry);
+                if let Some((k, _)) = state.evict_oldest() {
+                    evicted_keys.push(k);
                 }
             }
         }
-        for (evicted_key, _) in evicted {
-            self.remove_blob_file(&evicted_key);
-        }
-
-        Ok(())
+        evicted_keys
     }
 
     pub fn contains(&self, digest: &Digest) -> bool {
@@ -470,22 +475,7 @@ impl BlobTempWriter<'_> {
         // LRU bookkeeping (post-rename so file is durable before tracking).
         let size = self.bytes_written;
         let key = expected.hex.clone();
-        let mut evicted = Vec::new();
-        {
-            let mut state = self.cache.state.lock().unwrap();
-            if let Some(existing) = state.entries.get(&key) {
-                state.total_bytes -= existing.size;
-            }
-            let _ = state.entries.insert(key, CacheEntry { size });
-            state.total_bytes += size;
-            let limit = self.cache.max_bytes.load(Ordering::Relaxed);
-            while state.total_bytes > limit && !state.entries.is_empty() {
-                if let Some(entry) = state.evict_oldest() {
-                    evicted.push(entry);
-                }
-            }
-        }
-        for (k, _) in evicted {
+        for k in self.cache.lru_insert_evict(key, size) {
             self.cache.remove_blob_file(&k);
         }
         Ok(())

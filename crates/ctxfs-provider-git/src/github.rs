@@ -55,9 +55,8 @@ pub struct GitHubProvider {
     api_host: String,
     /// Codeload host derived from `api_host` (or explicitly overridden via
     /// [`Self::new_with_codeload_host`]). Tarball 302 redirects must land on
-    /// this host. Override is used by Task 8 replay tests that point both the
+    /// this host. Override is used by integration tests that point both the
     /// API and codeload at a local mock server.
-    /// Task 7 wires `fetch_tarball_into_cache` from `dispatch_fetch_policy`.
     codeload_host: String,
     /// HTTP client used for the codeload-host hop in the tarball flow.
     /// Built once at construction time with NO default headers (so the
@@ -125,7 +124,7 @@ pub(crate) struct TarballOutcome {
 ///
 /// Feed bytes via [`Self::update`]; call [`Self::finalize_hex`] once to get the
 /// 40-char hex digest. Size header is emitted lazily on the first `update` call.
-pub(crate) struct GitBlobSha1 {
+pub struct GitBlobSha1 {
     h: sha1::Sha1,
     size_written: u64,
     size_header_emitted: bool,
@@ -248,8 +247,8 @@ impl GitHubProvider {
 
     /// Construct with an explicit codeload host override. Production code
     /// calls [`Self::new`] which derives the codeload host from `api_host`.
-    /// Primarily for tests (e.g. Task 8 replay tests) that need both API
-    /// calls and tarball redirects to point at a local mock server.
+    /// Primarily for tests that need both API calls and tarball redirects
+    /// to point at a local mock server.
     #[allow(clippy::too_many_arguments)] // M4 will collapse via ProviderContext.
     pub fn new_with_codeload_host(
         token: Option<&str>,
@@ -372,7 +371,7 @@ impl GitHubProvider {
     /// Walk a tree by calling `get_subtree` per subtree SHA (closure-injected
     /// so the pure path-prefixing logic can be unit-tested without HTTP).
     /// Iterative DFS — bounded stack on adversarial repos (e.g. a maliciously
-    /// deep symlink chain from B7).
+    /// deep symlink chain).
     ///
     /// Returns all entries flattened with path-prefixes, matching the shape of
     /// a `recursive=1` response.
@@ -406,7 +405,7 @@ impl GitHubProvider {
         out
     }
 
-    /// Fetch a single tree without recursion. Used by the B2 fallback path.
+    /// Fetch a single tree without recursion. Used by the truncated-tree fallback path.
     async fn fetch_subtree(
         &self,
         source: &SourceSpec,
@@ -418,16 +417,15 @@ impl GitHubProvider {
         Ok(tree.tree)
     }
 
-    /// B2 fallback: when `fetch_tree` returns `truncated=true`, walk
-    /// per-directory to assemble a complete manifest. Increments the
-    /// `truncated_tree_fallbacks` counter once per fallback fire.
+    /// When `fetch_tree` returns `truncated=true`, walk per-directory to
+    /// assemble a complete manifest. Increments the `truncated_tree_fallbacks`
+    /// counter once per fallback fire.
     ///
     /// Note: per-subtree responses include `size` for blob entries (per
     /// GitHub Trees API docs). If an entry returns `size=None`, the auto-gate
-    /// in `dispatch_fetch_policy` (Task 7) treats the manifest as having
-    /// unknown total bytes and falls back to Lazy (fail-closed). Don't try to
-    /// estimate by file extension or cache mtimes — be honest about the
-    /// missing signal.
+    /// in `dispatch_fetch_policy` treats the manifest as having unknown total
+    /// bytes and falls back to Lazy (fail-closed). Don't try to estimate by
+    /// file extension or cache mtimes — be honest about the missing signal.
     async fn fetch_tree_walked(
         &self,
         source: &SourceSpec,
@@ -745,13 +743,13 @@ impl GitHubProvider {
     /// `inline`, and decodes `SymlinkEntry::target` from the same map for
     /// mode-120000 entries.
     ///
-    /// Files (B1): the size guard inside `build_directories_inner` prevents a
+    /// Files: the size guard inside `build_directories_inner` prevents a
     /// misbuilt map from accidentally inlining a >4 KB blob even if the caller
     /// places larger bytes in the map.
     ///
-    /// Symlinks (B7): no size guard — symlinks are always small in practice,
-    /// and the prefetch path's strict-on-symlink failure policy ensures the
-    /// map already contains the target before this function runs in production.
+    /// Symlinks: no size guard — symlinks are always small in practice, and
+    /// the prefetch path's strict-on-symlink failure policy ensures the map
+    /// already contains the target before this function runs in production.
     ///
     /// # Errors
     ///
@@ -948,11 +946,11 @@ impl GitHubProvider {
     /// the `owner_repo` parse, which already happened in `fetch_snapshot_inner`.
     ///
     /// Counters:
-    /// - `prefetch_hits` — incremented per committed blob *inside*
-    ///   `fetch_tarball_into_cache`'s per-entry loop (Codex M3-plan-v1 #7).
+    /// - `prefetch_hits` — incremented per committed blob inside the
+    ///   `fetch_tarball_into_cache` per-entry loop.
     /// - `prefetch_failures` — one tick per failed tarball attempt.
     /// - `prefetch_skipped_oversized` — auto-gate said no (byte cap exceeded).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // M4 will collapse via ProviderContext.
     async fn dispatch_fetch_policy(
         &self,
         source: &SourceSpec,
@@ -964,7 +962,13 @@ impl GitHubProvider {
         threshold_count: u64,
         max_bytes: u64,
     ) {
-        use ctxfs_provider_common::fetcher::{decide_policy, FetchPolicy};
+        use ctxfs_provider_common::fetcher::{decide_policy, FetchPolicy, PrefetchPolicy};
+
+        // Short-circuit: Disabled means never prefetch — skip blob iteration,
+        // effective_prefetch_policy, and decide_policy entirely.
+        if policy == PrefetchPolicy::Disabled {
+            return;
+        }
 
         // Count blobs and sum estimated bytes. Unknown-size entries have already
         // been handled by effective_prefetch_policy (fail-closed degradation).
@@ -1051,7 +1055,7 @@ impl GitHubProvider {
                         {
                             Ok(out) => {
                                 // prefetch_hits already recorded per-entry in
-                                // fetch_tarball_into_cache (Codex M3-plan-v1 #7).
+                                // fetch_tarball_into_cache.
                                 if let Some(k) = self.counter_key.lock().unwrap().clone() {
                                     let counters = self.observability.counters_for(k);
                                     counters.record_bytes_transferred(out.total_bytes);
@@ -1247,14 +1251,6 @@ impl GitHubProvider {
             };
         }
 
-        for seg in cleaned.split('/') {
-            if seg == ".." {
-                return Err(CtxfsError::Provider(format!(
-                    "tar entry contains '..': {s}"
-                )));
-            }
-        }
-
         Ok(std::path::PathBuf::from(cleaned))
     }
 
@@ -1378,6 +1374,11 @@ impl GitHubProvider {
         let cache = Arc::clone(&self.cache);
         let counter_key = self.counter_key.lock().unwrap().clone();
         let observability = Arc::clone(&self.observability);
+        // Hoist counters_for outside the per-entry loop: one DashMap lookup
+        // rather than one per entry. Falls through to None when no key set.
+        let counters = counter_key
+            .as_ref()
+            .map(|k| observability.counters_for(k.clone()));
 
         // 4. Run sync tar+gz extraction in spawn_blocking so the tokio runtime
         //    is not blocked. Per-entry work is fully streaming: tar::Entry
@@ -1403,10 +1404,8 @@ impl GitHubProvider {
                     Ok(p) => p,
                     Err(e) => {
                         outcome.blobs_skipped_invalid += 1;
-                        if let Some(ref key) = counter_key {
-                            observability
-                                .counters_for(key.clone())
-                                .record_tarball_invalid_entries();
+                        if let Some(ref c) = counters {
+                            c.record_tarball_invalid_entries();
                         }
                         tracing::warn!(
                             target: "ctxfs.provider.tarball",
@@ -1452,10 +1451,8 @@ impl GitHubProvider {
                 let actual_sha = hasher.finalize_hex();
                 if actual_sha != expected_sha {
                     outcome.blobs_skipped_digest += 1;
-                    if let Some(ref key) = counter_key {
-                        observability
-                            .counters_for(key.clone())
-                            .record_tarball_digest_mismatch();
+                    if let Some(ref c) = counters {
+                        c.record_tarball_digest_mismatch();
                     }
                     // Drop without finalizing — NamedTempFile RAII unlinks temp.
                     drop(writer);
@@ -1470,8 +1467,8 @@ impl GitHubProvider {
                 }
 
                 // Manifest stores Git blob SHA-1 in the digest hex. The cache
-                // key uses Digest::from_sha256_hex (B3-label rename is M5;
-                // the stored hex is what matters, not the field name).
+                // key uses Digest::from_sha256_hex — the stored hex is what
+                // matters, not the field name.
                 let digest = Digest::from_sha256_hex(&expected_sha);
                 writer.finalize(&digest)?;
 
@@ -1479,11 +1476,8 @@ impl GitHubProvider {
                 outcome.total_bytes += expected_size;
                 // Increment prefetch_hits per committed blob incrementally so
                 // partial commits (mid-stream failure) are visible in telemetry.
-                // (Codex M3-plan-v1 #7 — folded from T6 handoff note.)
-                if let Some(ref key) = counter_key {
-                    observability
-                        .counters_for(key.clone())
-                        .record_prefetch_hit();
+                if let Some(ref c) = counters {
+                    c.record_prefetch_hit();
                 }
             }
             Ok(outcome)
@@ -1523,20 +1517,25 @@ impl GitHubProvider {
         // Record the source so later `fetch_blob` calls know which repo to hit.
         *self.active_source.lock().unwrap() = Some(source.clone());
 
-        // 1. Pre-seed counter_key with a "<resolving:ref>" placeholder commit
-        //    so the upcoming `resolve_ref` API call is attributed to this
-        //    mount in `rest_calls_total`. Without this, resolve_ref runs with
-        //    counter_key=None and the API call is silently un-counted.
+        // 1. Pre-seed counter_key with a placeholder commit so the upcoming
+        //    `resolve_ref` API call is attributed to this mount in
+        //    `rest_calls_total`. Without this, resolve_ref runs with
+        //    counter_key=None and the call is silently un-counted.
         //
         //    The placeholder bucket is filtered out of `ctxfs status` mount
         //    summaries via `Observability::status_report`; the per-key
         //    telemetry counter still accumulates for full fidelity.
-        *self.counter_key.lock().unwrap() = Some(CounterKey {
+        let placeholder_key = CounterKey {
             source: source.provider_type.to_string(),
             repo: source.name.clone(),
-            commit: format!("<resolving:{}>", source.version),
+            commit: format!(
+                "{}{}>",
+                ctxfs_provider_common::counters::PLACEHOLDER_COMMIT_PREFIX,
+                source.version
+            ),
             mount_id: source.id(),
-        });
+        };
+        *self.counter_key.lock().unwrap() = Some(placeholder_key.clone());
 
         // 2. Resolve the ref to a concrete commit sha.
         let commit_sha = self.resolve_ref(source).await?;
@@ -1545,28 +1544,17 @@ impl GitHubProvider {
         // 3. Replace counter_key with the resolved commit sha now that we
         //    know it. All subsequent fetch_tree / prefetch / fetch_blob calls
         //    attribute to the real (source, repo, commit, mount_id) bucket.
-        *self.counter_key.lock().unwrap() = Some(CounterKey {
-            source: source.provider_type.to_string(),
-            repo: source.name.clone(),
-            commit: commit_sha.clone(),
-            mount_id: source.id(),
-        });
-
-        // 4. Fold the placeholder bucket into the real bucket so that
-        //    rest_calls_total (from the resolve_ref API call) appears under
-        //    the real commit key rather than the `<resolving:…>` key.
-        let placeholder_key = CounterKey {
-            source: source.provider_type.to_string(),
-            repo: source.name.clone(),
-            commit: format!("<resolving:{}>", source.version),
-            mount_id: source.id(),
-        };
         let real_key = CounterKey {
             source: source.provider_type.to_string(),
             repo: source.name.clone(),
             commit: commit_sha.clone(),
             mount_id: source.id(),
         };
+        *self.counter_key.lock().unwrap() = Some(real_key.clone());
+
+        // 4. Fold the placeholder bucket into the real bucket so that
+        //    rest_calls_total (from the resolve_ref API call) appears under
+        //    the real commit key rather than the placeholder key.
         self.observability
             .merge_and_drop_placeholder(&placeholder_key, &real_key);
 
@@ -1604,15 +1592,15 @@ impl GitHubProvider {
             }
         }
 
-        // 4. Fetch tree.
+        // 5. Fetch tree.
         let mut tree = self.fetch_tree(source, &commit_sha).await?;
         if tree.truncated {
-            // B2 fallback: per-directory walk produces a complete manifest.
-            // Walk from the actual root tree SHA returned by the API, NOT
-            // from commit_sha — those are different git objects (a commit
-            // and the tree it points to). The recursive=1 call returns `sha`
-            // set to the root tree SHA we should walk.
-            // (Codex M3-plan-v1 review #8.)
+            // Per-directory walk produces a complete manifest when the
+            // recursive-tree fetch returns truncated=true. Walk from the
+            // actual root tree SHA returned by the API, NOT from commit_sha
+            // — those are different git objects (a commit and the tree it
+            // points to). The recursive=1 call returns `sha` set to the root
+            // tree SHA we should walk.
             let walked = self.fetch_tree_walked(source, &tree.sha).await?;
             tree = TreeResponse {
                 sha: tree.sha.clone(),
@@ -1622,7 +1610,7 @@ impl GitHubProvider {
         }
         debug!("fetched tree with {} entries", tree.tree.len());
 
-        // 4a. Tarball auto-gate / dispatch. May commit blobs into BlobCache;
+        // 5a. Tarball auto-gate / dispatch. May commit blobs into BlobCache;
         //     does not affect the manifest. Failures are non-fatal — the
         //     snapshot still completes; lazy reads pick up uncached blobs.
         self.dispatch_fetch_policy(
@@ -1637,9 +1625,9 @@ impl GitHubProvider {
         )
         .await;
 
-        // 5. Prefetch small blobs + symlink targets for B1/B7 inlining.
-        //    Skip the call entirely if no entries are eligible (avoids a
-        //    no-op futures-stream construction).
+        // 6. Prefetch small blobs + symlink targets for inlining. Skip the
+        //    call entirely if no entries are eligible (avoids a no-op
+        //    futures-stream construction).
         let symlink_set = Self::symlink_shas(&tree.tree);
         let small_shas = Self::small_blob_shas(&tree.tree);
         let (inline, small_blob_network_fetched) = if small_shas.is_empty() {
@@ -1649,7 +1637,7 @@ impl GitHubProvider {
                 .await?
         };
 
-        // 6. Record prefetch_hits only for blobs fetched via REST (not those
+        // 7. Record prefetch_hits only for blobs fetched via REST (not those
         //    served from BlobCache). Avoids double-counting when the tarball
         //    path already committed the same blobs and incremented per-entry.
         if let Some(key) = self.counter_key.lock().unwrap().clone() {
@@ -1658,9 +1646,9 @@ impl GitHubProvider {
                 .record_prefetch_hits(small_blob_network_fetched as u64);
         }
 
-        // 7. Build directories with inline content (B1) and resolved
-        //    symlink targets (B7). Fails if a symlink SHA is absent from the
-        //    inline map (indicates a prefetch gap — hard error per B7 policy).
+        // 8. Build directories with inline content and resolved symlink
+        //    targets. Fails if a symlink SHA is absent from the inline map
+        //    (indicates a prefetch gap — hard error: fail loudly).
         let (root_digest, directories) =
             Self::build_directories_with_inline(&tree.tree, source, &inline)?;
 

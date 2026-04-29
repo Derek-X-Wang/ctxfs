@@ -140,7 +140,11 @@ impl Observability {
         #[allow(clippy::cast_precision_loss)]
         let mut mounts: Vec<MountSummary> = counters
             .iter()
-            .filter(|c| !c.key.commit.starts_with("<resolving:"))
+            .filter(|c| {
+                !c.key
+                    .commit
+                    .starts_with(crate::counters::PLACEHOLDER_COMMIT_PREFIX)
+            })
             .map(|c| {
                 let total_cache_ops = c.counters.cache_hits + c.counters.cache_misses;
                 let cache_hit_ratio = if total_cache_ops > 0 {
@@ -200,6 +204,7 @@ fn resource_class_string(rc: &ResourceClass) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counters::PLACEHOLDER_COMMIT_PREFIX;
 
     fn key(mount_id: &str) -> CounterKey {
         CounterKey {
@@ -306,7 +311,7 @@ mod tests {
         let placeholder = CounterKey {
             source: "github".to_string(),
             repo: "foo/bar".to_string(),
-            commit: "<resolving:main>".to_string(),
+            commit: format!("{PLACEHOLDER_COMMIT_PREFIX}main>"),
             mount_id: "mnt-1".to_string(),
         };
         let real = CounterKey {

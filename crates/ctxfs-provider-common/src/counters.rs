@@ -7,6 +7,12 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Prefix used to mark transient "resolving ref" counter buckets created
+/// before a concrete commit SHA is known. Format: `"<resolving:{ref}>"`.
+/// Filtered out of `ctxfs status` summaries; merged into the real key after
+/// ref resolution completes.
+pub const PLACEHOLDER_COMMIT_PREFIX: &str = "<resolving:";
+
 /// Key for a per-mount counter bucket. All four dimensions are required:
 /// two mounts of the same `(source, repo, commit)` at different mount points
 /// hold separate counters keyed by `mount_id`.

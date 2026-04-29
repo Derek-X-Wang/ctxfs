@@ -1,11 +1,9 @@
 //! Source-agnostic content fetching contract.
 //!
-//! Skeletal in M3: the types and trait shape ship so that
-//! `GitHubProvider`'s tarball-vs-lazy decision can be expressed as a
-//! `FetchPolicy` value (rather than inline `if`/`else`), and so that
-//! provider-common-level tests can describe expected behavior without
-//! pulling in `provider-git`. M4 promotes `GitHubProvider` to the first
-//! concrete `ContentFetcher` impl without restructuring the call shape.
+//! The types and trait shape let `GitHubProvider`'s tarball-vs-lazy decision
+//! be expressed as a `FetchPolicy` value (rather than inline `if`/`else`),
+//! and let provider-common-level tests describe expected behavior without
+//! pulling in `provider-git`.
 //!
 //! The trait is intentionally minimal: future native-CDN providers (npm
 //! tarballs, PyPI sdists, crates.io `.crate` files) plug in by
@@ -23,7 +21,7 @@ pub enum ContentKind {
     File,
     /// Symlink — `digest` (when set) names the blob storing the link target.
     Symlink,
-    /// Git LFS pointer file (M5 detect; M3 stores pointer bytes verbatim).
+    /// Git LFS pointer file (pointer bytes stored verbatim for now).
     LfsPointer,
 }
 
@@ -33,8 +31,8 @@ pub enum ContentKind {
 pub struct ContentRequest {
     /// Mount-relative path (semantic key — what the user would `cat`).
     pub path: PathBuf,
-    /// Content hash if the source provides one. GitHub: blob SHA-1 (post-M5
-    /// `Digest::Sha1`); npm: integrity SHA. None => no upstream digest available.
+    /// Content hash if the source provides one. GitHub: blob SHA-1;
+    /// npm: integrity SHA. None => no upstream digest available.
     pub digest: Option<Digest>,
     /// Estimated bytes from the manifest. None => unknown until fetched.
     pub size: Option<u64>,
@@ -90,8 +88,8 @@ pub enum FetchPolicy {
     },
 }
 
-/// Cost-estimate signal a `ContentFetcher` can offer up front. M3 uses only
-/// `total_bytes` and `request_count` — the rest are reserved for M4.
+/// Cost-estimate signal a `ContentFetcher` can offer up front. Currently
+/// `total_bytes` and `request_count` are used; remaining fields are reserved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CostEstimate {
     pub total_bytes: Option<u64>,
@@ -174,18 +172,18 @@ impl SlotClaim {
     }
 }
 
-/// Skeletal trait. M3 does not require providers to implement it; M4 will.
-/// The signature is kept narrow on purpose — extending the surface is a
-/// breaking change once a second provider implements it.
+/// Content fetching trait. The signature is kept narrow on purpose —
+/// extending the surface is a breaking change once a second provider
+/// implements it. Not yet required by providers.
 #[async_trait::async_trait]
 pub trait ContentFetcher: Send + Sync {
     /// Cost-of-fulfillment estimate for a batch. Pure if possible; safe to
-    /// call multiple times. M4 callers use this to drive scheduling decisions.
+    /// call multiple times. Used to drive scheduling decisions.
     fn estimate_cost(&self, requests: &[ContentRequest]) -> CostEstimate;
 
     /// Fetch the given requests. The provider chooses tarball vs lazy via
-    /// its own `decide_policy(...)` (which is the M3 free function).
-    /// The returned map is keyed by `ContentRequest::path`.
+    /// its own `decide_policy(...)`. The returned map is keyed by
+    /// `ContentRequest::path`.
     async fn fetch_batch(
         &self,
         requests: &[ContentRequest],
@@ -196,7 +194,7 @@ pub trait ContentFetcher: Send + Sync {
 
 /// Pure auto-gate: given a count + estimated bytes + the user's policy + the
 /// configured thresholds, return the `FetchPolicy` to apply. Lives here so
-/// providers (M3 GitHub, M4 future) all use the same algorithm.
+/// all providers share the same algorithm.
 #[must_use]
 pub fn decide_policy(
     blob_count: u64,

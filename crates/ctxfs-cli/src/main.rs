@@ -494,9 +494,13 @@ const CONFIG_TEMPLATE: &str = r#"# ContextFS configuration
 
 # github_token = "ghp_..."
 # log_level = "info"
-# cache_max_bytes = 536870912  # 512MB
-# backend = "auto"  # "nfs" | "fskit" | "auto"
+# cache_max_bytes = 536870912     # 512 MB
+# backend = "auto"                # "nfs" | "fskit" | "auto"
 # fskit_bundle_id = "ai.ctxfs.companion.fskitext"
+
+# Tarball prefetch tuning
+# prefetch_threshold_count = 30   # min blob count to trigger tarball prefetch
+# prefetch_max_bytes = 268435456  # 256 MB; default: min(cache_max / 4, 256 MB)
 "#;
 
 fn config_init() -> Result<()> {

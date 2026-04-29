@@ -138,14 +138,12 @@ fn build_http_response(status: u16, headers: &[(&str, String)], body: &[u8]) -> 
 
 /// Compute the Git blob SHA-1 for `content`.
 ///
-/// The Git format is: `sha1("blob <size>\0" || content)`.
+/// Delegates to the production [`ctxfs_provider_git::GitBlobSha1`] hasher
+/// so the test helper and the provider are guaranteed to agree.
 pub fn git_blob_sha1(content: &[u8]) -> String {
-    use sha1::Digest as Sha1Digest;
-    let mut hasher = sha1::Sha1::new();
-    let header = format!("blob {}\0", content.len());
-    hasher.update(header.as_bytes());
+    let mut hasher = ctxfs_provider_git::GitBlobSha1::new(content.len() as u64);
     hasher.update(content);
-    hex::encode(hasher.finalize())
+    hasher.finalize_hex()
 }
 
 // ─── Tarball builder ─────────────────────────────────────────────────────────
