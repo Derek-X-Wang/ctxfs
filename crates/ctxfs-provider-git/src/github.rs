@@ -195,6 +195,36 @@ fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
     })
 }
 
+/// Per-mount fetch options passed to [`GitHubProvider::fetch_snapshot_with_options`].
+///
+/// The existing [`ctxfs_core::provider::Provider::fetch_snapshot`] trait method
+/// delegates to `fetch_snapshot_inner(source, &FetchOptions::default())` so all
+/// callers that don't explicitly opt in to M3 behaviour (`Daemon::prepare_mount`,
+/// NFS tests, FSKit paths) remain unchanged.
+#[derive(Debug, Clone)]
+pub struct FetchOptions {
+    /// How aggressively to prefetch blobs via the tarball endpoint.
+    pub prefetch: ctxfs_provider_common::fetcher::PrefetchPolicy,
+    /// Minimum blob count for the auto-gate to fire (ignored when
+    /// `prefetch == Force`).
+    pub prefetch_threshold_count: u64,
+    /// Maximum estimated bytes for the auto-gate to approve tarball (ignored
+    /// when `prefetch == Force`).
+    pub prefetch_max_bytes: u64,
+}
+
+impl Default for FetchOptions {
+    fn default() -> Self {
+        Self {
+            // Disabled so non-daemon callers (NFS tests, FSKit, etc.) keep
+            // pre-M3 lazy-fetch behaviour unchanged.
+            prefetch: ctxfs_provider_common::fetcher::PrefetchPolicy::Disabled,
+            prefetch_threshold_count: 30,
+            prefetch_max_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
 impl GitHubProvider {
     /// Production constructor. Derives the codeload host automatically from
     /// `api_host` (e.g. `api.github.com` → `codeload.github.com`).
@@ -1259,11 +1289,31 @@ impl GitHubProvider {
 
         Ok(outcome)
     }
-}
 
-#[async_trait]
-impl Provider for GitHubProvider {
-    async fn fetch_snapshot(&self, source: &SourceSpec) -> Result<Vec<u8>, CtxfsError> {
+    // ---- Public options-aware API + shared inner ----
+
+    /// Fetch a snapshot using explicit prefetch options. The daemon calls
+    /// this path, routing `MountOptions.prefetch` + `Config.prefetch_*` into
+    /// a `FetchOptions` so the tarball auto-gate is engaged per-mount.
+    ///
+    /// Callers that don't need M3 prefetch behaviour use
+    /// [`Provider::fetch_snapshot`], which delegates with
+    /// [`FetchOptions::default()`] (`PrefetchPolicy::Disabled`).
+    pub async fn fetch_snapshot_with_options(
+        &self,
+        source: &SourceSpec,
+        options: &FetchOptions,
+    ) -> Result<Vec<u8>, CtxfsError> {
+        self.fetch_snapshot_inner(source, options).await
+    }
+
+    /// Shared implementation: `fetch_snapshot_with_options` and the trait
+    /// `fetch_snapshot` both call this so the body is never duplicated.
+    async fn fetch_snapshot_inner(
+        &self,
+        source: &SourceSpec,
+        options: &FetchOptions,
+    ) -> Result<Vec<u8>, CtxfsError> {
         debug!("fetching snapshot for {source}");
 
         // Record the source so later `fetch_blob` calls know which repo to hit.
@@ -1340,6 +1390,11 @@ impl Provider for GitHubProvider {
         }
         debug!("fetched tree with {} entries", tree.tree.len());
 
+        // 4a. Tarball auto-gate / dispatch (wired in Commit D).
+        // dispatch_fetch_policy call injected here by Commit D, using
+        // options.prefetch / threshold_count / max_bytes. Non-fatal on failure.
+        let _ = options; // consumed by dispatch_fetch_policy in Commit D
+
         // 5. Prefetch small blobs + symlink targets for B1/B7 inlining.
         //    Skip the call entirely if no entries are eligible (avoids a
         //    no-op futures-stream construction).
@@ -1391,6 +1446,18 @@ impl Provider for GitHubProvider {
         }
 
         Ok(json)
+    }
+}
+
+#[async_trait]
+impl Provider for GitHubProvider {
+    /// Delegates to `fetch_snapshot_inner` with [`FetchOptions::default()`]
+    /// (`PrefetchPolicy::Disabled`) so non-daemon callers (NFS tests, FSKit
+    /// paths, etc.) keep their pre-M3 lazy-fetch behaviour unchanged. The
+    /// daemon calls `fetch_snapshot_with_options` directly.
+    async fn fetch_snapshot(&self, source: &SourceSpec) -> Result<Vec<u8>, CtxfsError> {
+        self.fetch_snapshot_inner(source, &FetchOptions::default())
+            .await
     }
 
     async fn fetch_directory(&self, digest: &Digest) -> Result<Vec<u8>, CtxfsError> {
@@ -2210,5 +2277,29 @@ mod tests {
     fn assemble_walked_tree_empty_root() {
         let assembled = GitHubProvider::assemble_walked_tree("empty_sha", |_sha| vec![]);
         assert!(assembled.is_empty());
+    }
+
+    // ---- FetchOptions tests ----
+
+    #[test]
+    fn fetch_options_default_is_disabled_prefetch() {
+        use ctxfs_provider_common::fetcher::PrefetchPolicy;
+        let opts = FetchOptions::default();
+        assert_eq!(
+            opts.prefetch,
+            PrefetchPolicy::Disabled,
+            "FetchOptions::default() must use PrefetchPolicy::Disabled so trait callers \
+             (NFS tests, FSKit, etc.) keep pre-M3 behavior"
+        );
+    }
+
+    #[test]
+    fn fetch_options_default_thresholds_are_nonzero() {
+        let opts = FetchOptions::default();
+        assert!(
+            opts.prefetch_threshold_count > 0,
+            "default threshold_count must be > 0"
+        );
+        assert!(opts.prefetch_max_bytes > 0, "default max_bytes must be > 0");
     }
 }
