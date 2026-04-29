@@ -68,7 +68,6 @@ struct CommitResponse {
 
 #[derive(Debug, Deserialize)]
 struct TreeResponse {
-    #[allow(dead_code)]
     sha: String,
     tree: Vec<TreeEntry>,
     truncated: bool,
@@ -191,17 +190,103 @@ impl GitHubProvider {
     ) -> Result<TreeResponse, CtxfsError> {
         let (owner, repo) = owner_repo(source)?;
         let url = Self::api_url(owner, repo, &format!("git/trees/{tree_sha}?recursive=1"));
+        self.get_json(&url, "fetch tree").await
+    }
 
-        let tree: TreeResponse = self.get_json(&url, "fetch tree").await?;
-
-        if tree.truncated {
-            warn!(
-                "tree response was truncated for {}; large repos may be incomplete",
-                source.name
-            );
+    /// Walk a tree by calling `get_subtree` per subtree SHA (closure-injected
+    /// so the pure path-prefixing logic can be unit-tested without HTTP).
+    /// Iterative DFS — bounded stack on adversarial repos (e.g. a maliciously
+    /// deep symlink chain from B7).
+    ///
+    /// Returns all entries flattened with path-prefixes, matching the shape of
+    /// a `recursive=1` response.
+    ///
+    /// Test-only: production uses `fetch_tree_walked` which drives the DFS
+    /// asynchronously via `fetch_subtree`.
+    #[cfg(test)]
+    fn assemble_walked_tree<F>(root_sha: &str, mut get_subtree: F) -> Vec<TreeEntry>
+    where
+        F: FnMut(&str) -> Vec<TreeEntry>,
+    {
+        let mut out = Vec::new();
+        let mut stack: Vec<(String, String)> = vec![(root_sha.to_string(), String::new())];
+        while let Some((sha, prefix)) = stack.pop() {
+            for entry in get_subtree(&sha) {
+                let prefixed = if prefix.is_empty() {
+                    entry.path.clone()
+                } else {
+                    format!("{prefix}/{}", entry.path)
+                };
+                let mut owned = entry.clone();
+                owned.path = prefixed.clone();
+                if entry.entry_type == "tree" {
+                    stack.push((entry.sha.clone(), prefixed));
+                }
+                out.push(owned);
+            }
         }
+        out
+    }
 
-        Ok(tree)
+    /// Fetch a single tree without recursion. Used by the B2 fallback path.
+    async fn fetch_subtree(
+        &self,
+        source: &SourceSpec,
+        tree_sha: &str,
+    ) -> Result<Vec<TreeEntry>, CtxfsError> {
+        let (owner, repo) = owner_repo(source)?;
+        let url = Self::api_url(owner, repo, &format!("git/trees/{tree_sha}"));
+        let tree: TreeResponse = self.get_json(&url, "fetch subtree").await?;
+        Ok(tree.tree)
+    }
+
+    /// B2 fallback: when `fetch_tree` returns `truncated=true`, walk
+    /// per-directory to assemble a complete manifest. Increments the
+    /// `truncated_tree_fallbacks` counter once per fallback fire.
+    ///
+    /// Note: per-subtree responses include `size` for blob entries (per
+    /// GitHub Trees API docs). If an entry returns `size=None`, the auto-gate
+    /// in `dispatch_fetch_policy` (Task 7) treats the manifest as having
+    /// unknown total bytes and falls back to Lazy (fail-closed). Don't try to
+    /// estimate by file extension or cache mtimes — be honest about the
+    /// missing signal.
+    async fn fetch_tree_walked(
+        &self,
+        source: &SourceSpec,
+        root_tree_sha: &str,
+    ) -> Result<Vec<TreeEntry>, CtxfsError> {
+        if let Some(key) = self.counter_key.lock().unwrap().clone() {
+            self.observability
+                .counters_for(key)
+                .record_truncated_tree_fallback();
+        }
+        warn!(
+            target: "ctxfs.provider.tree",
+            root_sha = root_tree_sha,
+            "tree response was truncated; falling back to per-directory walk"
+        );
+
+        // Iterative DFS; one HTTP call per subtree. Mirrors assemble_walked_tree
+        // but drives each subtree fetch asynchronously.
+        let mut out = Vec::new();
+        let mut stack: Vec<(String, String)> = vec![(root_tree_sha.to_string(), String::new())];
+        while let Some((sha, prefix)) = stack.pop() {
+            let subtree = self.fetch_subtree(source, &sha).await?;
+            for entry in subtree {
+                let prefixed = if prefix.is_empty() {
+                    entry.path.clone()
+                } else {
+                    format!("{prefix}/{}", entry.path)
+                };
+                let mut owned = entry.clone();
+                owned.path = prefixed.clone();
+                if entry.entry_type == "tree" {
+                    stack.push((entry.sha.clone(), prefixed));
+                }
+                out.push(owned);
+            }
+        }
+        Ok(out)
     }
 
     async fn fetch_blob_content(
@@ -684,7 +769,21 @@ impl Provider for GitHubProvider {
         }
 
         // 4. Fetch tree.
-        let tree = self.fetch_tree(source, &commit_sha).await?;
+        let mut tree = self.fetch_tree(source, &commit_sha).await?;
+        if tree.truncated {
+            // B2 fallback: per-directory walk produces a complete manifest.
+            // Walk from the actual root tree SHA returned by the API, NOT
+            // from commit_sha — those are different git objects (a commit
+            // and the tree it points to). The recursive=1 call returns `sha`
+            // set to the root tree SHA we should walk.
+            // (Codex M3-plan-v1 review #8.)
+            let walked = self.fetch_tree_walked(source, &tree.sha).await?;
+            tree = TreeResponse {
+                sha: tree.sha.clone(),
+                tree: walked,
+                truncated: false,
+            };
+        }
         debug!("fetched tree with {} entries", tree.tree.len());
 
         // 5. Prefetch small blobs + symlink targets for B1/B7 inlining.
@@ -1273,5 +1372,106 @@ mod tests {
             DirEntry::Symlink(s) => assert_eq!(s.target, ""),
             _ => panic!("expected symlink"),
         }
+    }
+
+    // ---- Task 5: assemble_walked_tree unit tests ----
+
+    #[test]
+    fn assemble_walked_tree_recurses_directories() {
+        let mut subtrees: std::collections::HashMap<&str, Vec<TreeEntry>> =
+            std::collections::HashMap::new();
+        // Root: one file + one subdir.
+        let _ = subtrees.insert(
+            "root_sha",
+            vec![
+                TreeEntry {
+                    path: "README.md".into(),
+                    mode: "100644".into(),
+                    entry_type: "blob".into(),
+                    sha: "blob_a".into(),
+                    size: Some(100),
+                },
+                TreeEntry {
+                    path: "src".into(),
+                    mode: "040000".into(),
+                    entry_type: "tree".into(),
+                    sha: "src_sha".into(),
+                    size: None,
+                },
+            ],
+        );
+        // src: one file.
+        let _ = subtrees.insert(
+            "src_sha",
+            vec![TreeEntry {
+                path: "lib.rs".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "blob_b".into(),
+                size: Some(200),
+            }],
+        );
+
+        let assembled = GitHubProvider::assemble_walked_tree("root_sha", |sha| {
+            subtrees.get(sha).cloned().unwrap_or_default()
+        });
+
+        // Expect path-prefixed entries: README.md, src, src/lib.rs
+        assert_eq!(assembled.len(), 3);
+        assert!(assembled
+            .iter()
+            .any(|e| e.path == "README.md" && e.sha == "blob_a"));
+        assert!(assembled
+            .iter()
+            .any(|e| e.path == "src" && e.entry_type == "tree"));
+        assert!(assembled
+            .iter()
+            .any(|e| e.path == "src/lib.rs" && e.sha == "blob_b"));
+    }
+
+    #[test]
+    fn assemble_walked_tree_handles_deep_nesting() {
+        let mut subtrees: std::collections::HashMap<&str, Vec<TreeEntry>> =
+            std::collections::HashMap::new();
+        let _ = subtrees.insert(
+            "a",
+            vec![TreeEntry {
+                path: "b".into(),
+                mode: "040000".into(),
+                entry_type: "tree".into(),
+                sha: "b".into(),
+                size: None,
+            }],
+        );
+        let _ = subtrees.insert(
+            "b",
+            vec![TreeEntry {
+                path: "c".into(),
+                mode: "040000".into(),
+                entry_type: "tree".into(),
+                sha: "c".into(),
+                size: None,
+            }],
+        );
+        let _ = subtrees.insert(
+            "c",
+            vec![TreeEntry {
+                path: "deep.txt".into(),
+                mode: "100644".into(),
+                entry_type: "blob".into(),
+                sha: "deep_blob".into(),
+                size: Some(7),
+            }],
+        );
+        let assembled = GitHubProvider::assemble_walked_tree("a", |sha| {
+            subtrees.get(sha).cloned().unwrap_or_default()
+        });
+        assert!(assembled.iter().any(|e| e.path == "b/c/deep.txt"));
+    }
+
+    #[test]
+    fn assemble_walked_tree_empty_root() {
+        let assembled = GitHubProvider::assemble_walked_tree("empty_sha", |_sha| vec![]);
+        assert!(assembled.is_empty());
     }
 }
