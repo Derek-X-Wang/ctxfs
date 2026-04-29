@@ -1,3 +1,64 @@
+## v0.1.3-m3 — 2026-04-28
+
+### Phase 4 M3: Tarball prefetch with smart gate (B2, B5, B6)
+
+- **Fix B5 / tarball prefetch**: Cold scan of a repo with ≥ `prefetch_threshold_count`
+  blobs (default: 30) and total estimated bytes ≤ `prefetch_max_bytes` (default:
+  `min(cache_max_bytes / 4, 256 MB)`) triggers a single
+  `GET /repos/{o}/{r}/tarball/{sha}` call instead of one REST call per blob.
+  Files stream directly into `BlobCache` atomically: temp-file → hash-verify
+  (Git blob SHA-1) → rename → LRU update. Per-entry memory ceiling; no full-
+  archive buffer.
+- **Fix B2 / truncated-tree fallback**: When GitHub returns `truncated=true`
+  on the recursive tree fetch, `fetch_tree_walked` drives a per-directory DFS
+  (`fetch_subtree` calls) to assemble a complete manifest. Counter
+  `truncated_tree_fallbacks` increments once per fallback. Manifest entries
+  with `size=None` force `Lazy` on the auto-gate (fail-closed).
+- **Fix B6 / tarball hardening**: Path-traversal entries (`..`, absolute,
+  NUL/control bytes) are rejected (`tarball_invalid_entries` counter); LFS
+  pointer files are skipped (`lfs_pointer_files` counter). Codeload
+  redirect-target is validated against `codeload_host` (or `codeload_*`
+  prefix for GHE). Redirect depth capped at 3. Digest mismatches skip the
+  entry (`tarball_digest_mismatch` counter).
+- **Singleflight dedupe**: Daemon-level `Arc<TarballSingleflightMap>` shared
+  across all per-mount providers prevents duplicate tarball downloads for the
+  same `(host, owner, repo, commit)`. Leader downloads; waiters get the
+  result for free. Cache pre-check skips download entirely if all blobs are
+  already present.
+- **Auto-gate** (`PrefetchPolicy::Auto`): `blob_count >= threshold_count`
+  AND `estimated_bytes <= max_bytes` → tarball; below threshold → lazy
+  (REST per-blob); above byte cap → `prefetch_skipped_oversized` (lazy).
+  Force/Disabled modes available via `--prefetch` / `--no-prefetch` CLI flags.
+- **`FetchOptions`** passed into `GitHubProvider::fetch_snapshot_with_options`.
+  Daemon constructs from `Config` + `MountOptions`. Non-daemon callers use
+  the `Provider` trait `fetch_snapshot` which delegates via `FetchOptions::default()`
+  (Disabled).
+- **M2 carry-forwards landed**:
+  - Symlink fail-strict: `build_directories_with_inline` returns `Err` when a
+    symlink SHA is missing from the inline map or its bytes are not valid UTF-8.
+    No more silent empty-target regression.
+  - `bearer_header(token)` helper in `ctxfs-provider-common::http`; eliminates
+    3 duplicated `format!("Bearer …").parse().unwrap()` sites.
+  - `merge_and_drop_placeholder`: after ref resolution the `<resolving:ref>`
+    counter bucket is merged into the real commit bucket so `rest_calls_total`
+    == 3 (commit + tree + tarball) is observable from the resolved-SHA key.
+  - Assembled-path integration test in `tests/build_directories.rs`.
+- **BlobCache additions**: `commit_atomic` (in-memory), `commit_atomic_with_writer`
+  (streaming via `BlobTempWriter`), `cleanup_orphan_temps` (daemon startup
+  sweep of `tmp/`), `contains_all` (singleflight cache pre-check). Rebuild
+  index skips `tmp/` so partial blobs never enter LRU.
+- **IPC wire format**: `MountOptions { prefetch: PrefetchPolicy }` added to
+  the `mount` RPC. Wire format is not backward-compatible (rebuild daemon +
+  CLI together).
+- **Replay test suite** (5 integration tests against hand-rolled HTTP mock):
+  three-REST-calls, truncated-tree walk, singleflight dedupe, path-traversal
+  rejection, oversized-manifest skip.
+
+### Breaking changes
+
+- `tarpc` mount method wire format changed: old CLI + new daemon (or vice versa)
+  will fail at connection time. Rebuild both.
+
 ## v0.1.2-m2 — 2026-04-26
 
 ### Phase 4 M2: Architecture-neutral REST fixes (B1, B4, B7)
