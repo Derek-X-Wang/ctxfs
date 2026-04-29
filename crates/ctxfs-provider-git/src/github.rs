@@ -60,6 +60,11 @@ pub struct GitHubProvider {
     /// but not yet read in production paths.
     #[allow(dead_code)]
     codeload_host: String,
+    /// HTTP client used for the codeload-host hop in the tarball flow.
+    /// Built once at construction time with NO default headers (so the
+    /// Authorization header used for api.github.com calls cannot leak to
+    /// codeload). Has redirect::Policy::none() too — we control the chain.
+    codeload_client: reqwest::Client,
 }
 
 impl std::fmt::Debug for GitHubProvider {
@@ -164,7 +169,12 @@ impl GitBlobSha1 {
 
     pub fn finalize_hex(self) -> String {
         use sha1::Digest as _;
-        hex::encode(self.h.finalize())
+        let mut h = self.h;
+        if !self.size_header_emitted {
+            h.update(format!("blob {}", self.expected_size).as_bytes());
+            h.update(b"\0");
+        }
+        hex::encode(h.finalize())
     }
 }
 
@@ -239,6 +249,12 @@ impl GitHubProvider {
             .build()
             .expect("failed to build HTTP client");
 
+        let codeload_client = reqwest::Client::builder()
+            .user_agent(USER_AGENT_STR)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("failed to build codeload HTTP client");
+
         let codeload_host =
             codeload_host_override.unwrap_or_else(|| Self::codeload_host_for(&api_host));
 
@@ -251,6 +267,7 @@ impl GitHubProvider {
             auth_identity,
             api_host,
             codeload_host,
+            codeload_client,
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
         }
@@ -823,7 +840,7 @@ impl GitHubProvider {
         (root_digest, directories)
     }
 
-    // ---- Tarball helpers (Task 6 plumbing; Task 7 wires the call site) ----
+    // ---- Tarball helpers ----
 
     /// Maximum redirect-chain depth when following the tarball 302.
     // Suppress until Task 7 calls fetch_tarball_into_cache.
@@ -901,6 +918,17 @@ impl GitHubProvider {
             return Err(CtxfsError::Provider(format!(
                 "tar entry has control chars: {s}"
             )));
+        }
+
+        // Reject `..` anywhere in the path, including the wrapper segment.
+        // (The wrapper is normally "owner-repo-sha"; a malicious tarball could
+        // place `..` there to bypass the post-strip check.)
+        for seg in s.split('/') {
+            if seg == ".." {
+                return Err(CtxfsError::Provider(format!(
+                    "tar entry contains '..': {s}"
+                )));
+            }
         }
 
         let cleaned = match s.split_once('/') {
@@ -1011,13 +1039,9 @@ impl GitHubProvider {
 
         // 2. Manual redirect chain. The provider's client has
         //    redirect::Policy::none(), so we control the chain. Authorization
-        //    is dropped on hop 1+ by using a fresh client with no default
-        //    headers. Host is validated against self.codeload_host.
-        let codeload_client = reqwest::Client::builder()
-            .user_agent(USER_AGENT_STR)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| CtxfsError::Provider(format!("codeload client build: {e}")))?;
+        //    is dropped on hop 1+ by using self.codeload_client which has no
+        //    default headers. Host is validated against self.codeload_host.
+        let codeload_client = &self.codeload_client;
         let mut current = initial_resp;
         let mut depth = 0u8;
         let final_resp = loop {
@@ -1850,7 +1874,7 @@ mod tests {
         }
     }
 
-    // ---- Task 6: path-validation and redirect-validation tests ----
+    // ---- path-validation and redirect-validation tests ----
 
     fn pv(raw: &str, et: tar::EntryType) -> Result<std::path::PathBuf, CtxfsError> {
         GitHubProvider::validate_tar_entry_path(raw.as_bytes(), et)
@@ -1883,6 +1907,13 @@ mod tests {
     fn validate_tar_entry_path_rejects_dotdot() {
         assert!(pv("owner-repo-abc/../escape", tar::EntryType::Regular).is_err());
         assert!(pv("owner-repo-abc/sub/../../escape", tar::EntryType::Regular).is_err());
+    }
+
+    #[test]
+    fn validate_tar_entry_path_rejects_dotdot_in_wrapper_segment() {
+        // Pre-fix, "../escape" had `..` discarded as the wrapper and "escape"
+        // returned Ok. The whole-path scan before split_once catches this.
+        assert!(pv("../escape", tar::EntryType::Regular).is_err());
     }
 
     #[test]
@@ -1926,6 +1957,34 @@ mod tests {
             )
             .is_err(),
             "http rejected even on codeload"
+        );
+    }
+
+    #[test]
+    fn git_blob_sha1_zero_byte_matches_empty_blob_hash() {
+        // Git's canonical empty-blob SHA-1: sha1("blob 0\0") = e69de29b...
+        // std::io::copy on a zero-byte tar entry never calls Tee::write, so
+        // update() is never invoked. finalize_hex must emit the header itself.
+        let hasher = GitBlobSha1::new(0);
+        assert_eq!(
+            hasher.finalize_hex(),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+    }
+
+    #[test]
+    fn codeload_host_for_default_is_codeload_github_com() {
+        assert_eq!(
+            GitHubProvider::codeload_host_for("api.github.com"),
+            "codeload.github.com"
+        );
+    }
+
+    #[test]
+    fn codeload_host_for_ghe_uses_codeload_prefix() {
+        assert_eq!(
+            GitHubProvider::codeload_host_for("ghe.example.com"),
+            "codeload.ghe.example.com"
         );
     }
 
