@@ -1190,6 +1190,14 @@ impl GitHubProvider {
 
                 outcome.blobs_committed += 1;
                 outcome.total_bytes += expected_size;
+                // Increment prefetch_hits per committed blob incrementally so
+                // partial commits (mid-stream failure) are visible in telemetry.
+                // (Codex M3-plan-v1 #7 — folded from T6 handoff note.)
+                if let Some(ref key) = counter_key {
+                    observability
+                        .counters_for(key.clone())
+                        .record_prefetch_hit();
+                }
             }
             Ok(outcome)
         })

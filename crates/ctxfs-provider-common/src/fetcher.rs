@@ -14,6 +14,7 @@
 use crate::counters::CounterKey;
 use ctxfs_core::Digest;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// What kind of mount-relative entry a request points at.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -114,6 +115,56 @@ pub struct TarballKey {
     pub commit_sha: String,
 }
 
+/// A single in-flight tarball fetch slot. The leader populates `cell`; waiters
+/// call `cell.get_or_init(...)` and block until the cell is filled.
+///
+/// Stored as `Arc<TarballSlot>` in [`TarballSingleflightMap`] so the leader can
+/// use [`Arc::ptr_eq`] in [`SlotClaim::release`] to ensure it removes *its own*
+/// slot and not a newer one inserted for the same key after the leader finished.
+#[derive(Debug)]
+pub struct TarballSlot {
+    /// Populated by the leader. Stores `Ok(())` on success, `Err(msg)` on
+    /// failure so waiters can observe the error without retrying in-flight.
+    pub cell: tokio::sync::OnceCell<Result<(), String>>,
+}
+
+/// Type alias for the daemon-side singleflight registry. Lives in
+/// `provider-common` (not daemon) so `provider-git` can import it without
+/// inducing a circular dependency (`daemon` → `provider-git`).
+pub type TarballSingleflightMap = dashmap::DashMap<TarballKey, Arc<TarballSlot>>;
+
+/// Returned by `claim_singleflight_slot`. Carries the slot Arc, whether this
+/// caller is the leader, and a reference to the registry so the leader can
+/// remove its slot when done.
+#[derive(Debug)]
+pub struct SlotClaim {
+    /// The key this claim is for — needed by [`SlotClaim::release`].
+    pub key: TarballKey,
+    /// The shared slot. Leader writes to `cell`; waiters read from `cell`.
+    pub slot: Arc<TarballSlot>,
+    /// `true` iff this caller inserted the slot (i.e., was first for this key).
+    pub is_leader: bool,
+    /// Reference back to the registry so the leader can call `remove_if`.
+    pub registry: Arc<TarballSingleflightMap>,
+}
+
+impl SlotClaim {
+    /// Leader-only: remove the slot from the registry when work is complete.
+    ///
+    /// Uses [`Arc::ptr_eq`] so a stale leader claim (whose work finished before
+    /// a newer slot was inserted for the same key) cannot accidentally remove
+    /// the new slot. Waiters' `release()` is a no-op.
+    pub fn release(&self) {
+        if !self.is_leader {
+            return;
+        }
+        let target = Arc::clone(&self.slot);
+        let _ = self
+            .registry
+            .remove_if(&self.key, |_, slot| Arc::ptr_eq(slot, &target));
+    }
+}
+
 /// Skeletal trait. M3 does not require providers to implement it; M4 will.
 /// The signature is kept narrow on purpose — extending the surface is a
 /// breaking change once a second provider implements it.
@@ -173,6 +224,105 @@ pub fn decide_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    // ---- SlotClaim release semantics ----
+
+    fn make_registry() -> Arc<TarballSingleflightMap> {
+        Arc::new(dashmap::DashMap::new())
+    }
+
+    fn make_key(suffix: &str) -> TarballKey {
+        TarballKey {
+            host: "api.github.com".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            commit_sha: suffix.to_string(),
+        }
+    }
+
+    /// Leader's `release()` removes its slot from the registry via Arc::ptr_eq.
+    #[test]
+    fn slot_claim_release_leader_removes_slot() {
+        let registry = make_registry();
+        let key = make_key("abc123");
+        let slot = Arc::new(TarballSlot {
+            cell: tokio::sync::OnceCell::new(),
+        });
+        let _ = registry.insert(key.clone(), Arc::clone(&slot));
+
+        let claim = SlotClaim {
+            key: key.clone(),
+            slot,
+            is_leader: true,
+            registry: Arc::clone(&registry),
+        };
+        claim.release();
+
+        assert!(
+            registry.get(&key).is_none(),
+            "leader release must remove the slot from the registry"
+        );
+    }
+
+    /// Waiter's `release()` is a no-op — the slot stays in the registry.
+    #[test]
+    fn slot_claim_release_waiter_is_noop() {
+        let registry = make_registry();
+        let key = make_key("abc123");
+        let slot = Arc::new(TarballSlot {
+            cell: tokio::sync::OnceCell::new(),
+        });
+        let _ = registry.insert(key.clone(), Arc::clone(&slot));
+
+        let claim = SlotClaim {
+            key: key.clone(),
+            slot: Arc::clone(&slot),
+            is_leader: false,
+            registry: Arc::clone(&registry),
+        };
+        claim.release();
+
+        assert!(
+            registry.get(&key).is_some(),
+            "waiter release must not remove the slot"
+        );
+    }
+
+    /// A stale leader cannot remove a *newer* slot inserted for the same key
+    /// after the old slot was replaced. Arc::ptr_eq distinguishes them.
+    #[test]
+    fn stale_leader_cannot_remove_newer_slot() {
+        let registry = make_registry();
+        let key = make_key("abc123");
+
+        // Insert the old slot and capture it in a stale claim.
+        let old_slot = Arc::new(TarballSlot {
+            cell: tokio::sync::OnceCell::new(),
+        });
+        let _ = registry.insert(key.clone(), Arc::clone(&old_slot));
+        let stale_claim = SlotClaim {
+            key: key.clone(),
+            slot: old_slot,
+            is_leader: true,
+            registry: Arc::clone(&registry),
+        };
+
+        // Replace the registry entry with a new slot (simulating a later
+        // concurrent mount that already inserted a fresh slot for the same key).
+        let new_slot = Arc::new(TarballSlot {
+            cell: tokio::sync::OnceCell::new(),
+        });
+        let _ = registry.insert(key.clone(), Arc::clone(&new_slot));
+
+        // Stale leader's release must NOT remove the new slot.
+        stale_claim.release();
+
+        assert!(
+            registry.get(&key).is_some(),
+            "stale leader must not remove a newer slot via Arc::ptr_eq mismatch"
+        );
+    }
 
     #[test]
     fn auto_gate_below_count_is_lazy() {
