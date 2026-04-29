@@ -6,6 +6,129 @@ use ctxfs_core::Digest;
 use std::sync::Arc;
 use std::thread;
 
+// ---- Task 4: atomic-commit, streaming writer, temp cleanup ----
+
+#[test]
+fn commit_atomic_writes_via_tmp_then_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+    let digest = Digest::sha256(b"hi");
+
+    cache.commit_atomic(&digest, b"hi").unwrap();
+    assert!(cache.contains(&digest));
+    assert_eq!(cache.get(&digest).unwrap(), b"hi");
+
+    // After commit, no leftover temp files.
+    let tmp_dir = dir.path().join("tmp");
+    if tmp_dir.exists() {
+        let count = std::fs::read_dir(&tmp_dir).unwrap().count();
+        assert_eq!(count, 0, "tmp dir should be empty after successful commit");
+    }
+}
+
+#[test]
+fn commit_atomic_with_writer_streams_and_verifies() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+
+    let payload = b"streaming-content";
+    let expected_digest = Digest::sha256(payload);
+
+    let mut writer = cache.commit_atomic_with_writer().unwrap();
+    writer.write_all(payload).unwrap();
+    writer.finalize(&expected_digest).unwrap();
+
+    assert!(cache.contains(&expected_digest));
+    assert_eq!(cache.get(&expected_digest).unwrap(), payload);
+}
+
+#[test]
+fn commit_atomic_with_writer_rejects_digest_mismatch() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+
+    let actual = b"actual-content";
+    let lying_digest = Digest::sha256(b"different-content");
+
+    let mut writer = cache.commit_atomic_with_writer().unwrap();
+    writer.write_all(actual).unwrap();
+    let res = writer.finalize(&lying_digest);
+    assert!(res.is_err(), "expected DigestMismatch error");
+    assert!(!cache.contains(&lying_digest));
+    // No leftover temp file.
+    let tmp = std::fs::read_dir(dir.path().join("tmp"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(tmp, 0);
+}
+
+#[test]
+fn cleanup_orphan_temps_unlinks_old_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+
+    let tmp_dir = dir.path().join("tmp");
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let old_file = tmp_dir.join("orphan-1");
+    let recent_file = tmp_dir.join("orphan-2");
+    std::fs::write(&old_file, b"old").unwrap();
+    std::fs::write(&recent_file, b"recent").unwrap();
+
+    // Backdate old_file by 2 hours.
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    let _ = filetime::set_file_mtime(
+        &old_file,
+        filetime::FileTime::from_system_time(two_hours_ago),
+    );
+
+    let cleared = cache
+        .cleanup_orphan_temps(std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert_eq!(cleared, 1);
+    assert!(!old_file.exists());
+    assert!(recent_file.exists(), "recent files preserved");
+}
+
+#[test]
+fn cleanup_orphan_temps_handles_missing_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+    let cleared = cache
+        .cleanup_orphan_temps(std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert_eq!(cleared, 0);
+}
+
+#[test]
+fn rebuild_index_skips_tmp_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    // Pre-create a stray tmp/ entry that mimics a half-written blob path,
+    // and a valid sha256/ entry. The tmp/ entry must NOT enter LRU.
+    let tmp_dir = dir.path().join("tmp");
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    std::fs::write(tmp_dir.join("zzz-orphan"), b"junk").unwrap();
+
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+    let (total, count) = cache.stats();
+    assert_eq!(total, 0);
+    assert_eq!(count, 0, "tmp/ entries must NOT enter rebuild_index");
+}
+
+#[test]
+fn contains_all_returns_true_only_when_every_digest_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = BlobCache::new(dir.path().to_path_buf(), 1_000_000).unwrap();
+    let d1 = Digest::sha256(b"one");
+    let d2 = Digest::sha256(b"two");
+    cache.put(&d1, b"one").unwrap();
+    assert!(!cache.contains_all(&[d1.clone(), d2.clone()]));
+    cache.put(&d2, b"two").unwrap();
+    assert!(cache.contains_all(&[d1, d2]));
+}
+
 #[test]
 fn cache_survives_restart_with_correct_lru_order() {
     let dir = tempfile::tempdir().unwrap();

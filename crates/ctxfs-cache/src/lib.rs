@@ -10,6 +10,7 @@ pub use shared::SharedTreeCache;
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;
+use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,6 +137,89 @@ impl BlobCache {
         state.entries.contains_key(&digest.hex)
     }
 
+    /// Returns `true` iff every digest in `digests` is currently tracked in
+    /// the LRU. Cheap — single mutex acquire — used by the singleflight
+    /// fast-path: if the manifest's blobs are all already cached, skip the
+    /// tarball entirely.
+    pub fn contains_all<'a, I>(&self, digests: I) -> bool
+    where
+        I: IntoIterator<Item = &'a Digest>,
+    {
+        let state = self.state.lock().unwrap();
+        digests
+            .into_iter()
+            .all(|d| state.entries.contains_key(&d.hex))
+    }
+
+    /// Atomically commit `data` under `digest`. Writes to a temp file under
+    /// `<root>/tmp/<rand>`, fsyncs the file, renames into the canonical
+    /// fan-out path, then fsyncs the parent directory so the rename is
+    /// durable across crash. POSIX rename(2) is atomic — either the
+    /// canonical path holds the full content or it doesn't exist; partial
+    /// files only ever live in tmp/ and are cleaned by `cleanup_orphan_temps`.
+    ///
+    /// LRU bookkeeping mirrors `put`. Use this method (not `put`) for content
+    /// where corruption is a real risk — bulk tarball hydration, concurrent
+    /// prefetch, etc.
+    pub fn commit_atomic(&self, digest: &Digest, data: &[u8]) -> Result<(), CtxfsError> {
+        let mut writer = self.commit_atomic_with_writer()?;
+        use std::io::Write;
+        writer
+            .write_all(data)
+            .map_err(|e| CtxfsError::Cache(format!("commit write: {e}")))?;
+        writer.finalize(digest)
+    }
+
+    /// Streaming variant: returns a writer the caller fills incrementally.
+    /// `BlobTempWriter::finalize(expected_digest)` does fsync + verify +
+    /// rename + parent-fsync in one shot.
+    pub fn commit_atomic_with_writer(&self) -> Result<BlobTempWriter, CtxfsError> {
+        let tmp_dir = self.root.join("tmp");
+        fs::create_dir_all(&tmp_dir)
+            .map_err(|e| CtxfsError::Cache(format!("mkdir tmp failed: {e}")))?;
+        let temp = tempfile::NamedTempFile::new_in(&tmp_dir)
+            .map_err(|e| CtxfsError::Cache(format!("tmp file create: {e}")))?;
+        Ok(BlobTempWriter {
+            cache_root: self.root.clone(),
+            cache: self,
+            temp: Some(temp),
+            hasher: Sha256::new(),
+            bytes_written: 0,
+        })
+    }
+
+    /// Sweep `<root>/tmp/` of files older than `older_than` (mtime-based).
+    /// Called by the daemon on startup to clear orphans from a crash
+    /// mid-commit. Returns the count of files unlinked. A missing tmp/ dir
+    /// returns 0 without error.
+    pub fn cleanup_orphan_temps(&self, older_than: std::time::Duration) -> Result<u64, CtxfsError> {
+        let tmp_dir = self.root.join("tmp");
+        if !tmp_dir.exists() {
+            return Ok(0);
+        }
+        let mut cleared = 0u64;
+        let now = std::time::SystemTime::now();
+        for entry in fs::read_dir(&tmp_dir)
+            .map_err(|e| CtxfsError::Cache(format!("read_dir tmp: {e}")))?
+            .flatten()
+        {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if let Ok(age) = now.duration_since(mtime) {
+                if age > older_than && fs::remove_file(&p).is_ok() {
+                    cleared += 1;
+                }
+            }
+        }
+        Ok(cleared)
+    }
+
     pub fn prune(&self, max_bytes: Option<u64>) -> Result<u64, CtxfsError> {
         let limit = max_bytes.unwrap_or_else(|| self.max_bytes.load(Ordering::Relaxed));
         let mut evicted = Vec::new();
@@ -227,6 +311,11 @@ impl BlobCache {
                 if !algo_path.is_dir() {
                     continue;
                 }
+                // M3: skip tmp/ — partial blobs from in-flight commits never
+                // belong in the LRU. cleanup_orphan_temps removes stale ones.
+                if algo_path.file_name().is_some_and(|n| n == "tmp") {
+                    continue;
+                }
                 Self::scan_fan_out_dir(&algo_path, &mut entries)?;
             }
         }
@@ -278,6 +367,120 @@ impl BlobCache {
                     entries.push((hex, metadata.len(), mtime));
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+/// Streaming writer returned by [`BlobCache::commit_atomic_with_writer`].
+///
+/// Implements [`std::io::Write`] so callers can use [`std::io::copy`] or any
+/// other reader pipeline directly. Hashes content as it's written; on
+/// [`BlobTempWriter::finalize`], verifies against the expected digest,
+/// fsyncs, atomically renames into the canonical cache path, and fsyncs the
+/// parent dir.
+///
+/// Drop without finalizing → temp file is cleaned via [`tempfile::NamedTempFile`]'s RAII.
+pub struct BlobTempWriter<'a> {
+    cache_root: PathBuf,
+    cache: &'a BlobCache,
+    temp: Option<tempfile::NamedTempFile>,
+    hasher: Sha256,
+    bytes_written: u64,
+}
+
+impl std::fmt::Debug for BlobTempWriter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlobTempWriter")
+            .field("cache_root", &self.cache_root)
+            .field("bytes_written", &self.bytes_written)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::io::Write for BlobTempWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest as _;
+        let f = self.temp.as_mut().expect("writer used after finalize");
+        let n = f.as_file_mut().write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes_written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let f = self.temp.as_mut().expect("writer used after finalize");
+        f.as_file_mut().flush()
+    }
+}
+
+impl BlobTempWriter<'_> {
+    /// Verify SHA-256 against `expected`, fsync the temp file, rename(2)
+    /// into the canonical path, fsync the parent directory.
+    pub fn finalize(mut self, expected: &Digest) -> Result<(), CtxfsError> {
+        use sha2::Digest as _;
+        let actual_hex = hex::encode(self.hasher.clone().finalize());
+        if actual_hex != expected.hex {
+            // Temp file unlinks on Drop via NamedTempFile.
+            return Err(CtxfsError::Cache(format!(
+                "blob digest mismatch: expected {} got {}",
+                expected.hex, actual_hex
+            )));
+        }
+
+        let temp = self.temp.take().expect("temp present until finalize");
+        temp.as_file()
+            .sync_all()
+            .map_err(|e| CtxfsError::Cache(format!("tmp fsync: {e}")))?;
+
+        let dest = self.cache.blob_path(expected);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| CtxfsError::Cache(format!("mkdir parent failed: {e}")))?;
+        }
+        let dest_for_persist = dest.clone();
+        let _persisted = temp
+            .persist(&dest_for_persist)
+            .map_err(|e| CtxfsError::Cache(format!("rename to canonical: {e}")))?;
+
+        // Fsync parent so the rename(2) is durable across crash.
+        // Best-effort: parent fsync isn't supported on every fs.
+        if let Some(parent) = dest.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                if let Err(e) = d.sync_all() {
+                    tracing::debug!(
+                        target: "ctxfs.cache.atomic",
+                        path = %parent.display(),
+                        error = ?e,
+                        "parent dir fsync failed (non-fatal)"
+                    );
+                }
+            }
+        }
+
+        // LRU bookkeeping (post-rename so file is durable before tracking).
+        let size = self.bytes_written;
+        let key = expected.hex.clone();
+        let mut evicted = Vec::new();
+        {
+            let mut state = self.cache.state.lock().unwrap();
+            if let Some(existing) = state.entries.get(&key) {
+                state.total_bytes -= existing.size;
+            }
+            let _ = state.entries.insert(key, CacheEntry { size });
+            state.total_bytes += size;
+            let limit = self.cache.max_bytes.load(Ordering::Relaxed);
+            while state.total_bytes > limit && !state.entries.is_empty() {
+                if let Some(entry) = state.evict_oldest() {
+                    evicted.push(entry);
+                }
+            }
+        }
+        // cache_root is kept as a struct field for future extensions
+        // (e.g., reservation-aware paths in M5).
+        let _ = self.cache_root;
+        for (k, _) in evicted {
+            self.cache.remove_blob_file(&k);
         }
         Ok(())
     }

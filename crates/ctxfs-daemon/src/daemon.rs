@@ -125,6 +125,17 @@ impl Daemon {
                 .context("failed to initialize cache")?,
         );
 
+        // Remove orphan temp blobs left over from a crash mid-commit.
+        let cleared = cache
+            .cleanup_orphan_temps(std::time::Duration::from_secs(3600))
+            .unwrap_or_else(|e| {
+                warn!("cleanup_orphan_temps failed: {e}");
+                0
+            });
+        if cleared > 0 {
+            info!("cleared {cleared} orphan temp blob(s) from previous run");
+        }
+
         let tree_cache = Arc::new(TreeCache::new(
             config.cache_dir.join("trees"),
             config.tree_cache_max_bytes,
