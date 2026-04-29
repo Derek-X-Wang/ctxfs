@@ -480,6 +480,8 @@ impl DaemonServer {
             Some(self.tree_cache.clone()),
             self.shared_tree_cache.clone(),
             self.observability.clone(),
+            // Commit E replaces this with self.tarball_singleflight.clone().
+            Arc::new(dashmap::DashMap::new()),
         ));
 
         let snapshot_data = self

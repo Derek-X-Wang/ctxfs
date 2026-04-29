@@ -7,6 +7,7 @@ use ctxfs_core::source::SourceSpec;
 use ctxfs_core::Digest;
 use ctxfs_manifest::{DirEntry, Directory, DirectoryEntry, FileEntry, Snapshot, SymlinkEntry};
 use ctxfs_provider_common::counters::CounterKey;
+use ctxfs_provider_common::fetcher::{SlotClaim, TarballKey, TarballSingleflightMap};
 use ctxfs_provider_common::observability::Observability;
 use ctxfs_provider_common::rate_limit::AuthIdentity;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION};
@@ -56,15 +57,21 @@ pub struct GitHubProvider {
     /// [`Self::new_with_codeload_host`]). Tarball 302 redirects must land on
     /// this host. Override is used by Task 8 replay tests that point both the
     /// API and codeload at a local mock server.
-    /// Task 7 wires `fetch_tarball_into_cache`; until then this field is set
-    /// but not yet read in production paths.
-    #[allow(dead_code)]
+    /// Task 7 wires `fetch_tarball_into_cache` from `dispatch_fetch_policy`.
     codeload_host: String,
     /// HTTP client used for the codeload-host hop in the tarball flow.
     /// Built once at construction time with NO default headers (so the
     /// Authorization header used for api.github.com calls cannot leak to
     /// codeload). Has redirect::Policy::none() too — we control the chain.
     codeload_client: reqwest::Client,
+    /// Daemon-side singleflight registry for in-flight tarball prefetches.
+    /// Shared across all mounts via `Arc`; per-mount providers are still
+    /// constructed fresh in `prepare_mount` (B8 constraint). Two concurrent
+    /// mounts of the same `(host, owner, repo, commit)` await the same
+    /// `OnceCell` so only one tarball download happens.
+    // Suppress until dispatch_fetch_policy (Commit D) calls claim_singleflight_slot.
+    #[allow(dead_code)]
+    tarball_singleflight: Arc<TarballSingleflightMap>,
 }
 
 impl std::fmt::Debug for GitHubProvider {
@@ -191,6 +198,12 @@ fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
 impl GitHubProvider {
     /// Production constructor. Derives the codeload host automatically from
     /// `api_host` (e.g. `api.github.com` → `codeload.github.com`).
+    ///
+    /// `tarball_singleflight` is the daemon-level registry shared across
+    /// concurrent mounts so only one tarball download happens per
+    /// `(host, owner, repo, commit)` at a time. Pass
+    /// `Arc::new(dashmap::DashMap::new())` in tests that don't exercise the
+    /// singleflight path.
     pub fn new(
         token: Option<&str>,
         api_host: String,
@@ -198,6 +211,7 @@ impl GitHubProvider {
         tree_cache: Option<Arc<TreeCache>>,
         shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
         observability: Arc<Observability>,
+        tarball_singleflight: Arc<TarballSingleflightMap>,
     ) -> Self {
         Self::new_with_codeload_host(
             token,
@@ -207,6 +221,7 @@ impl GitHubProvider {
             tree_cache,
             shared_tree_cache,
             observability,
+            tarball_singleflight,
         )
     }
 
@@ -214,6 +229,7 @@ impl GitHubProvider {
     /// calls [`Self::new`] which derives the codeload host from `api_host`.
     /// Primarily for tests (e.g. Task 8 replay tests) that need both API
     /// calls and tarball redirects to point at a local mock server.
+    #[allow(clippy::too_many_arguments)] // M4 will collapse via ProviderContext.
     pub fn new_with_codeload_host(
         token: Option<&str>,
         api_host: String,
@@ -222,6 +238,7 @@ impl GitHubProvider {
         tree_cache: Option<Arc<TreeCache>>,
         shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
         observability: Arc<Observability>,
+        tarball_singleflight: Arc<TarballSingleflightMap>,
     ) -> Self {
         let auth_identity = match token {
             Some(t) => AuthIdentity::pat(&api_host, t),
@@ -268,6 +285,7 @@ impl GitHubProvider {
             api_host,
             codeload_host,
             codeload_client,
+            tarball_singleflight,
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
         }
@@ -840,6 +858,41 @@ impl GitHubProvider {
         (root_digest, directories)
     }
 
+    // ---- Singleflight helpers ----
+
+    /// Claim a singleflight slot for the given `TarballKey`.
+    ///
+    /// The first caller for a given key inserts a fresh `TarballSlot` and
+    /// returns a claim with `is_leader = true`. Subsequent callers for the
+    /// same key get the *same* `Arc<TarballSlot>` and `is_leader = false`.
+    ///
+    /// The leader populates `claim.slot.cell` via `OnceCell::get_or_init`;
+    /// waiters call the same method and block until the cell is filled. The
+    /// leader's `claim.release()` removes the slot via `Arc::ptr_eq` so a
+    /// stale leader cannot remove a newer slot for the same key.
+    // Suppress until dispatch_fetch_policy (Commit D) calls this.
+    #[allow(dead_code)]
+    fn claim_singleflight_slot(&self, key: TarballKey) -> SlotClaim {
+        use ctxfs_provider_common::fetcher::TarballSlot;
+        let mut is_leader = false;
+        let slot = self
+            .tarball_singleflight
+            .entry(key.clone())
+            .or_insert_with(|| {
+                is_leader = true;
+                Arc::new(TarballSlot {
+                    cell: tokio::sync::OnceCell::new(),
+                })
+            })
+            .clone();
+        SlotClaim {
+            key,
+            slot,
+            is_leader,
+            registry: Arc::clone(&self.tarball_singleflight),
+        }
+    }
+
     // ---- Tarball helpers ----
 
     /// Maximum redirect-chain depth when following the tarball 302.
@@ -1388,6 +1441,30 @@ mod tests {
         SourceSpec::parse("github:test/repo@main").unwrap()
     }
 
+    /// Construct an empty singleflight registry for tests that don't exercise
+    /// the dedupe path.
+    fn make_singleflight() -> std::sync::Arc<ctxfs_provider_common::fetcher::TarballSingleflightMap>
+    {
+        std::sync::Arc::new(dashmap::DashMap::new())
+    }
+
+    /// Minimal `GitHubProvider` for unit tests that don't make real HTTP calls.
+    fn make_test_provider() -> GitHubProvider {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            ctxfs_cache::BlobCache::new(cache_dir.path().to_path_buf(), 1024 * 1024).unwrap(),
+        );
+        GitHubProvider::new(
+            None,
+            "api.github.com".to_string(),
+            cache,
+            None,
+            None,
+            Arc::new(Observability::new()),
+            make_singleflight(),
+        )
+    }
+
     #[test]
     fn test_parent_path() {
         assert_eq!(parent_path("a/b/c"), Some("a/b".to_string()));
@@ -1687,6 +1764,43 @@ mod tests {
         assert_eq!(shas, vec!["aaa".to_string(), "ccc".to_string()]);
     }
 
+    #[test]
+    fn claim_singleflight_slot_first_caller_is_leader() {
+        let provider = make_test_provider();
+        use ctxfs_provider_common::fetcher::TarballKey;
+        let key = TarballKey {
+            host: "api.github.com".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            commit_sha: "abc123".to_string(),
+        };
+        let claim = provider.claim_singleflight_slot(key);
+        assert!(
+            claim.is_leader,
+            "first caller for a fresh key must be the leader"
+        );
+    }
+
+    #[test]
+    fn claim_singleflight_slot_second_caller_is_waiter_with_same_slot() {
+        let provider = make_test_provider();
+        use ctxfs_provider_common::fetcher::TarballKey;
+        let key = TarballKey {
+            host: "api.github.com".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            commit_sha: "abc123".to_string(),
+        };
+        let claim1 = provider.claim_singleflight_slot(key.clone());
+        let claim2 = provider.claim_singleflight_slot(key);
+        assert!(claim1.is_leader, "first caller must be leader");
+        assert!(!claim2.is_leader, "second caller must be waiter");
+        assert!(
+            std::sync::Arc::ptr_eq(&claim1.slot, &claim2.slot),
+            "leader and waiter must share the same slot Arc"
+        );
+    }
+
     /// With no shas, no HTTP is performed and the returned map is empty.
     /// Behavioral test: `fetch_snapshot` skips the prefetch call entirely
     /// when `small_blob_shas` is empty, so this is mostly defense-in-depth,
@@ -1704,6 +1818,7 @@ mod tests {
             None,
             None,
             Arc::new(Observability::new()),
+            make_singleflight(),
         );
         let source = SourceSpec::parse("github:test/repo@main").unwrap();
         let result = provider

@@ -40,6 +40,7 @@ async fn build_fs_for(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, temp
         None,
         None,
         Arc::new(ctxfs_provider_common::observability::Observability::new()),
+        Arc::new(dashmap::DashMap::new()),
     ));
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
 

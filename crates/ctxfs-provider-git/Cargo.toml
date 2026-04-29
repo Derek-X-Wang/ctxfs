@@ -11,6 +11,7 @@ ctxfs-cache = { workspace = true }
 ctxfs-provider-common = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+dashmap = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
