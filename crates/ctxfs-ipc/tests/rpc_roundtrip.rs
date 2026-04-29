@@ -5,7 +5,7 @@
 //! and verifies all RPC methods work end-to-end through the actual transport layer.
 
 use ctxfs_ipc::service::{
-    CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountStatus, StatusReportV1,
+    CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountOptions, MountStatus, StatusReportV1,
 };
 use ctxfs_ipc::transport;
 use futures::StreamExt;
@@ -26,6 +26,7 @@ impl CtxfsService for MockServer {
         source: String,
         mount_point: String,
         _backend: ctxfs_core::Backend,
+        _options: MountOptions,
     ) -> Result<MountInfo, String> {
         let info = MountInfo {
             id: format!("mount_{}", self.mounts.read().await.len()),
@@ -196,6 +197,7 @@ async fn mount_list_unmount_lifecycle() {
             "github:owner/repo@main".into(),
             "/tmp/mnt".into(),
             ctxfs_core::Backend::Nfs,
+            MountOptions::default(),
         )
         .await
         .unwrap()
@@ -303,6 +305,7 @@ async fn multiple_mounts() {
             "github:a/b@main".into(),
             "/mnt/1".into(),
             ctxfs_core::Backend::Nfs,
+            MountOptions::default(),
         )
         .await
         .unwrap()
@@ -314,6 +317,7 @@ async fn multiple_mounts() {
             "github:c/d@main".into(),
             "/mnt/2".into(),
             ctxfs_core::Backend::Nfs,
+            MountOptions::default(),
         )
         .await
         .unwrap()
@@ -379,6 +383,7 @@ async fn concurrent_clients() {
                     format!("github:owner/repo{i}@main"),
                     format!("/mnt/{i}"),
                     ctxfs_core::Backend::Nfs,
+                    MountOptions::default(),
                 )
                 .await
                 .unwrap()

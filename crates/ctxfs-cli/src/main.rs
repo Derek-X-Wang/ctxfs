@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ctxfs_core::config::Config;
 use ctxfs_core::Backend;
-use ctxfs_ipc::service::CtxfsServiceClient;
+use ctxfs_ipc::service::{CtxfsServiceClient, MountOptions, PrefetchPolicy};
 use ctxfs_ipc::transport;
 
 #[derive(Parser)]
@@ -49,6 +49,12 @@ enum Commands {
         /// Backend to use for mounting (nfs or fskit); overrides env and config
         #[arg(long, value_parser = clap::value_parser!(Backend))]
         backend: Option<Backend>,
+        /// Force tarball prefetch (bypass byte cap). Mutually exclusive with --no-prefetch.
+        #[arg(long, conflicts_with = "no_prefetch")]
+        prefetch: bool,
+        /// Disable tarball prefetch entirely; use lazy per-blob fetch. Mutually exclusive with --prefetch.
+        #[arg(long = "no-prefetch", conflicts_with = "prefetch")]
+        no_prefetch: bool,
     },
     /// Unmount a mounted filesystem
     Unmount {
@@ -232,7 +238,15 @@ async fn main() -> Result<()> {
             mount_dir,
             server_only,
             backend: backend_flag,
+            prefetch,
+            no_prefetch,
         } => {
+            let policy = match (prefetch, no_prefetch) {
+                (true, false) => PrefetchPolicy::Force,
+                (false, true) => PrefetchPolicy::Disabled,
+                (false, false) => PrefetchPolicy::Auto,
+                (true, true) => unreachable!("conflicts_with prevents both flags"),
+            };
             handle_mount(
                 &config,
                 sources,
@@ -240,6 +254,7 @@ async fn main() -> Result<()> {
                 mount_dir,
                 server_only,
                 backend_flag,
+                policy,
             )
             .await?;
         }
@@ -518,6 +533,7 @@ async fn handle_mount(
     mount_dir: Option<PathBuf>,
     server_only: bool,
     backend_flag: Option<Backend>,
+    prefetch: PrefetchPolicy,
 ) -> Result<()> {
     let selected_backend = backend::detect_backend(backend_flag, None);
 
@@ -574,6 +590,7 @@ async fn handle_mount(
                 source.clone(),
                 mp_str.clone(),
                 selected_backend,
+                MountOptions { prefetch },
             )
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -1153,4 +1170,74 @@ pub(crate) fn run_umount(mount_point: &str) -> Result<()> {
         anyhow::bail!("umount exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mount_accepts_prefetch_flag() {
+        let cli = Cli::try_parse_from([
+            "ctxfs",
+            "mount",
+            "github:o/r@main",
+            "-p",
+            "/tmp/x",
+            "--prefetch",
+        ])
+        .expect("--prefetch should be accepted");
+        match cli.command {
+            Commands::Mount {
+                prefetch,
+                no_prefetch,
+                ..
+            } => {
+                assert!(prefetch, "--prefetch must be true");
+                assert!(!no_prefetch, "--no-prefetch must be false");
+            }
+            _ => panic!("expected Mount command"),
+        }
+    }
+
+    #[test]
+    fn mount_accepts_no_prefetch_flag() {
+        let cli = Cli::try_parse_from([
+            "ctxfs",
+            "mount",
+            "github:o/r@main",
+            "-p",
+            "/tmp/x",
+            "--no-prefetch",
+        ])
+        .expect("--no-prefetch should be accepted");
+        match cli.command {
+            Commands::Mount {
+                prefetch,
+                no_prefetch,
+                ..
+            } => {
+                assert!(!prefetch, "--prefetch must be false");
+                assert!(no_prefetch, "--no-prefetch must be true");
+            }
+            _ => panic!("expected Mount command"),
+        }
+    }
+
+    #[test]
+    fn mount_rejects_both_prefetch_flags() {
+        let result = Cli::try_parse_from([
+            "ctxfs",
+            "mount",
+            "github:o/r@main",
+            "-p",
+            "/tmp/x",
+            "--prefetch",
+            "--no-prefetch",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap should reject --prefetch and --no-prefetch together"
+        );
+    }
 }

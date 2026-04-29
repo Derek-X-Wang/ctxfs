@@ -3,7 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use ctxfs_core::Backend;
-use ctxfs_ipc::service::CtxfsServiceClient;
+use ctxfs_ipc::service::{CtxfsServiceClient, MountOptions};
 use futures::StreamExt;
 
 /// Max concurrent daemon mount RPCs to avoid overwhelming the daemon.
@@ -83,7 +83,13 @@ pub async fn batch_mount(
                 }
                 let ctx = crate::long_context();
                 match client
-                    .mount(ctx, src.clone(), mp_str.clone(), Backend::Nfs)
+                    .mount(
+                        ctx,
+                        src.clone(),
+                        mp_str.clone(),
+                        Backend::Nfs,
+                        MountOptions::default(),
+                    )
                     .await
                 {
                     Ok(Ok(info)) => (src, mp_str, Ok(info)),

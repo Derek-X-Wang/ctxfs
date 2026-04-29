@@ -1,7 +1,16 @@
 use ctxfs_core::backend::Backend;
 use serde::{Deserialize, Serialize};
 
+pub use ctxfs_provider_common::fetcher::PrefetchPolicy;
 pub use ctxfs_provider_common::status::StatusReportV1;
+
+/// User-overridable options on `mount`. Backward-compatible: a missing
+/// `prefetch` field deserializes to `PrefetchPolicy::Auto` via Default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MountOptions {
+    #[serde(default)]
+    pub prefetch: PrefetchPolicy,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MountStatus {
@@ -77,6 +86,7 @@ pub trait CtxfsService {
         source: String,
         mount_point: String,
         backend: ctxfs_core::Backend,
+        options: MountOptions,
     ) -> Result<MountInfo, String>;
     async fn unmount(target: String) -> Result<(), String>;
     async fn list() -> Vec<MountInfo>;
@@ -100,6 +110,26 @@ pub trait CtxfsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_options_default_is_auto() {
+        let m = MountOptions::default();
+        assert_eq!(m.prefetch, PrefetchPolicy::Auto);
+    }
+
+    #[test]
+    fn mount_options_serde_roundtrip() {
+        for policy in [
+            PrefetchPolicy::Auto,
+            PrefetchPolicy::Force,
+            PrefetchPolicy::Disabled,
+        ] {
+            let opt = MountOptions { prefetch: policy };
+            let s = serde_json::to_string(&opt).unwrap();
+            let opt2: MountOptions = serde_json::from_str(&s).unwrap();
+            assert_eq!(opt2.prefetch, policy);
+        }
+    }
 
     #[test]
     fn mount_status_display() {

@@ -5,7 +5,9 @@ use ctxfs_core::config::Config;
 use ctxfs_core::provider::Provider;
 use ctxfs_core::source::{ProviderType, SourceSpec};
 use ctxfs_core::Backend;
-use ctxfs_ipc::service::{CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountStatus};
+use ctxfs_ipc::service::{
+    CacheBreakdown, CacheStats, CtxfsService, MountInfo, MountOptions, MountStatus,
+};
 use ctxfs_ipc::transport;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
@@ -372,6 +374,11 @@ struct MountPrep {
     snapshot: ctxfs_manifest::Snapshot,
     /// Optional subpath to re-root the mount at.
     subpath: Option<String>,
+    /// User-requested prefetch options. Stored here so Task 7 can route
+    /// `options.prefetch` into the tarball auto-gate without restructuring
+    /// the call shape. Not yet read in M3.
+    #[allow(dead_code)]
+    options: MountOptions,
 }
 
 impl DaemonServer {
@@ -388,7 +395,7 @@ impl DaemonServer {
     /// Resolve `source_str` to GitHub coordinates, fetch the snapshot, and
     /// return all the state backends need.
     #[allow(clippy::too_many_lines)]
-    fn prepare_mount(&self, source_str: &str) -> Result<MountPrep, String> {
+    fn prepare_mount(&self, source_str: &str, options: MountOptions) -> Result<MountPrep, String> {
         let mut source =
             SourceSpec::parse(source_str).map_err(|e| format!("invalid source: {e}"))?;
 
@@ -477,6 +484,7 @@ impl DaemonServer {
             provider,
             snapshot,
             subpath,
+            options,
         })
     }
 
@@ -486,10 +494,11 @@ impl DaemonServer {
         source_str: &str,
         mount_point: &str,
         backend: Backend,
+        options: MountOptions,
     ) -> Result<MountInfo, String> {
         match backend {
-            Backend::Nfs => self.do_mount_nfs(source_str, mount_point),
-            Backend::FsKit => self.do_mount_fskit(source_str, mount_point),
+            Backend::Nfs => self.do_mount_nfs(source_str, mount_point, options),
+            Backend::FsKit => self.do_mount_fskit(source_str, mount_point, options),
         }
     }
 
@@ -498,12 +507,17 @@ impl DaemonServer {
     /// to run `mount_nfs`. `mount_point` is the user's *logical* path
     /// (a symlink managed by the CLI); the real volume lives under
     /// `/Volumes/ctxfs/<slug>`.
-    fn do_mount_fskit(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
+    fn do_mount_fskit(
+        &self,
+        source_str: &str,
+        mount_point: &str,
+        options: MountOptions,
+    ) -> Result<MountInfo, String> {
         let bundle_id = self.config.fskit_bundle_id.clone().ok_or_else(|| {
             "CTXFS_FSKIT_BUNDLE_ID not set — cannot start FSKit mount".to_string()
         })?;
 
-        let prep = self.prepare_mount(source_str)?;
+        let prep = self.prepare_mount(source_str, options)?;
 
         let mut fskit_handle = self
             .rt_handle
@@ -600,8 +614,13 @@ impl DaemonServer {
     /// Fetch the snapshot and start an NFS server for it. The CLI is responsible
     /// for the actual kernel `mount_nfs` call so sudo prompts land in the user's
     /// terminal instead of the daemon's log.
-    fn do_mount_nfs(&self, source_str: &str, mount_point: &str) -> Result<MountInfo, String> {
-        let prep = self.prepare_mount(source_str)?;
+    fn do_mount_nfs(
+        &self,
+        source_str: &str,
+        mount_point: &str,
+        options: MountOptions,
+    ) -> Result<MountInfo, String> {
+        let prep = self.prepare_mount(source_str, options)?;
 
         std::fs::create_dir_all(mount_point)
             .map_err(|e| format!("failed to create mount point: {e}"))?;
@@ -713,12 +732,18 @@ impl CtxfsService for DaemonServer {
         source: String,
         mount_point: String,
         backend: Backend,
+        options: MountOptions,
     ) -> Result<MountInfo, String> {
-        info!("mount request: {source} -> {mount_point} (backend={backend})");
+        info!(
+            "mount request: {source} -> {mount_point} (backend={backend}, prefetch={:?})",
+            options.prefetch
+        );
         let server = self.clone();
-        tokio::task::spawn_blocking(move || server.do_mount(&source, &mount_point, backend))
-            .await
-            .map_err(|e| format!("mount task panicked: {e}"))?
+        tokio::task::spawn_blocking(move || {
+            server.do_mount(&source, &mount_point, backend, options)
+        })
+        .await
+        .map_err(|e| format!("mount task panicked: {e}"))?
     }
 
     async fn unmount(self, _: tarpc::context::Context, target: String) -> Result<(), String> {
