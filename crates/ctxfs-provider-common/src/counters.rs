@@ -123,6 +123,53 @@ impl MountCounters {
         let _ = self.lfs_pointer_files.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Fold all counts from `snap` into this bucket by atomic addition.
+    ///
+    /// Used by [`crate::observability::Observability::merge_and_drop_placeholder`]
+    /// to migrate a `<resolving:ref>` placeholder bucket's accumulated counts
+    /// into the real commit bucket after ref resolution completes.
+    pub fn merge_from_snapshot(&self, snap: &CounterSnapshot) {
+        let _ = self
+            .rest_calls_total
+            .fetch_add(snap.rest_calls_total, Ordering::Relaxed);
+        let _ = self
+            .http_transfers_total
+            .fetch_add(snap.http_transfers_total, Ordering::Relaxed);
+        let _ = self
+            .bytes_total
+            .fetch_add(snap.bytes_total, Ordering::Relaxed);
+        let _ = self
+            .throttle_events
+            .fetch_add(snap.throttle_events, Ordering::Relaxed);
+        let _ = self
+            .prefetch_hits
+            .fetch_add(snap.prefetch_hits, Ordering::Relaxed);
+        let _ = self
+            .prefetch_failures
+            .fetch_add(snap.prefetch_failures, Ordering::Relaxed);
+        let _ = self
+            .prefetch_skipped_oversized
+            .fetch_add(snap.prefetch_skipped_oversized, Ordering::Relaxed);
+        let _ = self
+            .tarball_digest_mismatch
+            .fetch_add(snap.tarball_digest_mismatch, Ordering::Relaxed);
+        let _ = self
+            .tarball_invalid_entries
+            .fetch_add(snap.tarball_invalid_entries, Ordering::Relaxed);
+        let _ = self
+            .truncated_tree_fallbacks
+            .fetch_add(snap.truncated_tree_fallbacks, Ordering::Relaxed);
+        let _ = self
+            .cache_hits
+            .fetch_add(snap.cache_hits, Ordering::Relaxed);
+        let _ = self
+            .cache_misses
+            .fetch_add(snap.cache_misses, Ordering::Relaxed);
+        let _ = self
+            .lfs_pointer_files
+            .fetch_add(snap.lfs_pointer_files, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> CounterSnapshot {
         CounterSnapshot {

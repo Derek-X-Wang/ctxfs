@@ -313,7 +313,15 @@ impl GitHubProvider {
     }
 
     fn api_url(&self, owner: &str, repo: &str, path: &str) -> String {
-        format!("https://{}/repos/{owner}/{repo}/{path}", self.api_host)
+        // If `api_host` already embeds a scheme (test-only: `http://127.0.0.1:PORT`)
+        // use it as-is so replay tests can point the provider at a local HTTP server.
+        // Production always passes a bare hostname (e.g. `api.github.com`), which
+        // gets the `https://` prefix applied here.
+        if self.api_host.starts_with("http://") || self.api_host.starts_with("https://") {
+            format!("{}/repos/{owner}/{repo}/{path}", self.api_host)
+        } else {
+            format!("https://{}/repos/{owner}/{repo}/{path}", self.api_host)
+        }
     }
 
     /// Send a GET request, check rate limits and status, and parse the JSON response.
@@ -1493,6 +1501,24 @@ impl GitHubProvider {
             commit: commit_sha.clone(),
             mount_id: source.id(),
         });
+
+        // 4. Fold the placeholder bucket into the real bucket so that
+        //    rest_calls_total (from the resolve_ref API call) appears under
+        //    the real commit key rather than the `<resolving:…>` key.
+        let placeholder_key = CounterKey {
+            source: source.provider_type.to_string(),
+            repo: source.name.clone(),
+            commit: format!("<resolving:{}>", source.version),
+            mount_id: source.id(),
+        };
+        let real_key = CounterKey {
+            source: source.provider_type.to_string(),
+            repo: source.name.clone(),
+            commit: commit_sha.clone(),
+            mount_id: source.id(),
+        };
+        self.observability
+            .merge_and_drop_placeholder(&placeholder_key, &real_key);
 
         let (owner, repo) = owner_repo(source)?;
 

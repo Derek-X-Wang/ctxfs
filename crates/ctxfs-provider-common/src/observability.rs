@@ -71,6 +71,27 @@ impl Observability {
         g.set_secondary_throttle(retry_after);
     }
 
+    /// Merge a `<resolving:ref>` placeholder counter bucket into the real
+    /// commit bucket, then remove the placeholder.
+    ///
+    /// Providers seed a placeholder `CounterKey` (with `commit =
+    /// "<resolving:ref>"`) before resolving a ref so that the `resolve_ref`
+    /// API call is attributed to this mount. Once the real commit SHA is known
+    /// the placeholder bucket's accumulated counts (at least
+    /// `rest_calls_total += 1`) need to be folded into the real bucket, and
+    /// the placeholder entry removed so it never appears in
+    /// `status_report`.
+    ///
+    /// If the placeholder key is not present (e.g., a fresh mount where
+    /// resolve_ref wasn't yet called), the method is a no-op.
+    pub fn merge_and_drop_placeholder(&self, placeholder: &CounterKey, real: &CounterKey) {
+        let Some((_ph_key, ph_counters)) = self.counters.remove(placeholder) else {
+            return;
+        };
+        let snap = ph_counters.snapshot();
+        self.counters_for(real.clone()).merge_from_snapshot(&snap);
+    }
+
     /// Assemble a StatusReportV1 payload for IPC.
     #[must_use]
     pub fn status_report(&self) -> StatusReportV1 {
