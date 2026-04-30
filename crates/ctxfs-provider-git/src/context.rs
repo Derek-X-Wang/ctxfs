@@ -1,0 +1,98 @@
+//! `ProviderContext` collects the daemon-owned `Arc`s and configuration that
+//! every Phase-4-shaped provider needs, so `GitHubProvider::new` shrinks to
+//! `(token, ctx)`. Replaces the parameter sprawl that emerged across M1–M3
+//! (api host, observability, cache, tree-cache, shared tree-cache,
+//! singleflight registry).
+//!
+//! Lives in `ctxfs-provider-git` (not `provider-common`) because
+//! `provider-common` cannot depend on `ctxfs-cache` without inverting the
+//! existing dep direction (`cache → provider-common`). Future native-CDN
+//! providers (npm/PyPI/crates.io) get their own context type adapted to
+//! their auth/cache/network needs; the shared structural call (duplicate,
+//! extract to a new crate, or migrate `ctxfs-cache` under `provider-common`)
+//! is best made with a second concrete consumer in hand — Phase 6 work.
+
+use ctxfs_cache::{BlobCache, SharedTreeCache, TreeCache};
+use ctxfs_provider_common::fetcher::TarballSingleflightMap;
+use ctxfs_provider_common::observability::Observability;
+use std::sync::Arc;
+
+/// Daemon-owned context bundled into a single value so `GitHubProvider::new`
+/// shrinks from 7 arguments to 2 (`token`, `ctx`).
+///
+/// `Clone` clones all `Arc`s by reference count — the underlying resources are
+/// shared, not copied.
+#[derive(Clone)]
+pub struct ProviderContext {
+    /// API host (e.g. `api.github.com`, or a `http://127.0.0.1:PORT` test
+    /// override). Used for both REST URL composition and codeload-host
+    /// derivation.
+    pub api_host: String,
+    /// Daemon-side observability registry (gauges + per-mount counters).
+    pub observability: Arc<Observability>,
+    /// Blob cache (content-addressable).
+    pub cache: Arc<BlobCache>,
+    /// Local tree cache (per-commit manifests).
+    pub tree_cache: Option<Arc<TreeCache>>,
+    /// Optional shared tree cache (Redis-backed cross-process).
+    pub shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
+    /// Singleflight registry for in-flight tarball prefetches.
+    pub singleflight: Arc<TarballSingleflightMap>,
+}
+
+impl std::fmt::Debug for ProviderContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderContext")
+            .field("api_host", &self.api_host)
+            .field("observability", &"<Arc<Observability>>")
+            .field("cache", &"<Arc<BlobCache>>")
+            .field("tree_cache", &self.tree_cache.is_some())
+            .field("shared_tree_cache", &self.shared_tree_cache.is_some())
+            .field("singleflight_len", &self.singleflight.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn make_test_provider_context() -> ProviderContext {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Arc::new(BlobCache::new(dir.keep(), 1024 * 1024).expect("BlobCache::new"));
+        let observability = Arc::new(Observability::new());
+        let singleflight = Arc::new(TarballSingleflightMap::new());
+        ProviderContext {
+            api_host: "api.github.com".to_string(),
+            observability,
+            cache,
+            tree_cache: None,
+            shared_tree_cache: None,
+            singleflight,
+        }
+    }
+
+    #[test]
+    fn provider_context_clones_arcs_correctly() {
+        let ctx = make_test_provider_context();
+        let cloned = ctx.clone();
+        assert!(Arc::ptr_eq(&ctx.cache, &cloned.cache));
+        assert!(Arc::ptr_eq(&ctx.observability, &cloned.observability));
+        assert!(Arc::ptr_eq(&ctx.singleflight, &cloned.singleflight));
+    }
+
+    #[test]
+    fn provider_context_debug_redacts_arc_contents() {
+        let ctx = make_test_provider_context();
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("api_host"));
+        assert!(dbg.contains("<Arc<Observability>>"));
+        assert!(dbg.contains("singleflight_len"));
+        // Sanity: no token stored on ProviderContext (tokens live on GitHubProvider)
+        assert!(
+            !dbg.contains("token"),
+            "token must not appear in ProviderContext debug output"
+        );
+    }
+}

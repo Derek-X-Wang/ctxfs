@@ -172,20 +172,47 @@ impl SlotClaim {
     }
 }
 
+/// Source-bound context passed to [`ContentFetcher::fetch_batch`]. Carries the
+/// resolved source spec and revision so providers don't have to derive these
+/// from `CounterKey` (which is a telemetry concern, not a data dependency).
+#[derive(Debug, Clone)]
+pub struct FetchBatchContext {
+    /// The source being fetched. Provider-specific fields like `name`
+    /// (`owner/repo` for GitHub) are interpreted by the provider.
+    pub source: ctxfs_core::source::SourceSpec,
+    /// Resolved upstream revision (e.g., 40-char Git commit SHA for GitHub;
+    /// version string for npm/PyPI/crates.io). Always concrete, never a ref.
+    pub resolved_revision: String,
+}
+
 /// Content fetching trait. The signature is kept narrow on purpose —
 /// extending the surface is a breaking change once a second provider
-/// implements it. Not yet required by providers.
+/// implements it.
 #[async_trait::async_trait]
 pub trait ContentFetcher: Send + Sync {
     /// Cost-of-fulfillment estimate for a batch. Pure if possible; safe to
     /// call multiple times. Used to drive scheduling decisions.
     fn estimate_cost(&self, requests: &[ContentRequest]) -> CostEstimate;
 
-    /// Fetch the given requests. The provider chooses tarball vs lazy via
-    /// its own `decide_policy(...)`. The returned map is keyed by
-    /// `ContentRequest::path`.
+    /// Fetch the given requests as a single batch. Called by orchestration
+    /// code (e.g., `fetch_snapshot_inner` in `GitHubProvider`) when the
+    /// provider's auto-gate elects bulk prefetch.
+    ///
+    /// ## Return contract
+    ///
+    /// The returned `HashMap<PathBuf, Vec<u8>>` is best-effort: it contains
+    /// bytes for whatever paths the provider fulfilled in this call.
+    /// Missing paths are NOT errors — callers should fall back to their
+    /// per-request fetch path (e.g., `Provider::fetch_blob` for GitHub)
+    /// for paths absent from the map.
+    ///
+    /// GitHub's tarball flow warms `BlobCache` by digest and may return an
+    /// empty map even on success. Future native-CDN providers (npm tarballs,
+    /// PyPI sdists, crates.io `.crate` files) may populate the map directly
+    /// if their tarball returns bytes.
     async fn fetch_batch(
         &self,
+        ctx: &FetchBatchContext,
         requests: &[ContentRequest],
         mode: FetchMode,
         counter_key: Option<CounterKey>,
