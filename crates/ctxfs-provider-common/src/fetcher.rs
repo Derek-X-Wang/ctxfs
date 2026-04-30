@@ -420,4 +420,27 @@ mod tests {
             FetchPolicy::Lazy,
         );
     }
+
+    fn req(size: Option<u64>) -> ContentRequest {
+        ContentRequest {
+            path: PathBuf::from("f"),
+            digest: None,
+            size,
+            kind: ContentKind::File,
+        }
+    }
+
+    #[test]
+    fn default_cost_estimate_all_known_sums_sizes() {
+        let est = default_cost_estimate(&[req(Some(10)), req(Some(25)), req(Some(7))]);
+        assert_eq!(est.total_bytes, Some(42));
+        assert_eq!(est.request_count, 3);
+    }
+
+    #[test]
+    fn default_cost_estimate_any_unknown_returns_none_total() {
+        let est = default_cost_estimate(&[req(Some(10)), req(None), req(Some(7))]);
+        assert_eq!(est.total_bytes, None);
+        assert_eq!(est.request_count, 3);
+    }
 }
