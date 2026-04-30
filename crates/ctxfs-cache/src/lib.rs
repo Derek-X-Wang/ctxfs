@@ -29,7 +29,7 @@ struct CacheEntry {
     algorithm: HashAlgorithm,
 }
 
-/// Unified cache state behind a single mutex (Codex M5-plan-v1 #5).
+/// Unified cache state behind a single mutex.
 ///
 /// Holds the LRU entries, per-blob ownership sets, and per-repo reservation
 /// budgets together so the eviction loop (T3b) can consult all three without
@@ -364,11 +364,16 @@ impl BlobCache {
             .insert(repo_key.clone());
     }
 
-    /// Idempotent equivalent of `put` followed by `add_owner`.
+    /// Put a blob and record `repo_key` as an owner.
     ///
-    /// Called by `MountCacheView::put` for late-discovered blobs (e.g.,
-    /// truncated-tree fallbacks). Primary ownership tracking goes through
-    /// `register_mount` in T3b.
+    /// Ownership is recorded *after* the write; the eviction loop can
+    /// briefly observe the blob as unowned between these two steps. For
+    /// truncated-tree fallbacks and late-discovered blobs (after
+    /// `register_mount`), this is acceptable by design — the B5
+    /// reservation invariant is scoped to manifest-time membership;
+    /// late additions are best-effort. Use `register_mount(key,
+    /// reservation_bytes, manifest_digests)` at mount time for full
+    /// reservation protection.
     pub fn put_for(
         &self,
         repo_key: &RepoKey,
