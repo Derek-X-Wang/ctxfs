@@ -1,6 +1,6 @@
 use crate::observability::Observability;
 use anyhow::{bail, Context, Result};
-use ctxfs_cache::{BlobCache, ResolutionCache, SharedTreeCache, TreeCache};
+use ctxfs_cache::{BlobCache, RepoKey, ResolutionCache, SharedTreeCache, TreeCache};
 use ctxfs_core::config::Config;
 use ctxfs_core::source::{ProviderType, SourceSpec};
 use ctxfs_core::Backend;
@@ -87,6 +87,11 @@ struct MountHandle {
     /// Keeps the FSKit session alive for the lifetime of the mount.
     /// `None` for NFS mounts.
     _fskit: Option<FsKitHandle>,
+    /// Cache reservation key for this mount. Populated in `prepare_mount`
+    /// after `register_mount` runs; `None` for mounts that could not derive a
+    /// `RepoKey` (should not occur in production but guarded defensively).
+    /// Used by `do_unmount_by_id` to call `BlobCache::unregister_mount`.
+    repo_key: Option<RepoKey>,
 }
 
 pub struct Daemon {
@@ -389,6 +394,11 @@ struct MountPrep {
     snapshot: ctxfs_manifest::Snapshot,
     /// Optional subpath to re-root the mount at.
     subpath: Option<String>,
+    /// B5 cache-reservation key for this mount. Built from the GitHub host +
+    /// owner/repo extracted from `github_source`. Used by the backends to
+    /// store the key in `MountHandle` so `do_unmount_by_id` can call
+    /// `unregister_mount` at teardown.
+    repo_key: RepoKey,
 }
 
 impl DaemonServer {
@@ -501,7 +511,7 @@ impl DaemonServer {
             subpath: subpath.clone(),
         };
 
-        let provider = self.build_github_provider_for_mount();
+        let mut provider = self.build_github_provider_for_mount();
 
         let fetch_options = FetchOptions {
             prefetch: options.prefetch,
@@ -517,12 +527,36 @@ impl DaemonServer {
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
             .map_err(|e| format!("failed to parse snapshot: {e}"))?;
 
+        // B5: register_mount seeds blob ownership and reservation budget.
+        // Extract owner/repo from github_source.name ("owner/repo" format).
+        let (owner, repo_name) = github_source
+            .name
+            .split_once('/')
+            .ok_or_else(|| format!("invalid github source name: {}", github_source.name))?;
+        let repo_key = RepoKey::new(&self.config.github_host, owner, repo_name);
+
+        let blob_hexes = provider.snapshot_blob_hexes();
+        self.cache
+            .register_mount(&repo_key, options.cache_reservation_bytes, &blob_hexes);
+
+        // Wire mount_cache into the provider so tarball + lazy fetch paths
+        // call record_ownership_after_finalize for blobs not in the manifest.
+        // Arc::get_mut succeeds because provider is the sole Arc clone at this point.
+        if let Some(p) = std::sync::Arc::get_mut(&mut provider) {
+            let view = ctxfs_cache::reservation::MountCacheView::new(
+                std::sync::Arc::clone(&self.cache),
+                repo_key.clone(),
+            );
+            p.set_mount_cache(Some(std::sync::Arc::new(view)));
+        }
+
         Ok(MountPrep {
             source_spec: source,
             github_source,
             provider,
             snapshot,
             subpath,
+            repo_key,
         })
     }
 
@@ -620,6 +654,7 @@ impl DaemonServer {
             backend: Backend::FsKit,
             _nfs: None,
             _fskit: Some(fskit_handle),
+            repo_key: Some(prep.repo_key),
         };
 
         self.rt_handle.block_on(async {
@@ -707,6 +742,7 @@ impl DaemonServer {
             backend: Backend::Nfs,
             _nfs: Some(nfs_handle),
             _fskit: None,
+            repo_key: Some(prep.repo_key),
         };
 
         self.rt_handle.block_on(async {
@@ -748,6 +784,12 @@ impl DaemonServer {
         match handle {
             Some(h) => {
                 let volume_path = h.info.volume_path.clone();
+
+                // B5: unregister cache reservation so the slot is returned
+                // to the default-rebalance pool and other mounts can grow.
+                if let Some(ref key) = h.repo_key {
+                    self.cache.unregister_mount(key);
+                }
 
                 // FSKit: explicit async shutdown (can't await in Drop).
                 #[allow(clippy::used_underscore_binding)]
@@ -1062,6 +1104,7 @@ mod tests {
                     backend: Backend::FsKit,
                     _nfs: None,
                     _fskit: None, // No real FSKit session in unit test.
+                    repo_key: None,
                 },
             );
         }
@@ -1189,6 +1232,7 @@ mod tests {
                     backend: Backend::FsKit,
                     _nfs: None,
                     _fskit: None,
+                    repo_key: None,
                 },
             );
         }

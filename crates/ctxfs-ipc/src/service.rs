@@ -4,12 +4,24 @@ use serde::{Deserialize, Serialize};
 pub use ctxfs_provider_common::fetcher::PrefetchPolicy;
 pub use ctxfs_provider_common::status::StatusReportV1;
 
-/// User-overridable options on `mount`. Backward-compatible: a missing
-/// `prefetch` field deserializes to `PrefetchPolicy::Auto` via Default.
+/// User-overridable options on `mount`. Backward-compatible: missing fields
+/// deserialize to their defaults via `#[serde(default)]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MountOptions {
     #[serde(default)]
     pub prefetch: PrefetchPolicy,
+    /// Per-repo blob-cache reservation in bytes.
+    ///
+    /// `Some(n)` → explicit override: this mount's repo is guaranteed `n` bytes
+    /// of cache that the eviction loop will not reclaim while the working-set is
+    /// within budget.  Passed to [`BlobCache::register_mount`] as an explicit
+    /// override, so it is never touched by the default-rebalance formula.
+    ///
+    /// `None` → participate in default rebalance: the remaining cache pool
+    /// (after all explicit mounts claim their share) is split equally among
+    /// default mounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_reservation_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +136,10 @@ mod tests {
             PrefetchPolicy::Force,
             PrefetchPolicy::Disabled,
         ] {
-            let opt = MountOptions { prefetch: policy };
+            let opt = MountOptions {
+                prefetch: policy,
+                cache_reservation_bytes: None,
+            };
             let s = serde_json::to_string(&opt).unwrap();
             let opt2: MountOptions = serde_json::from_str(&s).unwrap();
             assert_eq!(opt2.prefetch, policy);

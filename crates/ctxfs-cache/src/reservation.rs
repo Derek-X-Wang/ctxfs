@@ -202,6 +202,68 @@ mod tests {
         assert_eq!(cache.working_set_bytes(&key("repo-b")), 200);
     }
 
+    /// `register_mount` pre-seeds blob ownership for blobs not yet in cache.
+    /// Working-set is 0 before any puts; grows once the blobs are written.
+    #[test]
+    fn register_mount_with_manifest_seeds_owner_set_for_uncached_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
+        let k = key("repo-a");
+        let hex1 = "1111000000000000000000000000000000000001";
+        let hex2 = "1111000000000000000000000000000000000002";
+
+        // Register before any blobs are in cache (manifest-time ownership).
+        cache.register_mount(&k, None, &[hex1.to_string(), hex2.to_string()]);
+
+        // No bytes cached yet — working set is 0.
+        assert_eq!(cache.working_set_bytes(&k), 0);
+
+        // Now put the first blob; ownership was pre-claimed → working set grows.
+        let d1 = Digest::from_sha1_hex(hex1);
+        cache.put(&d1, &[1u8; 50]).unwrap();
+        assert_eq!(cache.working_set_bytes(&k), 50);
+    }
+
+    /// `register_mount` then `unregister_mount` decrements refcount to 0 and
+    /// removes the reservation entry entirely. Default rebalance runs on both
+    /// sides of the call.
+    #[test]
+    fn register_then_unregister_decrements_then_removes_with_rebalance() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
+        let k = key("repo-b");
+
+        cache.register_mount(&k, Some(400_000), &[]);
+        assert_eq!(cache.reservation_bytes(&k), Some(400_000));
+
+        cache.unregister_mount(&k);
+        // refcount → 0: entry is removed.
+        assert_eq!(cache.reservation_bytes(&k), None);
+    }
+
+    /// Two mounts of the same repo share one reservation entry. `unregister_mount`
+    /// decrements refcount; only the final unregister removes the entry.
+    #[test]
+    fn refcount_keeps_entry_alive_under_two_mounts_same_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
+        let k = key("shared");
+
+        // Mount 1: explicit 200 KB reservation.
+        cache.register_mount(&k, Some(200_000), &[]);
+        // Mount 2: same repo, no explicit reservation — does NOT override mount 1's explicit.
+        cache.register_mount(&k, None, &[]);
+        assert_eq!(cache.reservation_bytes(&k), Some(200_000));
+
+        // Unregister mount 2: refcount → 1, entry survives.
+        cache.unregister_mount(&k);
+        assert_eq!(cache.reservation_bytes(&k), Some(200_000));
+
+        // Unregister mount 1: refcount → 0, entry removed.
+        cache.unregister_mount(&k);
+        assert_eq!(cache.reservation_bytes(&k), None);
+    }
+
     #[test]
     fn add_owner_pre_claims_uncached_blob() {
         // Prove the manifest-time-ownership path: add_owner on a hex that

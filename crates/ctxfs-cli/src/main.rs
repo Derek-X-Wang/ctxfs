@@ -55,6 +55,12 @@ enum Commands {
         /// Disable tarball prefetch entirely; use lazy per-blob fetch. Mutually exclusive with --prefetch.
         #[arg(long = "no-prefetch", conflicts_with = "prefetch")]
         no_prefetch: bool,
+        /// Per-repo blob-cache reservation (e.g. 256MB, 1G, 512K, or raw bytes).
+        /// The cache eviction loop will not reclaim this repo's blobs while its
+        /// working-set stays within the reservation. Omit to use the default
+        /// equal-share rebalance.
+        #[arg(long = "cache-reservation")]
+        cache_reservation: Option<String>,
     },
     /// Unmount a mounted filesystem
     Unmount {
@@ -240,12 +246,20 @@ async fn main() -> Result<()> {
             backend: backend_flag,
             prefetch,
             no_prefetch,
+            cache_reservation,
         } => {
             let policy = match (prefetch, no_prefetch) {
                 (true, false) => PrefetchPolicy::Force,
                 (false, true) => PrefetchPolicy::Disabled,
                 (false, false) => PrefetchPolicy::Auto,
                 (true, true) => unreachable!("conflicts_with prevents both flags"),
+            };
+            let reservation_bytes = match cache_reservation {
+                Some(ref s) => Some(
+                    parse_size_bytes(s)
+                        .with_context(|| format!("invalid --cache-reservation value: {s}"))?,
+                ),
+                None => None,
             };
             handle_mount(
                 &config,
@@ -255,6 +269,7 @@ async fn main() -> Result<()> {
                 server_only,
                 backend_flag,
                 policy,
+                reservation_bytes,
             )
             .await?;
         }
@@ -527,9 +542,52 @@ fn config_init() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Size parsing helper
+// ---------------------------------------------------------------------------
+
+/// Parse a human-readable size string into bytes.
+///
+/// Accepts:
+/// - Suffixed forms (case-insensitive): `256MB`, `1G`, `512K`, `128MiB`, `4GiB`
+/// - Raw decimal integers: `"536870912"`
+///
+/// Returns an error if the input is empty, not a recognised format, or the
+/// numeric part does not fit in a `u64`.
+pub(crate) fn parse_size_bytes(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("size string must not be empty");
+    }
+
+    // Split into numeric prefix and optional suffix.
+    let boundary = s.find(|c: char| c.is_alphabetic()).unwrap_or(s.len());
+    let (num_str, suffix) = s.split_at(boundary);
+    let value: u64 = num_str
+        .parse()
+        .with_context(|| format!("could not parse '{num_str}' as a number"))?;
+
+    let multiplier: u64 = match suffix.to_ascii_uppercase().as_str() {
+        "" => 1,
+        "B" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        "T" | "TB" | "TIB" => 1024u64 * 1024 * 1024 * 1024,
+        other => {
+            anyhow::bail!("unrecognised size suffix: '{other}' (expected K/M/G/T or KB/MB/GB)")
+        }
+    };
+
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("size overflows u64: {s}"))
+}
+
+// ---------------------------------------------------------------------------
 // Mount handler
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // CLI dispatch naturally passes all mount flags
 async fn handle_mount(
     config: &Config,
     sources: Vec<String>,
@@ -538,6 +596,7 @@ async fn handle_mount(
     server_only: bool,
     backend_flag: Option<Backend>,
     prefetch: PrefetchPolicy,
+    cache_reservation_bytes: Option<u64>,
 ) -> Result<()> {
     let selected_backend = backend::detect_backend(backend_flag, None);
 
@@ -594,7 +653,10 @@ async fn handle_mount(
                 source.clone(),
                 mp_str.clone(),
                 selected_backend,
-                MountOptions { prefetch },
+                MountOptions {
+                    prefetch,
+                    cache_reservation_bytes,
+                },
             )
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -1283,5 +1345,57 @@ mod tests {
             }
             _ => panic!("expected Mount command"),
         }
+    }
+
+    #[test]
+    fn mount_accepts_cache_reservation_flag() {
+        let cli = Cli::try_parse_from([
+            "ctxfs",
+            "mount",
+            "github:o/r@main",
+            "-p",
+            "/tmp/x",
+            "--cache-reservation",
+            "256MB",
+        ])
+        .expect("--cache-reservation should be accepted");
+        match cli.command {
+            Commands::Mount {
+                cache_reservation, ..
+            } => {
+                assert_eq!(
+                    cache_reservation.as_deref(),
+                    Some("256MB"),
+                    "--cache-reservation must pass the raw string to the dispatch layer"
+                );
+            }
+            _ => panic!("expected Mount command"),
+        }
+    }
+
+    #[test]
+    fn parse_size_bytes_handles_all_suffixes() {
+        assert_eq!(parse_size_bytes("512").unwrap(), 512);
+        assert_eq!(parse_size_bytes("1K").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("4KB").unwrap(), 4 * 1024);
+        assert_eq!(parse_size_bytes("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_bytes("256MB").unwrap(), 256 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("512MiB").unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_rejects_bad_input() {
+        assert!(parse_size_bytes("").is_err(), "empty string must error");
+        assert!(
+            parse_size_bytes("abc").is_err(),
+            "non-numeric prefix must error"
+        );
+        assert!(
+            parse_size_bytes("256XB").is_err(),
+            "unknown suffix must error"
+        );
     }
 }

@@ -55,6 +55,78 @@ impl CacheState {
             (key, entry.size, entry.algorithm)
         })
     }
+
+    /// Compute the total cached bytes owned by `key` without acquiring the
+    /// outer lock (caller already holds it).
+    ///
+    /// Iterates `blob_owners` and sums the `CacheEntry::size` for every hex
+    /// in the owner-set for `key`. Blobs claimed via `add_owner` but not yet
+    /// written to cache contribute 0.
+    fn working_set_bytes_for(&self, key: &RepoKey) -> u64 {
+        self.blob_owners
+            .iter()
+            .filter(|(_, owners)| owners.contains(key))
+            .filter_map(|(hex, _)| self.entries.get(hex.as_str()).map(|e| e.size))
+            .sum()
+    }
+
+    /// Returns `true` if `candidate_hex` should be skipped by the eviction
+    /// loop because at least one of its owners is within its reservation budget.
+    ///
+    /// A blob is protected when: it has ≥ 1 owner AND that owner has a
+    /// non-zero reservation AND that owner's working-set ≤ reservation.
+    fn is_protected_by_reservation(&self, candidate_hex: &str) -> bool {
+        let owners = match self.blob_owners.get(candidate_hex) {
+            Some(s) if !s.is_empty() => s,
+            _ => return false,
+        };
+        for owner in owners {
+            let reservation = match self.reservations.get(owner) {
+                Some(e) if e.reserved_bytes > 0 => e.reserved_bytes,
+                _ => continue,
+            };
+            if self.working_set_bytes_for(owner) <= reservation {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Run the default-rebalance formula:
+    ///
+    /// ```text
+    /// pool = max_bytes - sum(explicit_reserved_bytes)
+    /// per  = pool / count(default_mounts)   [0 if no default mounts]
+    /// ```
+    ///
+    /// Updates `reserved_bytes` for all entries where `is_explicit_override ==
+    /// false`.  Explicit entries are left unchanged.
+    fn rebalance_default_reservations(&mut self, max_bytes: u64) {
+        let explicit_total: u64 = self
+            .reservations
+            .values()
+            .filter(|e| e.is_explicit_override)
+            .map(|e| e.reserved_bytes)
+            .sum();
+
+        let default_count = self
+            .reservations
+            .values()
+            .filter(|e| !e.is_explicit_override)
+            .count() as u64;
+
+        let per = if default_count == 0 {
+            0
+        } else {
+            max_bytes.saturating_sub(explicit_total) / default_count
+        };
+
+        for entry in self.reservations.values_mut() {
+            if !entry.is_explicit_override {
+                entry.reserved_bytes = per;
+            }
+        }
+    }
 }
 
 pub struct BlobCache {
@@ -159,6 +231,14 @@ impl BlobCache {
     /// Insert `(key, size, algorithm)` into the LRU, then evict entries until
     /// the total is within `max_bytes`. Returns `(key, algorithm)` pairs for
     /// evicted entries; callers must remove the corresponding on-disk files.
+    ///
+    /// **Eviction-skip (B5)**: before evicting a candidate, check whether it
+    /// is protected by a per-repo reservation.  A candidate is protected when
+    /// it has at least one owner whose working-set ≤ that owner's reservation.
+    /// Protected candidates are rotated to the back of the LRU and
+    /// `eviction_blocked_total` is incremented.  If all remaining candidates
+    /// are protected the loop breaks (best-effort overflow: total may exceed
+    /// `max_bytes`).
     fn lru_insert_evict(
         &self,
         key: String,
@@ -174,16 +254,124 @@ impl BlobCache {
             let _ = state.entries.insert(key, CacheEntry { size, algorithm });
             state.total_bytes += size;
             let limit = self.max_bytes.load(Ordering::Relaxed);
+
+            // Consecutive protected-candidate rotations without an eviction.
+            // Once this equals the current LRU length we've seen every entry
+            // and none were evictable — overflow gracefully.
+            let mut rotated: usize = 0;
+
             while state.total_bytes > limit && !state.entries.is_empty() {
-                // TODO(T3b): before evicting, check blob_owners vs
-                // reservations; skip and increment eviction_blocked_total
-                // when the candidate is protected by its repo's reservation.
-                if let Some((k, _, algo)) = state.evict_oldest() {
-                    evicted.push((k, algo));
+                if rotated >= state.entries.len() {
+                    // All remaining entries are reservation-protected; accept
+                    // overflow rather than violating any repo's budget.
+                    break;
+                }
+
+                let candidate_hex = match state.entries.front() {
+                    Some((k, _)) => k.clone(),
+                    None => break,
+                };
+
+                if state.is_protected_by_reservation(&candidate_hex) {
+                    // Rotate to back (move from LRU position to MRU position).
+                    let _ = state.entries.get_refresh(&candidate_hex);
+                    let _ = self.eviction_blocked_total.fetch_add(1, Ordering::Relaxed);
+                    rotated += 1;
+                } else {
+                    // Evict this entry.
+                    if let Some((k, entry)) = state.entries.pop_front() {
+                        state.total_bytes -= entry.size;
+                        // Remove blob from owner-sets so working_set_bytes
+                        // doesn't count an evicted blob for any repo.
+                        let _ = state.blob_owners.remove(&k);
+                        evicted.push((k, entry.algorithm));
+                    }
+                    rotated = 0; // reset: we made progress
                 }
             }
         }
         evicted
+    }
+
+    /// Register an active mount for `key` with an optional explicit reservation.
+    ///
+    /// Pre-seeds blob ownership for every hex in `manifest_hexes` so the
+    /// eviction loop can protect those blobs immediately (before any `put`
+    /// writes them to the cache). Equivalent to calling
+    /// [`BlobCache::add_owner`] for each hex, but batched under a single lock
+    /// acquisition.
+    ///
+    /// **Reservation semantics**:
+    /// - `Some(bytes)` → explicit override: `reserved_bytes = bytes`,
+    ///   `is_explicit_override = true`. Never touched by default rebalance.
+    /// - `None` → default rebalance slot: reservation is computed from the
+    ///   remaining pool after explicit mounts claim their share.
+    /// - If the repo key already has a reservation (refcount ≥ 1), `None`
+    ///   does not override a prior explicit value; `Some(bytes)` always
+    ///   updates the explicit amount.
+    ///
+    /// Default rebalance runs after every call.
+    pub fn register_mount(
+        &self,
+        key: &RepoKey,
+        reservation_bytes: Option<u64>,
+        manifest_hexes: &[String],
+    ) {
+        let max_bytes = self.max_bytes.load(Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+
+        // Pre-seed blob ownership for all manifest digests.
+        for hex in manifest_hexes {
+            let _ = state
+                .blob_owners
+                .entry(hex.clone())
+                .or_default()
+                .insert(key.clone());
+        }
+
+        // Update or create the reservation entry.
+        use std::collections::hash_map::Entry as E;
+        match state.reservations.entry(key.clone()) {
+            E::Occupied(mut o) => {
+                o.get_mut().refcount += 1;
+                if let Some(bytes) = reservation_bytes {
+                    o.get_mut().reserved_bytes = bytes;
+                    o.get_mut().is_explicit_override = true;
+                }
+            }
+            E::Vacant(v) => {
+                let _ = v.insert(ReservationEntry {
+                    reserved_bytes: reservation_bytes.unwrap_or(0),
+                    is_explicit_override: reservation_bytes.is_some(),
+                    refcount: 1,
+                });
+            }
+        }
+
+        state.rebalance_default_reservations(max_bytes);
+    }
+
+    /// Decrement the active-mount refcount for `key`.  When the refcount
+    /// reaches 0 the reservation entry is removed.
+    ///
+    /// Default rebalance runs after every call so the freed slot is
+    /// redistributed to remaining default mounts.
+    pub fn unregister_mount(&self, key: &RepoKey) {
+        let max_bytes = self.max_bytes.load(Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+
+        let remove = if let Some(entry) = state.reservations.get_mut(key) {
+            entry.refcount = entry.refcount.saturating_sub(1);
+            entry.refcount == 0
+        } else {
+            false
+        };
+
+        if remove {
+            let _ = state.reservations.remove(key);
+        }
+
+        state.rebalance_default_reservations(max_bytes);
     }
 
     pub fn contains(&self, digest: &Digest) -> bool {

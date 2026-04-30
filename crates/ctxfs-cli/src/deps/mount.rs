@@ -89,7 +89,10 @@ pub async fn batch_mount(
                         src.clone(),
                         mp_str.clone(),
                         Backend::Nfs,
-                        MountOptions { prefetch },
+                        MountOptions {
+                            prefetch,
+                            cache_reservation_bytes: None,
+                        },
                     )
                     .await
                 {

@@ -82,12 +82,9 @@ pub struct GitHubProvider {
     sha_to_path: std::sync::Mutex<HashMap<String, PathBuf>>,
     /// Per-mount cache view for B5 ownership tracking. `None` when the
     /// provider is constructed without a daemon-supplied `RepoKey` (e.g.,
-    /// integration tests, FSKit shared-cache paths). T3b's tarball commit
-    /// and small-blob commit paths call
+    /// integration tests, FSKit shared-cache paths). The tarball commit
+    /// and lazy-fetch commit paths call
     /// `MountCacheView::record_ownership_after_finalize` when this is `Some`.
-    ///
-    /// Not yet used in T3a (foundation only); wired up in T3b.
-    #[allow(dead_code)]
     mount_cache: Option<Arc<ctxfs_cache::reservation::MountCacheView>>,
 }
 
@@ -303,6 +300,28 @@ impl GitHubProvider {
             sha_to_path: std::sync::Mutex::new(HashMap::new()),
             mount_cache: ctx.mount_cache,
         }
+    }
+
+    /// Returns the SHA-1 hex strings of every blob that was recorded in the
+    /// `sha_to_path` map during the most-recent `fetch_snapshot_inner` call.
+    ///
+    /// Used by the daemon after `fetch_snapshot_with_options` returns to seed
+    /// `BlobCache::register_mount` with the manifest blob-set so reservation
+    /// protection applies from the first eviction cycle onward.
+    ///
+    /// Returns an empty `Vec` if called before any snapshot has been fetched
+    /// (safe no-op for test paths).
+    #[must_use]
+    pub fn snapshot_blob_hexes(&self) -> Vec<String> {
+        self.sha_to_path.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Wire the per-mount cache view for B5 ownership tracking.
+    ///
+    /// Called by the daemon in `prepare_mount` after `register_mount` runs.
+    /// The view is `None` in test contexts that don't supply a `RepoKey`.
+    pub fn set_mount_cache(&mut self, view: Option<Arc<ctxfs_cache::reservation::MountCacheView>>) {
+        self.mount_cache = view;
     }
 
     fn api_url(&self, owner: &str, repo: &str, path: &str) -> String {
@@ -1379,6 +1398,9 @@ impl GitHubProvider {
 
         let cache = Arc::clone(&self.cache);
         let observability = Arc::clone(&self.observability);
+        // Clone mount_cache so the spawn_blocking closure can record ownership
+        // for each committed blob without capturing &self.
+        let mount_cache = self.mount_cache.clone();
         // Hoist counters_for outside the per-entry loop: one DashMap lookup
         // rather than one per entry. Falls through to None when no key set.
         let counters = counter_key
@@ -1501,6 +1523,12 @@ impl GitHubProvider {
                 // Git blob SHA-1 hex; the 40-char hexes from the GitHub Trees API are SHA-1s, not SHA-256s.
                 let digest = Digest::from_sha1_hex(&expected_sha);
                 writer.finalize(&digest)?;
+
+                // Record B5 ownership for this committed blob so the eviction
+                // loop can protect it if the mount has a reservation.
+                if let Some(ref mc) = mount_cache {
+                    mc.record_ownership_after_finalize(&digest);
+                }
 
                 outcome.blobs_committed += 1;
                 outcome.total_bytes += expected_size;
@@ -1810,6 +1838,10 @@ impl Provider for GitHubProvider {
 
         let data = self.fetch_blob_content(&source, &digest.hex).await?;
         self.cache.put(digest, &data)?;
+        // Record B5 ownership so reservation eviction-skip covers lazily-fetched blobs.
+        if let Some(ref mc) = self.mount_cache {
+            mc.record_ownership_after_finalize(digest);
+        }
         Ok(data)
     }
 }
