@@ -583,6 +583,22 @@ pub(crate) fn parse_size_bytes(s: &str) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("size overflows u64: {s}"))
 }
 
+/// Format a byte count as a human-readable string (e.g. "123 B", "4.2 MiB").
+fn format_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if n >= GIB {
+        format!("{:.1} GiB", n as f64 / GIB as f64)
+    } else if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else if n >= KIB {
+        format!("{:.1} KiB", n as f64 / KIB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mount handler
 // ---------------------------------------------------------------------------
@@ -925,6 +941,45 @@ fn print_global_status(report: &ctxfs_ipc::service::StatusReportV1) {
                 println!("    - {p}");
             }
         }
+    }
+
+    // Per-mount cache usage (B5 surface)
+    let mounts_with_cache: Vec<_> = report
+        .mounts
+        .iter()
+        .filter(|m| m.cache_reservation_bytes > 0 || m.working_set_bytes > 0)
+        .collect();
+    if !mounts_with_cache.is_empty() {
+        println!();
+        println!("Per-mount cache usage:");
+        for m in &mounts_with_cache {
+            let reservation = m.cache_reservation_bytes;
+            let used = m.working_set_bytes;
+            let pct = if reservation > 0 {
+                format!("{:.1}%", used as f64 / reservation as f64 * 100.0)
+            } else {
+                "n/a".into()
+            };
+            let over_flag = if reservation > 0 && used > reservation {
+                "  ⚠ OVER RESERVATION"
+            } else {
+                ""
+            };
+            println!(
+                "  {}: {} / {} used ({pct}){over_flag}",
+                m.mount_id,
+                format_bytes(used),
+                format_bytes(reservation),
+            );
+        }
+    }
+
+    if report.cache_eviction_attempts_blocked_by_reservation > 0 {
+        println!();
+        println!(
+            "Cache evictions blocked by reservation: {}",
+            report.cache_eviction_attempts_blocked_by_reservation
+        );
     }
 }
 

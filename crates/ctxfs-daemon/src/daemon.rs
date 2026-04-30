@@ -755,18 +755,39 @@ impl DaemonServer {
     /// Build the full `StatusReportV1` by augmenting observability's
     /// budget+counter view with cache-level details.
     ///
-    /// LFS fields are populated directly from the `CounterSnapshot`
-    /// in `observability.status_report()`. This seam exists for
-    /// future cache-level fields (`working_set_bytes`, `reservation_bytes`,
-    /// `cache_eviction_attempts_blocked_by_reservation`) that the cache
-    /// owns but observability cannot see.
-    ///
-    /// **T3c (B5, not yet):** `working_set_bytes`, `cache_reservation_bytes`,
-    /// and `cache_eviction_attempts_blocked_by_reservation` will be filled
-    /// here with cache lookups keyed by `RepoKey` once T3a/T3b land.
-    fn assemble_status_report(&self) -> ctxfs_ipc::service::StatusReportV1 {
+    /// LFS fields are populated directly from the `CounterSnapshot` in
+    /// `observability.status_report()`. Cache fields (`working_set_bytes`,
+    /// `cache_reservation_bytes`, `cache_eviction_attempts_blocked_by_reservation`)
+    /// require a brief lock on the mounts registry to map `mount_id → RepoKey`,
+    /// then cache lookups outside the lock so no cache call is made while
+    /// the registry lock is held.
+    async fn assemble_status_report(&self) -> ctxfs_ipc::service::StatusReportV1 {
+        // Snapshot mount_id → RepoKey while holding the lock briefly.
+        // Do NOT hold this lock across cache calls.
+        let key_by_mount: HashMap<String, RepoKey> = {
+            let mounts = self.mounts.read().await;
+            mounts
+                .iter()
+                .filter_map(|(id, h)| h.repo_key.as_ref().map(|k| (id.clone(), k.clone())))
+                .collect()
+        };
+
         // Base report: budgets, per-mount counters, LFS fields.
-        self.observability.status_report()
+        let mut report = self.observability.status_report();
+
+        // Augment each MountSummary with cache working-set and reservation.
+        for mount in &mut report.mounts {
+            if let Some(repo_key) = key_by_mount.get(&mount.mount_id) {
+                mount.working_set_bytes = self.cache.working_set_bytes(repo_key);
+                mount.cache_reservation_bytes = self.cache.reservation_bytes(repo_key).unwrap_or(0);
+            }
+        }
+
+        // Cache-global counter: evictions skipped due to active reservations.
+        report.cache_eviction_attempts_blocked_by_reservation =
+            self.cache.eviction_attempts_blocked_by_reservation();
+
+        report
     }
 }
 
@@ -961,7 +982,7 @@ impl CtxfsService for DaemonServer {
         self,
         _: tarpc::context::Context,
     ) -> Result<ctxfs_ipc::service::StatusReportV1, String> {
-        Ok(self.assemble_status_report())
+        Ok(self.assemble_status_report().await)
     }
 }
 
@@ -1393,7 +1414,7 @@ mod tests {
             .record_lfs_pointer_with_path("assets/large-model.bin");
 
         // assemble_status_report should surface the LFS data.
-        let report = server.assemble_status_report();
+        let report = server.assemble_status_report().await;
 
         let mount = report
             .mounts
@@ -1405,5 +1426,66 @@ mod tests {
             mount.lfs_pointer_sample_paths,
             vec!["assets/large-model.bin"]
         );
+    }
+
+    /// T3c: working_set_bytes and cache_reservation_bytes are populated by
+    /// assemble_status_report when a MountHandle carries a RepoKey.
+    #[tokio::test]
+    async fn working_set_and_reservation_appear_in_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        // Register a per-repo cache reservation.
+        let repo_key = RepoKey::new("api.github.com", "owner", "test-repo");
+        let reservation = 500_000u64;
+        server
+            .cache
+            .register_mount(&repo_key, Some(reservation), &[]);
+
+        // Write a blob owned by this repo so working_set_bytes is non-zero.
+        let blob = b"hello t3c";
+        let digest = ctxfs_core::Digest::from_sha1_hex("bbbb000000000000000000000000000000000001");
+        server.cache.put_for(&repo_key, &digest, blob).unwrap();
+
+        // Add an observability counter so a MountSummary appears in the report.
+        let mount_id = "github:owner/test-repo@main";
+        let obs_key = ctxfs_provider_common::counters::CounterKey {
+            source: "github".to_string(),
+            repo: "owner/test-repo".to_string(),
+            commit: "abc123".to_string(),
+            mount_id: mount_id.to_string(),
+        };
+        server
+            .observability
+            .counters_for(obs_key)
+            .record_rest_call();
+
+        // Insert the MountHandle with the RepoKey so assemble_status_report
+        // can map mount_id → RepoKey for cache lookups.
+        {
+            let mut mounts = server.mounts.write().await;
+            let _ = mounts.insert(
+                mount_id.to_string(),
+                MountHandle {
+                    info: make_mount_info(mount_id),
+                    backend: Backend::FsKit,
+                    _nfs: None,
+                    _fskit: None,
+                    repo_key: Some(repo_key.clone()),
+                },
+            );
+        }
+
+        let report = server.assemble_status_report().await;
+
+        let mount = report
+            .mounts
+            .iter()
+            .find(|m| m.mount_id == mount_id)
+            .expect("mount summary present");
+
+        assert_eq!(mount.working_set_bytes, blob.len() as u64);
+        assert_eq!(mount.cache_reservation_bytes, reservation);
+        assert_eq!(report.cache_eviction_attempts_blocked_by_reservation, 0);
     }
 }
