@@ -8,8 +8,8 @@ use ctxfs_core::Digest;
 use ctxfs_manifest::{DirEntry, Directory, DirectoryEntry, FileEntry, Snapshot, SymlinkEntry};
 use ctxfs_provider_common::counters::CounterKey;
 use ctxfs_provider_common::fetcher::{
-    ContentFetcher, ContentKind, ContentRequest, CostEstimate, FetchBatchContext, FetchMode,
-    SlotClaim, TarballKey, TarballSingleflightMap,
+    default_cost_estimate, ContentFetcher, ContentKind, ContentRequest, CostEstimate,
+    FetchBatchContext, FetchMode, SlotClaim, TarballKey, TarballSingleflightMap,
 };
 use ctxfs_provider_common::observability::Observability;
 use ctxfs_provider_common::rate_limit::AuthIdentity;
@@ -953,8 +953,10 @@ impl GitHubProvider {
         // skip the tarball entirely (one lock acquire, cheap).
         let blob_count = requests.len() as u64;
         let estimated_bytes: u64 = requests.iter().filter_map(|r| r.size).sum();
-        let blob_digests: Vec<Digest> = requests.iter().filter_map(|r| r.digest.clone()).collect();
-        if self.cache.contains_all(blob_digests.iter()) {
+        if self
+            .cache
+            .contains_all(requests.iter().filter_map(|r| r.digest.as_ref()))
+        {
             tracing::info!(
                 target: "ctxfs.provider.tarball",
                 blob_count,
@@ -1733,16 +1735,7 @@ impl ContentFetcher for GitHubProvider {
     /// `total_bytes` is `None` when any request has an unknown size — same
     /// fail-closed semantics as the auto-gate's `effective_prefetch_policy`.
     fn estimate_cost(&self, requests: &[ContentRequest]) -> CostEstimate {
-        let total_bytes = if requests.iter().any(|r| r.size.is_none()) {
-            None
-        } else {
-            Some(requests.iter().map(|r| r.size.unwrap_or(0)).sum())
-        };
-        CostEstimate {
-            total_bytes,
-            request_count: requests.len(),
-            fetch_mode: None, // M4 doesn't speculate on mode; M5+ may refine.
-        }
+        default_cost_estimate(requests)
     }
 
     /// Bulk-fetch the given requests via the GitHub tarball endpoint.
@@ -2587,14 +2580,11 @@ mod tests {
     }
 
     // ---- effective_prefetch_policy unit tests ----
-    // The old dispatch function was renamed in M4 and its auto-gate logic was
-    // lifted into fetch_snapshot_inner. Auto-gate correctness is proven by
-    // provider-common::fetcher::tests.
 
-    /// Auto-gate degrades to Lazy (fail-closed) when any blob has unknown size.
+    /// Auto-gate degrades to Disabled (fail-closed) when any blob has unknown size.
     /// Directly exercises `effective_prefetch_policy` — the extracted logic.
     #[test]
-    fn dispatch_policy_degrades_auto_on_unknown_size() {
+    fn effective_prefetch_policy_degrades_auto_on_unknown_size() {
         use ctxfs_provider_common::fetcher::PrefetchPolicy;
         // 31 blobs above the default threshold, but one has size=None.
         let mut entries: Vec<TreeEntry> = (0..30_u32)
@@ -2673,7 +2663,7 @@ mod tests {
         assert!(opts.prefetch_max_bytes > 0, "default max_bytes must be > 0");
     }
 
-    // ---- ContentFetcher impl tests (TDD anchors for Task 3) ----
+    // ---- ContentFetcher impl tests ----
 
     /// `tree_entry_to_request` maps a blob TreeEntry to a ContentRequest.
     #[test]

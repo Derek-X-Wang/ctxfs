@@ -394,7 +394,7 @@ struct MountPrep {
 impl DaemonServer {
     /// Construct a fresh `Arc<GitHubProvider>` for a single mount.
     ///
-    /// **B8 invariant** (M4): every mount must get its own provider Arc.
+    /// **B8 invariant**: every mount must get its own provider Arc.
     /// Sharing a provider across mounts re-introduces the `active_source`
     /// race — each `GitHubProvider` holds per-mount `active_source` and
     /// `counter_key` state that would conflict if shared.

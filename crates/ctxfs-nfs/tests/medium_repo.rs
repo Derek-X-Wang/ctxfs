@@ -15,7 +15,6 @@ use ctxfs_core::provider::Provider;
 use ctxfs_core::source::SourceSpec;
 use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::CtxfsNfs;
-use ctxfs_provider_common::observability::Observability;
 use ctxfs_provider_git::{GitHubProvider, ProviderContext};
 use ctxfs_vfs::VfsState;
 use nfsserve::nfs::{filename3, ftype3, nfsstat3};
@@ -30,14 +29,7 @@ async fn build_fs(owner: &str, repo: &str, git_ref: &str) -> (CtxfsNfs, tempfile
     let dir = tempfile::tempdir().unwrap();
     let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 128 * 1024 * 1024).unwrap());
     let token = std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty());
-    let ctx = ProviderContext {
-        api_host: "api.github.com".to_string(),
-        observability: Arc::new(Observability::new()),
-        cache: cache.clone(),
-        tree_cache: None,
-        shared_tree_cache: None,
-        singleflight: Arc::new(ctxfs_provider_common::fetcher::TarballSingleflightMap::new()),
-    };
+    let ctx = ProviderContext::minimal("api.github.com", cache.clone());
     let provider = Arc::new(GitHubProvider::new(token.as_deref(), ctx));
     let source = SourceSpec::parse(&format!("github:{owner}/{repo}@{git_ref}")).unwrap();
     let snap_bytes = provider.fetch_snapshot(&source).await.unwrap();

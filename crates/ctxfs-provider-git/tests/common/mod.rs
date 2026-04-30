@@ -271,12 +271,9 @@ pub fn make_provider(
     tarball_singleflight: Arc<ctxfs_provider_common::fetcher::TarballSingleflightMap>,
 ) -> ctxfs_provider_git::GitHubProvider {
     let ctx = ctxfs_provider_git::ProviderContext {
-        api_host: server.host.clone(),
         observability,
-        cache,
-        tree_cache: None,
-        shared_tree_cache: None,
         singleflight: tarball_singleflight,
+        ..ctxfs_provider_git::ProviderContext::minimal(server.host.clone(), cache)
     };
     ctxfs_provider_git::GitHubProvider::new_with_codeload_host(
         None,

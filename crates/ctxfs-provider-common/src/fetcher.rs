@@ -92,12 +92,31 @@ pub enum FetchPolicy {
 }
 
 /// Cost-estimate signal a `ContentFetcher` can offer up front. Currently
-/// `total_bytes` and `request_count` are used; remaining fields are reserved.
+/// `total_bytes` and `request_count` are used by the auto-gate.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CostEstimate {
     pub total_bytes: Option<u64>,
     pub request_count: usize,
-    pub fetch_mode: Option<FetchMode>,
+}
+
+/// Default cost-estimate implementation: sums known sizes; returns `None` for
+/// `total_bytes` when any request has an unknown size (fail-closed, same as
+/// `effective_prefetch_policy`).
+///
+/// Intended for providers that have no specialized cost heuristic.
+/// Both [`crate::mock::MockContentFetcher`] and `GitHubProvider` delegate to
+/// this function.
+#[must_use]
+pub fn default_cost_estimate(requests: &[ContentRequest]) -> CostEstimate {
+    let total_bytes = if requests.iter().any(|r| r.size.is_none()) {
+        None
+    } else {
+        Some(requests.iter().filter_map(|r| r.size).sum())
+    };
+    CostEstimate {
+        total_bytes,
+        request_count: requests.len(),
+    }
 }
 
 /// Key for daemon-side singleflight tarball dedupe. Lives in provider-common

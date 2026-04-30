@@ -4,12 +4,15 @@
 //!   hitting a real GitHub API. Used by workload-replay integration tests.
 //! - [`MockContentFetcher`]: trivial [`crate::fetcher::ContentFetcher`] impl
 //!   that returns canned bytes. Proves the trait is implementable from outside
-//!   `provider-git` (M4 spec exit-criterion).
+//!   `provider-git`.
 //!
 //! Lives in `src/` (not `tests/`) so cross-crate test suites can import it.
 
 use crate::counters::CounterKey;
-use crate::fetcher::{ContentFetcher, ContentRequest, CostEstimate, FetchBatchContext, FetchMode};
+use crate::fetcher::{
+    default_cost_estimate, ContentFetcher, ContentRequest, CostEstimate, FetchBatchContext,
+    FetchMode,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -107,7 +110,7 @@ impl MockProvider {
 /// Trivial [`ContentFetcher`] impl for tests. Returns canned bytes for paths
 /// in `canned_bytes`; missing paths produce an empty-map entry per the trait's
 /// best-effort contract. Proves the trait is implementable from outside
-/// `provider-git` (M4 spec exit-criterion).
+/// `provider-git`.
 #[derive(Debug, Default)]
 pub struct MockContentFetcher {
     /// Pre-seeded bytes keyed by mount-relative path.
@@ -117,16 +120,7 @@ pub struct MockContentFetcher {
 #[async_trait::async_trait]
 impl ContentFetcher for MockContentFetcher {
     fn estimate_cost(&self, requests: &[ContentRequest]) -> CostEstimate {
-        let total_bytes: Option<u64> = if requests.iter().any(|r| r.size.is_none()) {
-            None
-        } else {
-            Some(requests.iter().filter_map(|r| r.size).sum())
-        };
-        CostEstimate {
-            total_bytes,
-            request_count: requests.len(),
-            fetch_mode: None,
-        }
+        default_cost_estimate(requests)
     }
 
     async fn fetch_batch(

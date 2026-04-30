@@ -1,8 +1,6 @@
-//! `ProviderContext` collects the daemon-owned `Arc`s and configuration that
+//! `ProviderContext` centralizes the daemon-owned `Arc`s and configuration that
 //! every Phase-4-shaped provider needs, so `GitHubProvider::new` shrinks to
-//! `(token, ctx)`. Replaces the parameter sprawl that emerged across M1–M3
-//! (api host, observability, cache, tree-cache, shared tree-cache,
-//! singleflight registry).
+//! `(token, ctx)`.
 //!
 //! Lives in `ctxfs-provider-git` (not `provider-common`) because
 //! `provider-common` cannot depend on `ctxfs-cache` without inverting the
@@ -53,6 +51,25 @@ impl std::fmt::Debug for ProviderContext {
     }
 }
 
+impl ProviderContext {
+    /// Minimal context for callers that need only a host and a cache. Tree
+    /// caching and singleflight are disabled (each call gets a fresh registry).
+    ///
+    /// Intended for integration tests and one-off CLI callers. Daemon code uses
+    /// the full struct literal so all shared resources are wired up explicitly.
+    #[must_use]
+    pub fn minimal(api_host: impl Into<String>, cache: Arc<BlobCache>) -> Self {
+        Self {
+            api_host: api_host.into(),
+            observability: Arc::new(Observability::new()),
+            cache,
+            tree_cache: None,
+            shared_tree_cache: None,
+            singleflight: Arc::new(TarballSingleflightMap::new()),
+        }
+    }
+}
+
 /// Minimal [`ProviderContext`] for unit tests. Shared across `context`,
 /// `github`, and any other in-crate test module that needs a provider context
 /// without making real network calls.
@@ -69,16 +86,7 @@ pub(crate) fn make_test_provider_context() -> (ProviderContext, tempfile::TempDi
     let dir = tempfile::tempdir().expect("tempdir");
     let cache =
         Arc::new(BlobCache::new(dir.path().to_path_buf(), 1024 * 1024).expect("BlobCache::new"));
-    let observability = Arc::new(Observability::new());
-    let singleflight = Arc::new(TarballSingleflightMap::new());
-    let ctx = ProviderContext {
-        api_host: "api.github.com".to_string(),
-        observability,
-        cache,
-        tree_cache: None,
-        shared_tree_cache: None,
-        singleflight,
-    };
+    let ctx = ProviderContext::minimal("api.github.com", cache);
     (ctx, dir)
 }
 
