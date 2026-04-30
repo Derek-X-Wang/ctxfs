@@ -230,15 +230,34 @@ mod tests {
     #[test]
     fn register_then_unregister_decrements_then_removes_with_rebalance() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
-        let k = key("repo-b");
+        let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 1000).unwrap());
 
-        cache.register_mount(&k, Some(400_000), &[]);
-        assert_eq!(cache.reservation_bytes(&k), Some(400_000));
+        // Single default mount: pool = 1000, count = 1, per = 1000.
+        cache.register_mount(&key("foo"), None, &[]);
+        assert_eq!(cache.reservation_bytes(&key("foo")), Some(1000));
 
-        cache.unregister_mount(&k);
-        // refcount → 0: entry is removed.
-        assert_eq!(cache.reservation_bytes(&k), None);
+        // Second default mount: pool = 1000, count = 2, per = 500.
+        cache.register_mount(&key("bar"), None, &[]);
+        assert_eq!(cache.reservation_bytes(&key("foo")), Some(500));
+        assert_eq!(cache.reservation_bytes(&key("bar")), Some(500));
+
+        // Explicit override: never touched by rebalance.
+        // Defaults split remaining pool: (1000 - 700) / 2 = 150.
+        cache.register_mount(&key("baz"), Some(700), &[]);
+        assert_eq!(cache.reservation_bytes(&key("baz")), Some(700));
+        assert_eq!(cache.reservation_bytes(&key("foo")), Some(150));
+        assert_eq!(cache.reservation_bytes(&key("bar")), Some(150));
+
+        // Unregister explicit: pool = 1000, count = 2, per = 500.
+        cache.unregister_mount(&key("baz"));
+        assert_eq!(cache.reservation_bytes(&key("foo")), Some(500));
+        assert_eq!(cache.reservation_bytes(&key("bar")), Some(500));
+
+        // Final unregisters: refcount → 0, entries removed.
+        cache.unregister_mount(&key("foo"));
+        cache.unregister_mount(&key("bar"));
+        assert!(cache.reservation_bytes(&key("foo")).is_none());
+        assert!(cache.reservation_bytes(&key("bar")).is_none());
     }
 
     /// Two mounts of the same repo share one reservation entry. `unregister_mount`

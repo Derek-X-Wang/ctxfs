@@ -369,6 +369,13 @@ impl BlobCache {
 
         if remove {
             let _ = state.reservations.remove(key);
+            // Drop key from blob_owners so the eviction loop stops protecting
+            // blobs on behalf of this dead repo.  Naturally-unowned blobs may
+            // now be evicted normally.
+            for owners in state.blob_owners.values_mut() {
+                let _ = owners.remove(key);
+            }
+            state.blob_owners.retain(|_, owners| !owners.is_empty());
         }
 
         state.rebalance_default_reservations(max_bytes);
