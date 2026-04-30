@@ -161,8 +161,8 @@ impl Observability {
                     bytes_total: c.counters.bytes_total,
                     prefetch_hits: c.counters.prefetch_hits,
                     cache_hit_ratio,
-                    working_set_bytes: 0, // populated by daemon's assemble_status_report (T3c)
-                    cache_reservation_bytes: 0, // populated by daemon's assemble_status_report (T3c)
+                    working_set_bytes: 0, // populated by daemon's assemble_status_report
+                    cache_reservation_bytes: 0, // populated by daemon's assemble_status_report
                     lfs_pointer_files: c.counters.lfs_pointer_files,
                     lfs_pointer_sample_paths: c.counters.lfs_pointer_sample_paths.clone(),
                 }
@@ -179,7 +179,7 @@ impl Observability {
             budgets,
             counters,
             mounts,
-            cache_eviction_attempts_blocked_by_reservation: 0, // populated by daemon's assemble_status_report (T3c)
+            cache_eviction_attempts_blocked_by_reservation: 0, // populated by daemon's assemble_status_report
         }
     }
 }

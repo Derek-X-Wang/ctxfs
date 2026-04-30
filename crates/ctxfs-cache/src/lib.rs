@@ -32,13 +32,13 @@ struct CacheEntry {
 /// Unified cache state behind a single mutex.
 ///
 /// Holds the LRU entries, per-blob ownership sets, and per-repo reservation
-/// budgets together so the eviction loop (T3b) can consult all three without
+/// budgets together so the eviction loop can consult all three without
 /// a second lock acquisition or a lock-order dance.
 pub(crate) struct CacheState {
     pub(crate) entries: LinkedHashMap<String, CacheEntry>,
     pub(crate) total_bytes: u64,
     /// blob hex → set of repos whose manifest references this blob.
-    /// Pre-populated at manifest time by `register_mount` (T3b); extended
+    /// Pre-populated at manifest time by `register_mount`; extended
     /// by `add_owner` / `put_for` for late-discovered blobs.
     pub(crate) blob_owners: HashMap<String, BTreeSet<RepoKey>>,
     /// Per-repo reservation budgets and active-mount refcounts.
@@ -76,6 +76,9 @@ impl CacheState {
     /// A blob is protected when: it has ≥ 1 owner AND that owner has a
     /// non-zero reservation AND that owner's working-set ≤ reservation.
     fn is_protected_by_reservation(&self, candidate_hex: &str) -> bool {
+        if self.reservations.is_empty() {
+            return false;
+        }
         let owners = match self.blob_owners.get(candidate_hex) {
             Some(s) if !s.is_empty() => s,
             _ => return false,
@@ -135,7 +138,7 @@ pub struct BlobCache {
     state: Mutex<CacheState>,
     /// Cache-global counter: how many LRU eviction candidates were skipped
     /// because evicting them would have violated a per-repo reservation.
-    /// Incremented by the T3b eviction loop; read by T3c status assembly.
+    /// Incremented by the eviction loop; read by the daemon's status assembly.
     eviction_blocked_total: AtomicU64,
 }
 
@@ -549,7 +552,7 @@ impl BlobCache {
 
     /// Record ownership for a single blob hex without writing data.
     ///
-    /// Used by `register_mount` (T3b) to seed manifest membership at
+    /// Used by `register_mount` to seed manifest membership at
     /// snapshot time, and by `MountCacheView::record_ownership_after_finalize`
     /// for the streaming tarball commit path. Idempotent.
     pub fn add_owner(&self, repo_key: &RepoKey, hex: &str) {
@@ -609,21 +612,12 @@ impl BlobCache {
     #[must_use]
     pub fn working_set_bytes(&self, key: &RepoKey) -> u64 {
         let state = self.state.lock().unwrap();
-        let mut total = 0u64;
-        for (hex, owners) in &state.blob_owners {
-            if owners.contains(key) {
-                if let Some(entry) = state.entries.get(hex.as_str()) {
-                    total += entry.size;
-                }
-            }
-        }
-        total
+        state.working_set_bytes_for(key)
     }
 
     /// Cache-global counter: how many times an eviction candidate was skipped
     /// because evicting it would have violated a per-repo reservation.
     ///
-    /// Always returns 0 until T3b lands the reservation-aware eviction loop.
     #[must_use]
     pub fn eviction_attempts_blocked_by_reservation(&self) -> u64 {
         self.eviction_blocked_total.load(Ordering::Relaxed)
@@ -632,7 +626,6 @@ impl BlobCache {
     /// Current reservation budget for `key`, or `None` if `key` has no
     /// active reservation (not yet registered, or already unregistered).
     ///
-    /// Always returns `None` until T3b lands `register_mount`.
     #[must_use]
     pub fn reservation_bytes(&self, key: &RepoKey) -> Option<u64> {
         let state = self.state.lock().unwrap();

@@ -14,8 +14,7 @@ pub struct StatusReportV1 {
     pub counters: Vec<CounterEntry>,
     pub mounts: Vec<MountSummary>,
     /// Cache-global counter: number of LRU-eviction candidates skipped
-    /// because evicting them would have violated a per-repo reservation
-    /// (B5). Populated by daemon's status assembly in T3c.
+    /// because evicting them would have violated a per-repo reservation.
     #[serde(default)]
     pub cache_eviction_attempts_blocked_by_reservation: u64,
 }
@@ -50,10 +49,10 @@ pub struct MountSummary {
     pub prefetch_hits: u64,
     pub cache_hit_ratio: Option<f64>, // None when (cache_hits + cache_misses) == 0
     /// Total bytes currently consumed by this mount's working set in the
-    /// blob cache. Populated in T3c (B5).
+    /// blob cache.
     #[serde(default)]
     pub working_set_bytes: u64,
-    /// Reservation registered for this mount's RepoKey. Populated in T3c (B5).
+    /// Reservation registered for this mount's RepoKey.
     #[serde(default)]
     pub cache_reservation_bytes: u64,
     /// Number of LFS pointer files detected during this mount's fetches.
@@ -96,8 +95,8 @@ mod tests {
         assert!(json.contains("\"schema_version\":1"));
     }
 
-    /// Older v1 JSON without the new additive fields must deserialize cleanly
-    /// with defaults (Codex M5-plan-v1 #10).
+    /// Older v1 JSON without the additive fields must deserialize cleanly
+    /// with defaults (forward-compatibility for old daemon payloads).
     #[test]
     fn additive_fields_default_when_absent() {
         let old_json = r#"{"schema_version":1,"budgets":[],"counters":[],"mounts":[]}"#;

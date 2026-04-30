@@ -924,7 +924,7 @@ fn print_global_status(report: &ctxfs_ipc::service::StatusReportV1) {
         }
     }
 
-    // LFS pointer summary (B6 surface)
+    // LFS pointer summary
     let lfs_total: u64 = report.mounts.iter().map(|m| m.lfs_pointer_files).sum();
     if lfs_total > 0 {
         println!();

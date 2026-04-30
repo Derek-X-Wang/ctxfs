@@ -430,7 +430,6 @@ impl DaemonServer {
             tree_cache: Some(self.tree_cache.clone()),
             shared_tree_cache: self.shared_tree_cache.clone(),
             singleflight: self.tarball_singleflight.clone(),
-            mount_cache: None,
         };
         Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),

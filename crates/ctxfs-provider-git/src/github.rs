@@ -342,7 +342,7 @@ impl GitHubProvider {
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
             sha_to_path: std::sync::Mutex::new(HashMap::new()),
-            mount_cache: ctx.mount_cache,
+            mount_cache: None,
         }
     }
 

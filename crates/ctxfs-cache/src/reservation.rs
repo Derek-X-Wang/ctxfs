@@ -47,7 +47,7 @@ impl RepoKey {
 /// inspect `ReservationEntry` directly.
 #[derive(Debug, Clone)]
 pub(crate) struct ReservationEntry {
-    /// Currently-effective reservation in bytes. T3b's default-rebalance
+    /// Currently-effective reservation in bytes. Default-rebalance
     /// logic adjusts this for non-explicit entries on register/unregister.
     pub(crate) reserved_bytes: u64,
     /// `true` iff the user supplied `--cache-reservation` for this mount;

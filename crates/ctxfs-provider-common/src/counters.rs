@@ -74,9 +74,6 @@ pub struct MountCounters {
     cache_hits: AtomicU64,
     cache_misses: AtomicU64,
     lfs_pointer_files: AtomicU64,
-    /// Cache-global counter forwarded here for IPC snapshot convenience.
-    /// Actual tracking lives in `BlobCache::eviction_blocked_total` (T3b).
-    eviction_attempts_blocked_by_reservation: AtomicU64,
     lfs_samples: LfsSampleBuffer,
 }
 
@@ -96,10 +93,6 @@ pub struct CounterSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub lfs_pointer_files: u64,
-    /// Cache-global eviction-blocked counter carried through the snapshot
-    /// for status assembly. Populated by the daemon in T3c.
-    #[serde(default)]
-    pub eviction_attempts_blocked_by_reservation: u64,
     /// Up to 3 mount-relative paths of detected LFS pointers (B6).
     #[serde(default)]
     pub lfs_pointer_sample_paths: Vec<String>,
@@ -177,14 +170,6 @@ impl MountCounters {
         self.lfs_samples.push(path.to_string());
     }
 
-    /// Record that an LRU eviction candidate was skipped because evicting
-    /// it would have violated a per-repo cache reservation (B5).
-    pub fn record_eviction_blocked_by_reservation(&self) {
-        let _ = self
-            .eviction_attempts_blocked_by_reservation
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Fold all counts from `snap` into this bucket by atomic addition.
     ///
     /// Used by [`crate::observability::Observability::merge_and_drop_placeholder`]
@@ -230,10 +215,6 @@ impl MountCounters {
         let _ = self
             .lfs_pointer_files
             .fetch_add(snap.lfs_pointer_files, Ordering::Relaxed);
-        let _ = self.eviction_attempts_blocked_by_reservation.fetch_add(
-            snap.eviction_attempts_blocked_by_reservation,
-            Ordering::Relaxed,
-        );
         // Merge sample paths up to the cap.
         for path in &snap.lfs_pointer_sample_paths {
             self.lfs_samples.push(path.clone());
@@ -256,9 +237,6 @@ impl MountCounters {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             lfs_pointer_files: self.lfs_pointer_files.load(Ordering::Relaxed),
-            eviction_attempts_blocked_by_reservation: self
-                .eviction_attempts_blocked_by_reservation
-                .load(Ordering::Relaxed),
             lfs_pointer_sample_paths: self.lfs_samples.snapshot(),
         }
     }
