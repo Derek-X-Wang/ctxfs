@@ -1398,4 +1398,21 @@ mod tests {
             "unknown suffix must error"
         );
     }
+
+    #[test]
+    fn parse_size_bytes_rejects_overflow() {
+        // Values that exceed u64::MAX when scaled; checked_mul guards.
+        // overflow threshold for G is ~17_179_869_184; use 18 billion.
+        assert!(parse_size_bytes("18000000000G").is_err());
+        assert!(parse_size_bytes("18000000000GB").is_err());
+    }
+
+    #[test]
+    fn parse_size_bytes_accepts_common_suffixes() {
+        assert_eq!(parse_size_bytes("256MB").unwrap(), 256 * 1_048_576);
+        assert_eq!(parse_size_bytes("1G").unwrap(), 1_073_741_824);
+        assert_eq!(parse_size_bytes("512K").unwrap(), 512 * 1_024);
+        assert_eq!(parse_size_bytes("1024").unwrap(), 1_024);
+        assert_eq!(parse_size_bytes("1024B").unwrap(), 1_024);
+    }
 }

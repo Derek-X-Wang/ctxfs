@@ -394,7 +394,7 @@ struct MountPrep {
     snapshot: ctxfs_manifest::Snapshot,
     /// Optional subpath to re-root the mount at.
     subpath: Option<String>,
-    /// B5 cache-reservation key for this mount. Built from the GitHub host +
+    /// Cache-reservation key for this mount. Built from the GitHub host +
     /// owner/repo extracted from `github_source`. Used by the backends to
     /// store the key in `MountHandle` so `do_unmount_by_id` can call
     /// `unregister_mount` at teardown.
@@ -527,7 +527,7 @@ impl DaemonServer {
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
             .map_err(|e| format!("failed to parse snapshot: {e}"))?;
 
-        // B5: register_mount seeds blob ownership and reservation budget.
+        // register_mount seeds blob ownership and reservation budget.
         // Extract owner/repo from github_source.name ("owner/repo" format).
         let (owner, repo_name) = github_source
             .name
@@ -542,13 +542,13 @@ impl DaemonServer {
         // Wire mount_cache into the provider so tarball + lazy fetch paths
         // call record_ownership_after_finalize for blobs not in the manifest.
         // Arc::get_mut succeeds because provider is the sole Arc clone at this point.
-        if let Some(p) = std::sync::Arc::get_mut(&mut provider) {
-            let view = ctxfs_cache::reservation::MountCacheView::new(
-                std::sync::Arc::clone(&self.cache),
-                repo_key.clone(),
-            );
-            p.set_mount_cache(Some(std::sync::Arc::new(view)));
-        }
+        let view = ctxfs_cache::reservation::MountCacheView::new(
+            std::sync::Arc::clone(&self.cache),
+            repo_key.clone(),
+        );
+        std::sync::Arc::get_mut(&mut provider)
+            .expect("provider Arc must be sole owner here; no clone should exist before daemon wires mount_cache")
+            .set_mount_cache(Some(std::sync::Arc::new(view)));
 
         Ok(MountPrep {
             source_spec: source,
@@ -785,7 +785,7 @@ impl DaemonServer {
             Some(h) => {
                 let volume_path = h.info.volume_path.clone();
 
-                // B5: unregister cache reservation so the slot is returned
+                // Unregister cache reservation so the slot is returned
                 // to the default-rebalance pool and other mounts can grow.
                 if let Some(ref key) = h.repo_key {
                     self.cache.unregister_mount(key);

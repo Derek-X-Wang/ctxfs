@@ -286,7 +286,9 @@ impl BlobCache {
                         let _ = state.blob_owners.remove(&k);
                         evicted.push((k, entry.algorithm));
                     }
-                    rotated = 0; // reset: we made progress
+                    // Reset rotation counter: a successful eviction opens
+                    // room, so the next candidate starts from the front.
+                    rotated = 0;
                 }
             }
         }

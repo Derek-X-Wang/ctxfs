@@ -52,16 +52,10 @@ pub(crate) struct ReservationEntry {
     pub(crate) reserved_bytes: u64,
     /// `true` iff the user supplied `--cache-reservation` for this mount;
     /// such entries are **never** touched by default rebalance.
-    ///
-    /// Not read in T3a; used by T3b's rebalance logic.
-    #[allow(dead_code)]
     pub(crate) is_explicit_override: bool,
     /// Number of currently active mounts for this [`RepoKey`]. Same repo at
     /// two commits means `refcount = 2`; only on `refcount → 0` does the
     /// entry disappear from the reservations table.
-    ///
-    /// Not read in T3a; used by T3b's register/unregister logic.
-    #[allow(dead_code)]
     pub(crate) refcount: u32,
 }
 
@@ -301,5 +295,21 @@ mod tests {
         // is updated once the blob is in the cache.
         cache.put(&d, &[1u8; 50]).unwrap();
         assert_eq!(cache.working_set_bytes(&k), 50);
+    }
+
+    /// When the sum of explicit overrides exceeds cache max, the default
+    /// mounts' share clamps to 0 via `saturating_sub` — no panic, no underflow.
+    #[test]
+    fn over_subscribed_explicit_overrides_clamp_defaults_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(BlobCache::new(dir.path().to_path_buf(), 1000).unwrap());
+
+        cache.register_mount(&key("explicit-a"), Some(800), &[]);
+        cache.register_mount(&key("explicit-b"), Some(700), &[]);
+        cache.register_mount(&key("default-c"), None, &[]);
+
+        assert_eq!(cache.reservation_bytes(&key("explicit-a")), Some(800));
+        assert_eq!(cache.reservation_bytes(&key("explicit-b")), Some(700));
+        assert_eq!(cache.reservation_bytes(&key("default-c")), Some(0));
     }
 }

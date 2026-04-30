@@ -1524,8 +1524,8 @@ impl GitHubProvider {
                 let digest = Digest::from_sha1_hex(&expected_sha);
                 writer.finalize(&digest)?;
 
-                // Record B5 ownership for this committed blob so the eviction
-                // loop can protect it if the mount has a reservation.
+                // Record ownership for the freshly committed tarball blob so
+                // the eviction loop can protect it if the mount has a reservation.
                 if let Some(ref mc) = mount_cache {
                     mc.record_ownership_after_finalize(&digest);
                 }
@@ -1838,7 +1838,7 @@ impl Provider for GitHubProvider {
 
         let data = self.fetch_blob_content(&source, &digest.hex).await?;
         self.cache.put(digest, &data)?;
-        // Record B5 ownership so reservation eviction-skip covers lazily-fetched blobs.
+        // Record ownership so reservation eviction-skip covers lazily-fetched blobs.
         if let Some(ref mc) = self.mount_cache {
             mc.record_ownership_after_finalize(digest);
         }
