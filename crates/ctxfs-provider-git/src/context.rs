@@ -53,25 +53,34 @@ impl std::fmt::Debug for ProviderContext {
     }
 }
 
+/// Minimal [`ProviderContext`] for unit tests. Shared across `context`,
+/// `github`, and any other in-crate test module that needs a provider context
+/// without making real network calls.
+///
+/// Exposed as `pub(crate)` so sibling modules (e.g. `github::tests`) can call
+/// `crate::context::make_test_provider_context()` instead of duplicating the
+/// construction.
+#[cfg(test)]
+pub(crate) fn make_test_provider_context() -> ProviderContext {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = Arc::new(BlobCache::new(dir.keep(), 1024 * 1024).expect("BlobCache::new"));
+    let observability = Arc::new(Observability::new());
+    let singleflight = Arc::new(TarballSingleflightMap::new());
+    ProviderContext {
+        api_host: "api.github.com".to_string(),
+        observability,
+        cache,
+        tree_cache: None,
+        shared_tree_cache: None,
+        singleflight,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-
-    fn make_test_provider_context() -> ProviderContext {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cache = Arc::new(BlobCache::new(dir.keep(), 1024 * 1024).expect("BlobCache::new"));
-        let observability = Arc::new(Observability::new());
-        let singleflight = Arc::new(TarballSingleflightMap::new());
-        ProviderContext {
-            api_host: "api.github.com".to_string(),
-            observability,
-            cache,
-            tree_cache: None,
-            shared_tree_cache: None,
-            singleflight,
-        }
-    }
 
     #[test]
     fn provider_context_clones_arcs_correctly() {
@@ -88,6 +97,7 @@ mod tests {
         let dbg = format!("{ctx:?}");
         assert!(dbg.contains("api_host"));
         assert!(dbg.contains("<Arc<Observability>>"));
+        assert!(dbg.contains("<Arc<BlobCache>>"));
         assert!(dbg.contains("singleflight_len"));
         // Sanity: no token stored on ProviderContext (tokens live on GitHubProvider)
         assert!(

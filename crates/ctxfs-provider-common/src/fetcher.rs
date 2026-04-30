@@ -10,7 +10,9 @@
 //! implementing it.
 
 use crate::counters::CounterKey;
+use ctxfs_core::source::SourceSpec;
 use ctxfs_core::Digest;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -179,7 +181,7 @@ impl SlotClaim {
 pub struct FetchBatchContext {
     /// The source being fetched. Provider-specific fields like `name`
     /// (`owner/repo` for GitHub) are interpreted by the provider.
-    pub source: ctxfs_core::source::SourceSpec,
+    pub source: SourceSpec,
     /// Resolved upstream revision (e.g., 40-char Git commit SHA for GitHub;
     /// version string for npm/PyPI/crates.io). Always concrete, never a ref.
     pub resolved_revision: String,
@@ -216,7 +218,7 @@ pub trait ContentFetcher: Send + Sync {
         requests: &[ContentRequest],
         mode: FetchMode,
         counter_key: Option<CounterKey>,
-    ) -> Result<std::collections::HashMap<PathBuf, Vec<u8>>, ctxfs_core::error::CtxfsError>;
+    ) -> Result<HashMap<PathBuf, Vec<u8>>, ctxfs_core::error::CtxfsError>;
 }
 
 /// Pure auto-gate: given a count + estimated bytes + the user's policy + the

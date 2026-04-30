@@ -1723,26 +1723,9 @@ mod tests {
         SourceSpec::parse("github:test/repo@main").unwrap()
     }
 
-    /// Construct an empty singleflight registry for tests that don't exercise
-    /// the dedupe path.
-    fn make_singleflight() -> std::sync::Arc<ctxfs_provider_common::fetcher::TarballSingleflightMap>
-    {
-        std::sync::Arc::new(dashmap::DashMap::new())
-    }
-
-    /// Construct a minimal `ProviderContext` for unit tests.
-    fn make_test_provider_context() -> crate::context::ProviderContext {
-        let cache_dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(ctxfs_cache::BlobCache::new(cache_dir.keep(), 1024 * 1024).unwrap());
-        crate::context::ProviderContext {
-            api_host: "api.github.com".to_string(),
-            observability: Arc::new(Observability::new()),
-            cache,
-            tree_cache: None,
-            shared_tree_cache: None,
-            singleflight: make_singleflight(),
-        }
-    }
+    // Re-use the shared test helper from the context module rather than
+    // duplicating construction here.
+    use crate::context::make_test_provider_context;
 
     /// TDD anchor: the new 2-arg constructor compiles (test fails before impl).
     #[test]
