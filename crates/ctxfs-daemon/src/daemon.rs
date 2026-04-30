@@ -549,8 +549,18 @@ impl DaemonServer {
                 format!("failed to fetch snapshot: {e}")
             })?;
 
-        let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
-            .map_err(|e| format!("failed to parse snapshot: {e}"))?;
+        let snapshot: Snapshot = match serde_json::from_slice(&snapshot_data) {
+            Ok(s) => s,
+            Err(e) => {
+                // Roll back the pre-registered reservation slot — mirrors the
+                // fetch-error path above. Pathological in production (the data
+                // is the provider's own serde_json output), but keeps the error
+                // paths symmetric so no dangling reservation is left on any
+                // prepare_mount failure.
+                self.cache.unregister_mount(&repo_key);
+                return Err(format!("failed to parse snapshot: {e}"));
+            }
+        };
 
         // Seed blob ownership now that the manifest is known.
         let blob_hexes = provider.snapshot_blob_hexes();
@@ -1427,7 +1437,7 @@ mod tests {
         );
     }
 
-    /// B6: recording an LFS pointer on a per-mount counter makes it visible
+    /// Recording an LFS pointer on a per-mount counter makes it visible
     /// in the `StatusReportV1` produced by `assemble_status_report`.
     #[tokio::test]
     async fn lfs_pointer_count_appears_in_status() {

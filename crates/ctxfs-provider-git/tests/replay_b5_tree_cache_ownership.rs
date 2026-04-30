@@ -24,7 +24,10 @@ use ctxfs_core::source::SourceSpec;
 use ctxfs_provider_common::fetcher::{PrefetchPolicy, TarballSingleflightMap};
 use ctxfs_provider_common::observability::Observability;
 use ctxfs_provider_git::{FetchOptions, GitHubProvider, ProviderContext};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tempfile::tempdir;
 
 const OWNER: &str = "org-tc";
@@ -75,6 +78,13 @@ async fn tree_cache_hit_populates_sha_to_path_for_register_mount() {
         .collect();
     let tarball = build_codeload_tarball(WRAPPER, &tarball_files);
 
+    // Hit counters for the two network-expensive routes. We assert after
+    // provider2's fetch that neither counter advanced — proving provider2
+    // actually took the tree-cache-hit path and that `collect_snapshot_blob_hexes`
+    // (not the normal post-fetch population) is what filled `sha_to_path`.
+    let tree_hit_count = Arc::new(AtomicU64::new(0));
+    let tarball_hit_count = Arc::new(AtomicU64::new(0));
+
     // Mock server: commit + tree + tarball.
     // Commit route is hit twice (once per provider instance for ref resolution).
     // Tree and tarball routes are hit only once (second fetch uses tree cache).
@@ -94,7 +104,7 @@ async fn tree_cache_hit_populates_sha_to_path_for_register_mount() {
             status: 200,
             headers: vec![("Content-Type", "application/json".to_string())],
             body: tree_json(TREE_SHA, &tree_entries, false),
-            hit_count: None,
+            hit_count: Some(tree_hit_count.clone()),
             delay_ms: None,
         },
         MockRoute {
@@ -106,7 +116,7 @@ async fn tree_cache_hit_populates_sha_to_path_for_register_mount() {
                 ("Content-Encoding", "gzip".to_string()),
             ],
             body: tarball,
-            hit_count: None,
+            hit_count: Some(tarball_hit_count.clone()),
             delay_ms: None,
         },
     ])
@@ -147,6 +157,11 @@ async fn tree_cache_hit_populates_sha_to_path_for_register_mount() {
 
     // ── Provider 2: new instance; sha_to_path starts empty ───────────────────
     // The tree cache was populated by provider1; this fetch should hit it.
+    // Snapshot route hit-counts before provider2 runs; assert neither moves
+    // after — that proves provider2 took the cached path, not the network path.
+    let tree_hits_before_p2 = tree_hit_count.load(Ordering::Relaxed);
+    let tarball_hits_before_p2 = tarball_hit_count.load(Ordering::Relaxed);
+
     let obs2 = Arc::new(Observability::new());
     let provider2 =
         make_provider_with_tree_cache(&server, cache.clone(), tree_cache.clone(), obs2, sf.clone());
@@ -154,6 +169,17 @@ async fn tree_cache_hit_populates_sha_to_path_for_register_mount() {
         .fetch_snapshot_with_options(&source, &opts)
         .await
         .expect("second fetch (tree-cache hit) must succeed");
+
+    assert_eq!(
+        tree_hit_count.load(Ordering::Relaxed),
+        tree_hits_before_p2,
+        "provider2 must not fetch the tree from the network (tree-cache hit expected)"
+    );
+    assert_eq!(
+        tarball_hit_count.load(Ordering::Relaxed),
+        tarball_hits_before_p2,
+        "provider2 must not fetch the tarball from the network (tree-cache hit expected)"
+    );
 
     let hexes2 = provider2.snapshot_blob_hexes();
     assert_eq!(
