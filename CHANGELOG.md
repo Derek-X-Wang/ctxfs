@@ -1,3 +1,48 @@
+## v0.1.5-m5 — 2026-04-30 (Phase 4 M5)
+
+**Closed bugs:**
+- **B3-label**: GitHub blob digests now correctly carry `HashAlgorithm::Sha1`.
+  `CacheEntry` tracks the on-disk algorithm so eviction always deletes the
+  correct fan-out path. `rebuild_index` walks `sha1/` + `sha256/` and
+  dedupes by hex (sha1 wins). `TreeCache` schema bumps 2 → 3, invalidating
+  v2 manifests with mislabeled digests so they refetch correctly.
+- **B5**: per-repo cache reservation in `ctxfs-cache`. Manifest-time
+  ownership: each mount's `register_mount` seeds owner-sets for every
+  blob the manifest references. Default reservation is
+  `(cache_max - sum(explicit overrides)) / count(default mounts)`,
+  rebalanced on register/unregister. `--cache-reservation` per-mount
+  override flows through IPC `MountOptions.cache_reservation_bytes`.
+  Eviction skips blobs whose eviction would drop a protected repo's
+  working-set below its reservation (cache-global counter
+  `eviction_attempts_blocked_by_reservation`); best-effort overflow when
+  the entire LRU is reservation-protected. `ctxfs status` reports per-mount
+  working-set vs reservation and the cache-global blocked counter.
+- **B6**: LFS pointer files detected at fetch time. Manual 3-line parser
+  in `provider-common::lfs` (no regex dep). Two detection sites in
+  `provider-git`: `fetch_blob_content` (covers lazy + small-blob prefetch)
+  and `fetch_tarball_into_cache` (extends the existing local Tee with an
+  optional peek buffer for small entries). Detection increments
+  `lfs_pointer_files` and pushes the mount-relative path into a 3-deep
+  sample buffer; `ctxfs status` shows count + sample paths under an
+  "LFS pointer files (Phase 5: smudge)" section. Pointer bytes are
+  cached verbatim.
+
+**Schema:**
+- `TreeCache::SCHEMA_VERSION` 2 → 3 (B3-label corrects digest labels).
+- `StatusReportV1` and `MountSummary` gain additive fields, all
+  `#[serde(default)]` so older v1 payloads deserialize cleanly.
+
+**Carry-forwards landed before milestone:**
+- `default_cost_estimate` direct unit test (provider-common).
+- `env_var_*` test race in `ctxfs-cli/backend` fixed via inner-fn refactor;
+  tests no longer touch process-global state.
+
+**Status:** Phase 4 code work complete. M6 follow-up is a decision memo
+(`docs/phase5-stage2-decision.md`) drafted after 2–4 weeks of M5 telemetry
+from real use.
+
+---
+
 ## v0.1.4-m4 — 2026-04-29
 
 ### Phase 4 M4: ContentFetcher full lift + ProviderContext refactor
