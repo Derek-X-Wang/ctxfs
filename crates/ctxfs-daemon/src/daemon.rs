@@ -92,6 +92,15 @@ struct MountHandle {
     /// `RepoKey` (should not occur in production but guarded defensively).
     /// Used by `do_unmount_by_id` to call `BlobCache::unregister_mount`.
     repo_key: Option<RepoKey>,
+    /// The `mount_id` used in `CounterKey` for this mount.
+    ///
+    /// For GitHub sources this equals the mounts-registry key
+    /// (`source_spec.id()`). For registry-resolved sources (npm, PyPI,
+    /// crates.io) the provider uses `github_source.id()` as the counter key
+    /// while the registry uses `source_spec.id()`. Storing both lets
+    /// `assemble_status_report` join on the counter key without needing to
+    /// resolve the original source again.
+    counter_mount_id: String,
 }
 
 pub struct Daemon {
@@ -421,8 +430,6 @@ impl DaemonServer {
             tree_cache: Some(self.tree_cache.clone()),
             shared_tree_cache: self.shared_tree_cache.clone(),
             singleflight: self.tarball_singleflight.clone(),
-            // T3b: wired to a real RepoKey + MountCacheView after register_mount
-            // ships; None here keeps T3a foundation from affecting live behavior.
             mount_cache: None,
         };
         Arc::new(GitHubProvider::new(
@@ -511,6 +518,20 @@ impl DaemonServer {
             subpath: subpath.clone(),
         };
 
+        // Build repo_key before the fetch so the reservation slot is in place
+        // before tarball hydration starts — existing mounts rebalance correctly
+        // rather than having their default share compressed mid-hydration.
+        let (gh_owner, gh_repo) = github_source
+            .name
+            .split_once('/')
+            .ok_or_else(|| format!("invalid github source name: {}", github_source.name))?;
+        let repo_key = RepoKey::new(&self.config.github_host, gh_owner, gh_repo);
+
+        // Pre-register with empty manifest: reservation in place, ownership
+        // seeded post-fetch via add_owners once the manifest is known.
+        self.cache
+            .register_mount(&repo_key, options.cache_reservation_bytes, &[]);
+
         let mut provider = self.build_github_provider_for_mount();
 
         let fetch_options = FetchOptions {
@@ -522,22 +543,19 @@ impl DaemonServer {
         let snapshot_data = self
             .rt_handle
             .block_on(provider.fetch_snapshot_with_options(&github_source, &fetch_options))
-            .map_err(|e| format!("failed to fetch snapshot: {e}"))?;
+            .map_err(|e| {
+                // Roll back the pre-registration so no dangling reservation
+                // entry is left if the fetch fails.
+                self.cache.unregister_mount(&repo_key);
+                format!("failed to fetch snapshot: {e}")
+            })?;
 
         let snapshot: Snapshot = serde_json::from_slice(&snapshot_data)
             .map_err(|e| format!("failed to parse snapshot: {e}"))?;
 
-        // register_mount seeds blob ownership and reservation budget.
-        // Extract owner/repo from github_source.name ("owner/repo" format).
-        let (owner, repo_name) = github_source
-            .name
-            .split_once('/')
-            .ok_or_else(|| format!("invalid github source name: {}", github_source.name))?;
-        let repo_key = RepoKey::new(&self.config.github_host, owner, repo_name);
-
+        // Seed blob ownership now that the manifest is known.
         let blob_hexes = provider.snapshot_blob_hexes();
-        self.cache
-            .register_mount(&repo_key, options.cache_reservation_bytes, &blob_hexes);
+        self.cache.add_owners(&repo_key, &blob_hexes);
 
         // Wire mount_cache into the provider so tarball + lazy fetch paths
         // call record_ownership_after_finalize for blobs not in the manifest.
@@ -655,6 +673,7 @@ impl DaemonServer {
             _nfs: None,
             _fskit: Some(fskit_handle),
             repo_key: Some(prep.repo_key),
+            counter_mount_id: prep.github_source.id(),
         };
 
         self.rt_handle.block_on(async {
@@ -700,6 +719,8 @@ impl DaemonServer {
 
         let id = prep.source_spec.id();
         let commit_sha = prep.snapshot.commit_sha.clone();
+        // Capture before github_source is moved into CtxfsNfs.
+        let counter_mount_id = prep.github_source.id();
 
         let port = pick_free_port()?;
         let addr = format!("127.0.0.1:{port}");
@@ -743,6 +764,7 @@ impl DaemonServer {
             _nfs: Some(nfs_handle),
             _fskit: None,
             repo_key: Some(prep.repo_key),
+            counter_mount_id,
         };
 
         self.rt_handle.block_on(async {
@@ -762,13 +784,23 @@ impl DaemonServer {
     /// then cache lookups outside the lock so no cache call is made while
     /// the registry lock is held.
     async fn assemble_status_report(&self) -> ctxfs_ipc::service::StatusReportV1 {
-        // Snapshot mount_id → RepoKey while holding the lock briefly.
+        // Snapshot counter_mount_id → RepoKey while holding the lock briefly.
         // Do NOT hold this lock across cache calls.
+        //
+        // Key by `counter_mount_id` (= github_source.id()) rather than the
+        // mounts-registry key (= source_spec.id()) so the lookup succeeds for
+        // registry-resolved mounts (npm/PyPI/crates.io) where the two IDs
+        // differ: the provider's CounterKey.mount_id uses github_source.id(),
+        // but the mounts registry is keyed by the original source_spec.id().
         let key_by_mount: HashMap<String, RepoKey> = {
             let mounts = self.mounts.read().await;
             mounts
-                .iter()
-                .filter_map(|(id, h)| h.repo_key.as_ref().map(|k| (id.clone(), k.clone())))
+                .values()
+                .filter_map(|h| {
+                    h.repo_key
+                        .as_ref()
+                        .map(|k| (h.counter_mount_id.clone(), k.clone()))
+                })
                 .collect()
         };
 
@@ -1126,6 +1158,7 @@ mod tests {
                     _nfs: None,
                     _fskit: None, // No real FSKit session in unit test.
                     repo_key: None,
+                    counter_mount_id: mount_id.to_string(),
                 },
             );
         }
@@ -1254,6 +1287,7 @@ mod tests {
                     _nfs: None,
                     _fskit: None,
                     repo_key: None,
+                    counter_mount_id: mount_id.to_string(),
                 },
             );
         }
@@ -1472,6 +1506,7 @@ mod tests {
                     _nfs: None,
                     _fskit: None,
                     repo_key: Some(repo_key.clone()),
+                    counter_mount_id: mount_id.to_string(),
                 },
             );
         }

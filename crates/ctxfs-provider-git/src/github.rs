@@ -202,6 +202,50 @@ fn owner_repo(source: &SourceSpec) -> Result<(&str, &str), CtxfsError> {
     })
 }
 
+/// Walk the cached directory tree rooted at `root_digest`, reconstructing
+/// mount-relative paths. Returns a `sha1_hex → path` map.
+///
+/// Called on tree-cache hits so `snapshot_blob_hexes()` returns the correct
+/// blob set for `BlobCache::register_mount`/`add_owners` even when
+/// `fetch_snapshot_inner` returns early without reaching step 5b.
+///
+/// Directories missing from the blob cache (e.g. after a `cache prune`) are
+/// silently skipped — the resulting map may be incomplete. The mount still
+/// serves correctly via lazy fetches; the next full fetch repopulates.
+fn collect_snapshot_blob_hexes(
+    cache: &BlobCache,
+    root_digest: &Digest,
+) -> HashMap<String, PathBuf> {
+    let mut out = HashMap::new();
+    collect_blob_hexes_recursive(cache, root_digest, PathBuf::new(), &mut out);
+    out
+}
+
+fn collect_blob_hexes_recursive(
+    cache: &BlobCache,
+    dir_digest: &Digest,
+    prefix: PathBuf,
+    out: &mut HashMap<String, PathBuf>,
+) {
+    let Some(dir_bytes) = cache.get(dir_digest) else {
+        return;
+    };
+    let Ok(dir) = serde_json::from_slice::<Directory>(&dir_bytes) else {
+        return;
+    };
+    for entry in &dir.entries {
+        match entry {
+            DirEntry::File(f) => {
+                let _ = out.insert(f.digest.hex.clone(), prefix.join(&f.name));
+            }
+            DirEntry::Directory(d) => {
+                collect_blob_hexes_recursive(cache, &d.digest, prefix.join(&d.name), out);
+            }
+            DirEntry::Symlink(_) => {}
+        }
+    }
+}
+
 /// Per-mount fetch options passed to [`GitHubProvider::fetch_snapshot_with_options`].
 ///
 /// The existing [`ctxfs_core::provider::Provider::fetch_snapshot`] trait method
@@ -1633,6 +1677,15 @@ impl GitHubProvider {
             if let Some(ref tc) = self.tree_cache {
                 if let Some(data) = tc.get(owner, repo, &commit_sha) {
                     debug!("tree cache HIT for {owner}/{repo}@{commit_sha}");
+                    // Populate sha_to_path so snapshot_blob_hexes() returns the
+                    // correct manifest for register_mount on this provider instance.
+                    // A new provider instance has an empty sha_to_path; without this
+                    // walk, register_mount would receive empty manifest_digests and
+                    // B5 reservation protection would silently not apply on remounts.
+                    if let Ok(snap) = serde_json::from_slice::<Snapshot>(&data) {
+                        *self.sha_to_path.lock().unwrap() =
+                            collect_snapshot_blob_hexes(&self.cache, &snap.root_directory);
+                    }
                     return Ok(data);
                 }
             }
@@ -1644,6 +1697,11 @@ impl GitHubProvider {
                     // Populate local cache
                     if let Some(ref tc) = self.tree_cache {
                         let _ = tc.put(owner, repo, &commit_sha, &data);
+                    }
+                    // Same sha_to_path population as the local-cache hit above.
+                    if let Ok(snap) = serde_json::from_slice::<Snapshot>(&data) {
+                        *self.sha_to_path.lock().unwrap() =
+                            collect_snapshot_blob_hexes(&self.cache, &snap.root_directory);
                     }
                     return Ok(data);
                 }

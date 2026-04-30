@@ -961,7 +961,7 @@ fn print_global_status(report: &ctxfs_ipc::service::StatusReportV1) {
                 "n/a".into()
             };
             let over_flag = if reservation > 0 && used > reservation {
-                "  ⚠ OVER RESERVATION"
+                "  ! OVER RESERVATION"
             } else {
                 ""
             };

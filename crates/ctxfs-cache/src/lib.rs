@@ -561,6 +561,26 @@ impl BlobCache {
             .insert(repo_key.clone());
     }
 
+    /// Seed ownership for a batch of blob hexes in a single lock acquisition.
+    ///
+    /// Called by the daemon in `prepare_mount` after the snapshot has been
+    /// fetched, to seed manifest membership for blobs returned by
+    /// `snapshot_blob_hexes`. Idempotent — calling twice for the same
+    /// `(key, hex)` pair is safe.
+    pub fn add_owners(&self, key: &RepoKey, hexes: &[String]) {
+        if hexes.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        for hex in hexes {
+            let _ = state
+                .blob_owners
+                .entry(hex.clone())
+                .or_default()
+                .insert(key.clone());
+        }
+    }
+
     /// Put a blob and record `repo_key` as an owner.
     ///
     /// Ownership is recorded *after* the write; the eviction loop can
