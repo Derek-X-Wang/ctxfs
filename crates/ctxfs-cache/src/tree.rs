@@ -13,10 +13,15 @@ use tracing::warn;
 ///   path and serve broken manifests.
 /// - v2: M2 — `FileEntry::inline_content` populated for ≤4 KB blobs and
 ///   `SymlinkEntry::target` decoded from prefetched bytes.
+/// - v3: M5 — Git blob digests now carry `HashAlgorithm::Sha1` instead of
+///   being mislabeled `HashAlgorithm::Sha256`. Older v2 manifests would
+///   round-trip the wrong algorithm tag and confuse callers that key by
+///   `digest.algorithm`. Bump invalidates them; first read after upgrade
+///   refetches with correct labels.
 ///
 /// Public so the redis-backed [`crate::SharedTreeCache`] implementation can
 /// share one source of truth for the version envelope.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub struct TreeCache {

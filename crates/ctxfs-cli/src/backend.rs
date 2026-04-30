@@ -114,7 +114,8 @@ mod tests {
     #[test]
     fn env_var_invalid_falls_through_to_config() {
         // Invalid env value is ignored; config default should win.
-        let result = detect_backend_inner(None, Some(Backend::FsKit), Some("invalid_backend_value"));
+        let result =
+            detect_backend_inner(None, Some(Backend::FsKit), Some("invalid_backend_value"));
         assert_eq!(result, Backend::FsKit);
     }
 

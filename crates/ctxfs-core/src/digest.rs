@@ -7,12 +7,14 @@ use std::path::PathBuf;
 #[serde(rename_all = "lowercase")]
 pub enum HashAlgorithm {
     Sha256,
+    Sha1,
 }
 
 impl fmt::Display for HashAlgorithm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HashAlgorithm::Sha256 => write!(f, "sha256"),
+            HashAlgorithm::Sha1 => write!(f, "sha1"),
         }
     }
 }
@@ -38,6 +40,17 @@ impl Digest {
     pub fn from_sha256_hex(hex_str: impl Into<String>) -> Self {
         Self {
             algorithm: HashAlgorithm::Sha256,
+            hex: hex_str.into(),
+        }
+    }
+
+    /// Construct a Digest from an existing SHA-1 hex string. The 40-char
+    /// hexes returned by the GitHub Trees API are Git blob SHA-1s; this
+    /// constructor labels them correctly so future readers don't conclude
+    /// the cache stores SHA-256 content.
+    pub fn from_sha1_hex(hex_str: impl Into<String>) -> Self {
+        Self {
+            algorithm: HashAlgorithm::Sha1,
             hex: hex_str.into(),
         }
     }
@@ -137,5 +150,36 @@ mod tests {
         let d1 = Digest::sha256(b"input1");
         let d2 = Digest::sha256(b"input2");
         assert_ne!(d1.hex, d2.hex);
+    }
+
+    #[test]
+    fn from_sha1_hex_roundtrip() {
+        let git_blob_sha1 = "356a192b7913b04c54574d18c28d46e6395428ab";
+        let d = Digest::from_sha1_hex(git_blob_sha1);
+        assert_eq!(d.algorithm, HashAlgorithm::Sha1);
+        assert_eq!(d.hex, git_blob_sha1);
+    }
+
+    #[test]
+    fn sha1_to_path_uses_sha1_subdir() {
+        let d = Digest::from_sha1_hex("356a192b7913b04c54574d18c28d46e6395428ab");
+        assert_eq!(
+            d.to_path().to_str().unwrap(),
+            "sha1/35/6a192b7913b04c54574d18c28d46e6395428ab"
+        );
+    }
+
+    #[test]
+    fn hash_algorithm_sha1_display() {
+        assert_eq!(HashAlgorithm::Sha1.to_string(), "sha1");
+    }
+
+    #[test]
+    fn sha1_serde_roundtrip() {
+        let d = Digest::from_sha1_hex("aabbccdd00112233445566778899aabbccddeeff");
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: Digest = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2, d);
+        assert_eq!(d2.algorithm, HashAlgorithm::Sha1);
     }
 }

@@ -1,7 +1,7 @@
 //! Integration test: `BlobCache` lifecycle across simulated restarts,
 //! concurrent access patterns, and edge cases.
 
-use ctxfs_cache::BlobCache;
+use ctxfs_cache::{BlobCache, TreeCache, SCHEMA_VERSION};
 use ctxfs_core::Digest;
 use std::sync::Arc;
 use std::thread;
@@ -338,4 +338,31 @@ fn large_blob_stored_and_retrieved() {
     let retrieved = cache.get(&d).unwrap();
     assert_eq!(retrieved.len(), large_data.len());
     assert_eq!(retrieved, large_data);
+}
+
+/// Regression: M5 bumped SCHEMA_VERSION from 2 to 3 to invalidate cached
+/// snapshots whose manifests carry mislabeled HashAlgorithm::Sha256 for Git
+/// blob digests. A v2 cache file must be treated as a miss after the upgrade.
+#[test]
+fn pre_m5_v2_tree_cache_file_is_invalidated() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TreeCache::new(dir.path(), 1024 * 1024);
+
+    // Construct the path manually (mirrors TreeCache::file_path convention:
+    // {root}/{owner}/{repo}/{commit_sha}.json).
+    let path = dir.path().join("owner").join("repo").join("deadbeef.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v2 = serde_json::json!({
+        "version": 2,
+        "data": {"snapshot": "mislabeled-sha256-digests"}
+    });
+    std::fs::write(&path, serde_json::to_vec(&v2).unwrap()).unwrap();
+
+    // The current SCHEMA_VERSION is 3; a v2 file must be a cache miss.
+    assert_eq!(SCHEMA_VERSION, 3, "test assumes SCHEMA_VERSION == 3");
+    assert!(
+        cache.get("owner", "repo", "deadbeef").is_none(),
+        "v2 tree-cache file must be treated as miss after M5 schema bump"
+    );
+    assert!(!path.exists(), "stale v2 file should be removed on read");
 }

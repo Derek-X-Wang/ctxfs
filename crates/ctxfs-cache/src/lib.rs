@@ -7,17 +7,22 @@ pub use tree::{TreeCache, SCHEMA_VERSION};
 mod shared;
 pub use shared::SharedTreeCache;
 
+use ctxfs_core::digest::HashAlgorithm;
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Entry in the LRU tracking state.
+/// Entry in the LRU tracking state. Tracks both size and on-disk algorithm
+/// so eviction can delete the file from the correct fan-out subdir (`sha1/`
+/// or `sha256/`) without re-examining the caller's digest.
 struct CacheEntry {
     size: u64,
+    algorithm: HashAlgorithm,
 }
 
 struct LruState {
@@ -26,13 +31,13 @@ struct LruState {
 }
 
 impl LruState {
-    /// Returns the `(key, size)` of the evicted entry, or `None` if the LRU
-    /// was already empty. Does NOT remove the on-disk file; callers must do
-    /// that themselves.
-    fn evict_oldest(&mut self) -> Option<(String, u64)> {
+    /// Returns the `(key, size, algorithm)` of the evicted entry, or `None`
+    /// if the LRU was already empty. Does NOT remove the on-disk file;
+    /// callers must do that themselves.
+    fn evict_oldest(&mut self) -> Option<(String, u64, HashAlgorithm)> {
         self.entries.pop_front().map(|(key, entry)| {
             self.total_bytes -= entry.size;
-            (key, entry.size)
+            (key, entry.size, entry.algorithm)
         })
     }
 }
@@ -76,22 +81,37 @@ impl BlobCache {
     }
 
     /// Remove the on-disk blob file for the given hex key.
-    fn remove_blob_file(&self, hex: &str) {
-        let digest = Digest::from_sha256_hex(hex);
+    /// Uses the on-disk algorithm so the file is found in the correct
+    /// fan-out subdir (`sha1/` or `sha256/`).
+    fn remove_blob_file(&self, hex: &str, algorithm: HashAlgorithm) {
+        let digest = Digest {
+            algorithm,
+            hex: hex.to_string(),
+        };
         let path = self.blob_path(&digest);
         let _ = fs::remove_file(path);
     }
 
     pub fn get(&self, digest: &Digest) -> Option<Vec<u8>> {
-        // Check LRU membership first to avoid a wasted syscall on cache miss
         let key = digest.hex.clone();
-        {
+        // Read the on-disk algorithm from the LRU entry. After rebuild_index,
+        // this reflects where the file actually lives (sha1/ or sha256/),
+        // which may differ from the caller's digest.algorithm when an old
+        // sha256-labeled Git blob coexists with new sha1-labeled code.
+        let on_disk_algo = {
             let mut state = self.state.lock().unwrap();
-            let _ = state.entries.get_refresh(&key)?;
-        }
+            let entry = state.entries.get_refresh(&key)?;
+            entry.algorithm
+        };
 
-        let path = self.blob_path(digest);
-        fs::read(&path).ok()
+        // Use the LRU's known on-disk algorithm to compute the path; the
+        // caller's `digest.algorithm` is a labeling hint, but the file lives
+        // wherever rebuild_index found it.
+        let on_disk_digest = Digest {
+            algorithm: on_disk_algo,
+            hex: digest.hex.clone(),
+        };
+        fs::read(self.blob_path(&on_disk_digest)).ok()
     }
 
     pub fn put(&self, digest: &Digest, data: &[u8]) -> Result<(), CtxfsError> {
@@ -107,33 +127,38 @@ impl BlobCache {
 
         let size = data.len() as u64;
         let key = digest.hex.clone();
-        for k in self.lru_insert_evict(key, size) {
-            self.remove_blob_file(&k);
+        for (k, algo) in self.lru_insert_evict(key, size, digest.algorithm) {
+            self.remove_blob_file(&k, algo);
         }
 
         Ok(())
     }
 
-    /// Insert `(key, size)` into the LRU, then evict entries until the total
-    /// is within `max_bytes`. Returns the keys of evicted entries (callers
-    /// must remove the corresponding on-disk files).
-    fn lru_insert_evict(&self, key: String, size: u64) -> Vec<String> {
-        let mut evicted_keys = Vec::new();
+    /// Insert `(key, size, algorithm)` into the LRU, then evict entries until
+    /// the total is within `max_bytes`. Returns `(key, algorithm)` pairs for
+    /// evicted entries; callers must remove the corresponding on-disk files.
+    fn lru_insert_evict(
+        &self,
+        key: String,
+        size: u64,
+        algorithm: HashAlgorithm,
+    ) -> Vec<(String, HashAlgorithm)> {
+        let mut evicted = Vec::new();
         {
             let mut state = self.state.lock().unwrap();
             if let Some(existing) = state.entries.get(&key) {
                 state.total_bytes -= existing.size;
             }
-            let _ = state.entries.insert(key, CacheEntry { size });
+            let _ = state.entries.insert(key, CacheEntry { size, algorithm });
             state.total_bytes += size;
             let limit = self.max_bytes.load(Ordering::Relaxed);
             while state.total_bytes > limit && !state.entries.is_empty() {
-                if let Some((k, _)) = state.evict_oldest() {
-                    evicted_keys.push(k);
+                if let Some((k, _, algo)) = state.evict_oldest() {
+                    evicted.push((k, algo));
                 }
             }
         }
-        evicted_keys
+        evicted
     }
 
     pub fn contains(&self, digest: &Digest) -> bool {
@@ -250,9 +275,9 @@ impl BlobCache {
                 }
             }
         }
-        let freed = evicted.iter().map(|(_, size)| size).sum();
-        for (key, _) in evicted {
-            self.remove_blob_file(&key);
+        let freed = evicted.iter().map(|(_, size, _)| size).sum();
+        for (key, _, algo) in evicted {
+            self.remove_blob_file(&key, algo);
         }
         Ok(freed)
     }
@@ -293,8 +318,8 @@ impl BlobCache {
                 }
             }
         }
-        for (key, _) in evicted {
-            self.remove_blob_file(&key);
+        for (key, _, algo) in evicted {
+            self.remove_blob_file(&key, algo);
         }
         let freed = self.state.lock().unwrap().total_bytes;
         initial.saturating_sub(freed)
@@ -315,14 +340,19 @@ impl BlobCache {
                 }
             }
         }
-        for (key, _) in evicted {
-            self.remove_blob_file(&key);
+        for (key, _, algo) in evicted {
+            self.remove_blob_file(&key, algo);
         }
     }
 
     /// Rebuild the LRU index by scanning the cache directory.
+    ///
+    /// Walks both `sha1/` and `sha256/` fan-out subdirs and tags each entry
+    /// with its on-disk algorithm. When both subdirs contain the same hex
+    /// (migration overlap from pre-M5 code), the `sha1/` entry wins and the
+    /// `sha256/` file is deleted — sha1 is the new canonical for Git blobs.
     fn rebuild_index(&self) -> Result<(), CtxfsError> {
-        let mut entries: Vec<(String, u64, std::time::SystemTime)> = Vec::new();
+        let mut entries: Vec<(String, HashAlgorithm, u64, std::time::SystemTime)> = Vec::new();
 
         if let Ok(algo_dirs) = fs::read_dir(&self.root) {
             for algo_entry in algo_dirs.flatten() {
@@ -330,25 +360,65 @@ impl BlobCache {
                 if !algo_path.is_dir() {
                     continue;
                 }
-                // Skip tmp/ — partial blobs from in-flight commits never
-                // belong in the LRU. cleanup_orphan_temps removes stale ones.
-                if algo_path.file_name().is_some_and(|n| n == "tmp") {
-                    continue;
-                }
-                Self::scan_fan_out_dir(&algo_path, &mut entries)?;
+                let algo_name = algo_entry.file_name().to_string_lossy().into_owned();
+                let algorithm = match algo_name.as_str() {
+                    "sha256" => HashAlgorithm::Sha256,
+                    "sha1" => HashAlgorithm::Sha1,
+                    "tmp" => continue, // partial blobs; cleanup_orphan_temps handles these
+                    _ => continue,     // unknown algo dir — skip; future-proof
+                };
+                Self::scan_fan_out_dir(&algo_path, algorithm, &mut entries)?;
             }
         }
 
-        // Sort by modification time (oldest first for LRU ordering)
-        entries.sort_by_key(|(_, _, mtime)| *mtime);
+        entries.sort_by_key(|(_, _, _, mtime)| *mtime);
+
+        // Dedupe by hex: if both sha1 and sha256 paths exist for the same hex,
+        // prefer sha1 (the new canonical from M5). Delete the sha256 file on disk.
+        let mut by_hex: HashMap<String, (HashAlgorithm, u64, std::time::SystemTime)> =
+            HashMap::new();
+        let mut to_delete: Vec<(String, HashAlgorithm)> = Vec::new();
+        for (hex, algo, size, mtime) in entries {
+            match by_hex.entry(hex.clone()) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let _ = v.insert((algo, size, mtime));
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let existing_algo = o.get().0;
+                    if existing_algo == HashAlgorithm::Sha1 {
+                        // Existing sha1 wins; delete the new candidate.
+                        to_delete.push((hex.clone(), algo));
+                    } else if algo == HashAlgorithm::Sha1 {
+                        // Replace existing sha256 with the sha1 version.
+                        let old_algo = o.get().0;
+                        *o.get_mut() = (algo, size, mtime);
+                        to_delete.push((hex.clone(), old_algo));
+                    } else {
+                        // Both sha256 — keep the older (already in map). Shouldn't happen.
+                        to_delete.push((hex.clone(), algo));
+                    }
+                }
+            }
+        }
+
+        let mut sorted: Vec<(String, HashAlgorithm, u64, std::time::SystemTime)> = by_hex
+            .into_iter()
+            .map(|(h, (a, s, m))| (h, a, s, m))
+            .collect();
+        sorted.sort_by_key(|(_, _, _, mtime)| *mtime);
 
         let mut state = self.state.lock().unwrap();
         state.entries.clear();
         state.total_bytes = 0;
 
-        for (hex, size, _) in entries {
+        for (hex, algorithm, size, _) in sorted {
             state.total_bytes += size;
-            let _ = state.entries.insert(hex, CacheEntry { size });
+            let _ = state.entries.insert(hex, CacheEntry { size, algorithm });
+        }
+        drop(state);
+
+        for (hex, algo) in to_delete {
+            self.remove_blob_file(&hex, algo);
         }
 
         Ok(())
@@ -356,7 +426,8 @@ impl BlobCache {
 
     fn scan_fan_out_dir(
         algo_path: &Path,
-        entries: &mut Vec<(String, u64, std::time::SystemTime)>,
+        algorithm: HashAlgorithm,
+        entries: &mut Vec<(String, HashAlgorithm, u64, std::time::SystemTime)>,
     ) -> Result<(), CtxfsError> {
         let prefix_dirs =
             fs::read_dir(algo_path).map_err(|e| CtxfsError::Cache(format!("scan failed: {e}")))?;
@@ -383,7 +454,7 @@ impl BlobCache {
                     let mtime = metadata
                         .modified()
                         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    entries.push((hex, metadata.len(), mtime));
+                    entries.push((hex, algorithm, metadata.len(), mtime));
                 }
             }
         }
@@ -475,8 +546,8 @@ impl BlobTempWriter<'_> {
         // LRU bookkeeping (post-rename so file is durable before tracking).
         let size = self.bytes_written;
         let key = expected.hex.clone();
-        for k in self.cache.lru_insert_evict(key, size) {
-            self.cache.remove_blob_file(&k);
+        for (k, algo) in self.cache.lru_insert_evict(key, size, expected.algorithm) {
+            self.cache.remove_blob_file(&k, algo);
         }
         Ok(())
     }
@@ -779,5 +850,64 @@ mod tests {
             "expected eviction down to 4KB, got {}",
             cache.total_bytes()
         );
+    }
+
+    #[test]
+    fn get_serves_legacy_sha256_layout_after_sha1_label_added() {
+        // Simulate a pre-M5 cache where a Git blob SHA-1 hex was stored
+        // under sha256/<hex>. Re-open the cache (rebuild_index runs) then
+        // look up via the new Sha1 label. rebuild_index tags the entry with
+        // its on-disk algorithm (Sha256), so get reads from the correct
+        // path despite the caller's digest using HashAlgorithm::Sha1.
+        let dir = tempfile::tempdir().unwrap();
+        let git_hex = "356a192b7913b04c54574d18c28d46e6395428ab";
+
+        {
+            let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
+            let legacy_digest = Digest::from_sha256_hex(git_hex);
+            cache.put(&legacy_digest, b"legacy blob bytes").unwrap();
+        }
+
+        // Re-open — rebuild_index tags the existing file as Sha256.
+        let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
+        let new_digest = Digest::from_sha1_hex(git_hex);
+        let bytes = cache.get(&new_digest);
+        assert_eq!(bytes.as_deref(), Some(b"legacy blob bytes" as &[u8]));
+    }
+
+    #[test]
+    fn rebuild_index_dedupes_both_algo_paths_for_same_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_hex = "356a192b7913b04c54574d18c28d46e6395428ab";
+
+        {
+            let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
+            cache
+                .put(&Digest::from_sha256_hex(git_hex), b"old layout")
+                .unwrap();
+        }
+        // Manually write a sha1/<hex> file simulating mid-migration state.
+        let sha1_path = dir
+            .path()
+            .join(format!("sha1/{}/{}", &git_hex[..2], &git_hex[2..]));
+        fs::create_dir_all(sha1_path.parent().unwrap()).unwrap();
+        fs::write(&sha1_path, b"new layout").unwrap();
+
+        let cache = BlobCache::new(dir.path().to_path_buf(), 1024).unwrap();
+        // Sha1 wins on dedupe; sha256 file should be gone.
+        let sha256_path = dir
+            .path()
+            .join(format!("sha256/{}/{}", &git_hex[..2], &git_hex[2..]));
+        assert!(
+            !sha256_path.exists(),
+            "rebuild_index should delete the sha256 loser"
+        );
+        assert!(
+            sha1_path.exists(),
+            "rebuild_index should keep the sha1 winner"
+        );
+
+        let stored = cache.get(&Digest::from_sha1_hex(git_hex)).unwrap();
+        assert_eq!(&stored, b"new layout");
     }
 }

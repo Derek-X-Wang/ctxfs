@@ -645,7 +645,7 @@ impl GitHubProvider {
         // tarball path already hydrated the BlobCache.
         let mut misses: Vec<String> = Vec::new();
         for sha in shas {
-            let digest = Digest::from_sha256_hex(&sha);
+            let digest = Digest::from_sha1_hex(&sha);
             if let Some(bytes) = self.cache.get(&digest) {
                 let _ = results.insert(sha, bytes);
             } else {
@@ -822,7 +822,7 @@ impl GitHubProvider {
                             .cloned();
                         DirEntry::File(FileEntry {
                             name,
-                            digest: Digest::from_sha256_hex(&entry.sha),
+                            digest: Digest::from_sha1_hex(&entry.sha),
                             size,
                             executable,
                             inline_content,
@@ -830,7 +830,7 @@ impl GitHubProvider {
                     }
                     "tree" => DirEntry::Directory(DirectoryEntry {
                         name,
-                        digest: Digest::from_sha256_hex(&entry.sha), // placeholder, recomputed
+                        digest: Digest::from_sha1_hex(&entry.sha), // placeholder, recomputed
                     }),
                     // "commit" (submodule) and other unknown types: skip
                     _ => continue,
@@ -1205,7 +1205,7 @@ impl GitHubProvider {
         };
         Some(ContentRequest {
             path: PathBuf::from(&entry.path),
-            digest: Some(Digest::from_sha256_hex(&entry.sha)),
+            digest: Some(Digest::from_sha1_hex(&entry.sha)),
             size: entry.size,
             kind,
         })
@@ -1423,10 +1423,9 @@ impl GitHubProvider {
                     continue;
                 }
 
-                // Manifest stores Git blob SHA-1 in the digest hex. The cache
-                // key uses Digest::from_sha256_hex — the stored hex is what
-                // matters, not the field name.
-                let digest = Digest::from_sha256_hex(&expected_sha);
+                // Git blob SHA-1 hex stored under HashAlgorithm::Sha1 (B3-label fix).
+                // The 40-char hexes from the GitHub Trees API are SHA-1s, not SHA-256s.
+                let digest = Digest::from_sha1_hex(&expected_sha);
                 writer.finalize(&digest)?;
 
                 outcome.blobs_committed += 1;
@@ -2778,5 +2777,23 @@ mod tests {
             err_str.contains("Lazy"),
             "error message should mention 'Lazy', got: {err_str}"
         );
+    }
+
+    /// B3-label regression: `tree_entry_to_request` must label the digest as
+    /// `HashAlgorithm::Sha1` so the 40-char GitHub Trees API hex is correctly
+    /// identified as a Git blob SHA-1, not a SHA-256.
+    #[test]
+    fn tree_entry_to_request_labels_blob_digest_as_sha1() {
+        let entry = TreeEntry {
+            path: "src/lib.rs".to_string(),
+            mode: "100644".to_string(),
+            entry_type: "blob".to_string(),
+            sha: "356a192b7913b04c54574d18c28d46e6395428ab".to_string(),
+            size: Some(42),
+        };
+        let req = GitHubProvider::tree_entry_to_request(&entry).expect("blob -> Some");
+        let digest = req.digest.expect("blob has digest");
+        assert_eq!(digest.algorithm, ctxfs_core::digest::HashAlgorithm::Sha1);
+        assert_eq!(digest.hex, "356a192b7913b04c54574d18c28d46e6395428ab");
     }
 }
