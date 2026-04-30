@@ -1,6 +1,7 @@
 pub mod counters;
 pub mod fetcher;
 pub mod http;
+pub mod lfs;
 pub mod mock;
 pub mod observability;
 pub mod rate_limit;

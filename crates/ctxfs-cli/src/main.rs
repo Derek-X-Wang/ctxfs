@@ -845,6 +845,25 @@ fn print_global_status(report: &ctxfs_ipc::service::StatusReportV1) {
             );
         }
     }
+
+    // LFS pointer summary (B6 surface)
+    let lfs_total: u64 = report.mounts.iter().map(|m| m.lfs_pointer_files).sum();
+    if lfs_total > 0 {
+        println!();
+        println!("LFS pointer files (Phase 5: smudge): {lfs_total} detected");
+        for m in &report.mounts {
+            if m.lfs_pointer_files == 0 {
+                continue;
+            }
+            println!(
+                "  {} ({}/{}): {}",
+                m.mount_id, m.source, m.repo, m.lfs_pointer_files
+            );
+            for p in m.lfs_pointer_sample_paths.iter().take(3) {
+                println!("    - {p}");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

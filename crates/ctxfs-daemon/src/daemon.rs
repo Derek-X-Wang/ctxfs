@@ -712,6 +712,21 @@ impl DaemonServer {
 
         Ok(info)
     }
+
+    /// Build the full `StatusReportV1` by augmenting observability's
+    /// budget+counter view with cache-level details.
+    ///
+    /// **T2 (B6):** per-mount LFS fields (`lfs_pointer_files`,
+    /// `lfs_pointer_sample_paths`) are already carried in the
+    /// `CounterSnapshot` and surfaced by `observability.status_report()`.
+    ///
+    /// **T3c (B5, not yet):** `working_set_bytes`, `cache_reservation_bytes`,
+    /// and `cache_eviction_attempts_blocked_by_reservation` will be filled
+    /// here with cache lookups keyed by `RepoKey` once T3a/T3b land.
+    fn assemble_status_report(&self) -> ctxfs_ipc::service::StatusReportV1 {
+        // Base report: budgets, per-mount counters, LFS fields.
+        self.observability.status_report()
+    }
 }
 
 impl DaemonServer {
@@ -899,7 +914,7 @@ impl CtxfsService for DaemonServer {
         self,
         _: tarpc::context::Context,
     ) -> Result<ctxfs_ipc::service::StatusReportV1, String> {
-        Ok(self.observability.status_report())
+        Ok(self.assemble_status_report())
     }
 }
 
@@ -1306,6 +1321,40 @@ mod tests {
             Arc::strong_count(&initial_registry) >= 4,
             "singleflight registry must be Arc-cloned into every provider (got {} strong refs)",
             Arc::strong_count(&initial_registry)
+        );
+    }
+
+    /// B6: recording an LFS pointer on a per-mount counter makes it visible
+    /// in the `StatusReportV1` produced by `assemble_status_report`.
+    #[tokio::test]
+    async fn lfs_pointer_count_appears_in_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+
+        // Register a counter bucket and record one LFS pointer with a path.
+        let key = ctxfs_provider_common::counters::CounterKey {
+            source: "github".to_string(),
+            repo: "owner/repo".to_string(),
+            commit: "abc123".to_string(),
+            mount_id: "mnt-lfs-1".to_string(),
+        };
+        server
+            .observability
+            .counters_for(key)
+            .record_lfs_pointer_with_path("assets/large-model.bin");
+
+        // assemble_status_report should surface the LFS data.
+        let report = server.assemble_status_report();
+
+        let mount = report
+            .mounts
+            .iter()
+            .find(|m| m.mount_id == "mnt-lfs-1")
+            .expect("mount summary present");
+        assert_eq!(mount.lfs_pointer_files, 1);
+        assert_eq!(
+            mount.lfs_pointer_sample_paths,
+            vec!["assets/large-model.bin"]
         );
     }
 }

@@ -75,6 +75,11 @@ pub struct GitHubProvider {
     /// mounts of the same `(host, owner, repo, commit)` await the same
     /// `OnceCell` so only one tarball download happens.
     tarball_singleflight: Arc<TarballSingleflightMap>,
+    /// Populated in `fetch_snapshot_inner` from the tree manifest. Maps
+    /// blob SHA-1 hex → mount-relative path so lazy fetches (which only
+    /// know the sha) can surface a meaningful sample path on LFS detection.
+    /// Cleared and re-populated on each snapshot rebuild.
+    sha_to_path: std::sync::Mutex<HashMap<String, PathBuf>>,
 }
 
 impl std::fmt::Debug for GitHubProvider {
@@ -286,6 +291,7 @@ impl GitHubProvider {
             tarball_singleflight: ctx.singleflight,
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
+            sha_to_path: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -472,6 +478,30 @@ impl GitHubProvider {
         let data = base64::engine::general_purpose::STANDARD
             .decode(&cleaned)
             .map_err(|e| CtxfsError::Provider(format!("base64 decode error: {e}")))?;
+
+        // B6: LFS pointer detection — single leaf for lazy reads and small-blob
+        // prefetch (prefetch_small_blobs → fetch_blob_with_sha → here).
+        // Detecting once avoids double-counting (Codex M5-plan-v1 #8).
+        if let Some(_info) = ctxfs_provider_common::lfs::detect_lfs_pointer(&data) {
+            let path_str = self
+                .sha_to_path
+                .lock()
+                .unwrap()
+                .get(sha)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| format!("<sha:{}>", &sha[..8.min(sha.len())]));
+            if let Some(key) = self.counter_key.lock().unwrap().clone() {
+                self.observability
+                    .counters_for(key)
+                    .record_lfs_pointer_with_path(&path_str);
+            }
+            tracing::warn!(
+                target: "ctxfs.provider.lfs",
+                sha = sha,
+                path = path_str.as_str(),
+                "LFS pointer detected (Phase 5: smudge)"
+            );
+        }
 
         Ok(data)
     }
@@ -1251,15 +1281,23 @@ impl GitHubProvider {
         path_to_sha_size: HashMap<PathBuf, (String, u64)>,
         counter_key: Option<CounterKey>,
     ) -> Result<TarballOutcome, CtxfsError> {
-        // Tee adapter: copies bytes to both hasher and writer in one io::copy.
+        // Tee adapter: copies bytes to hasher, writer, and optional peek buffer
+        // in one io::copy. The peek buffer (when Some) mirrors small entries for
+        // LFS pointer detection after the SHA-1 verify succeeds (B6).
         struct Tee<'a, W: std::io::Write> {
             hasher: &'a mut GitBlobSha1,
             writer: &'a mut W,
+            /// When `Some`, mirror written bytes here for post-write inspection
+            /// (LFS pointer detection on small entries ≤ 1024 bytes).
+            peek: Option<&'a mut Vec<u8>>,
         }
         impl<W: std::io::Write> std::io::Write for Tee<'_, W> {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 let n = self.writer.write(buf)?;
                 self.hasher.update(&buf[..n]);
+                if let Some(p) = self.peek.as_deref_mut() {
+                    p.extend_from_slice(&buf[..n]);
+                }
                 Ok(n)
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -1392,13 +1430,22 @@ impl GitHubProvider {
                     None => continue,
                 };
 
-                // Pipe entry → hasher + writer in one std::io::copy.
+                // Pipe entry → hasher + writer (+ optional peek buffer) in one io::copy.
+                // The peek buffer mirrors small entries for LFS detection after SHA-1 verify.
+                const LFS_PEEK_MAX: u64 = 1024;
+                let mut peek_buf: Option<Vec<u8>> = if expected_size <= LFS_PEEK_MAX {
+                    // expected_size <= 1024, so the cast to usize is always safe.
+                    Some(Vec::with_capacity(expected_size as usize))
+                } else {
+                    None
+                };
                 let mut hasher = GitBlobSha1::new(expected_size);
                 let mut writer = cache.commit_atomic_with_writer()?;
                 {
                     let mut tee = Tee {
                         hasher: &mut hasher,
                         writer: &mut writer,
+                        peek: peek_buf.as_mut(),
                     };
                     let _ = std::io::copy(&mut entry, &mut tee)
                         .map_err(|e| CtxfsError::Provider(format!("tar entry stream: {e}")))?;
@@ -1421,6 +1468,24 @@ impl GitHubProvider {
                         "tarball blob SHA-1 mismatch"
                     );
                     continue;
+                }
+
+                // B6: LFS detection — after SHA-1 verify, before atomic finalize.
+                // Only small entries (≤ 1024 bytes) have a peek buffer; larger files
+                // cannot be LFS pointers (real pointers are < 200 bytes).
+                if let Some(ref buf) = peek_buf {
+                    if let Some(_info) = ctxfs_provider_common::lfs::detect_lfs_pointer(buf) {
+                        let path_str = mount_path.display().to_string();
+                        if let Some(ref c) = counters {
+                            c.record_lfs_pointer_with_path(&path_str);
+                        }
+                        tracing::warn!(
+                            target: "ctxfs.provider.lfs",
+                            path = path_str.as_str(),
+                            sha = expected_sha.as_str(),
+                            "LFS pointer detected (Phase 5: smudge)"
+                        );
+                    }
                 }
 
                 // Git blob SHA-1 hex; the 40-char hexes from the GitHub Trees API are SHA-1s, not SHA-256s.
@@ -1564,6 +1629,19 @@ impl GitHubProvider {
             };
         }
         debug!("fetched tree with {} entries", tree.tree.len());
+
+        // 5b. Populate sha_to_path map for LFS sample-path resolution.
+        // Built unconditionally (regardless of prefetch policy) so lazy-fetch
+        // paths can still surface meaningful sample paths on LFS detection.
+        {
+            let mut map = self.sha_to_path.lock().unwrap();
+            map.clear();
+            for entry in &tree.tree {
+                if entry.entry_type == "blob" {
+                    let _ = map.insert(entry.sha.clone(), PathBuf::from(&entry.path));
+                }
+            }
+        }
 
         // 5a. Tarball auto-gate. Build a blob-only ContentRequest slice,
         //     decide the FetchPolicy, and call fetch_batch only for Tarball.

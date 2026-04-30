@@ -137,6 +137,7 @@ impl CtxfsService for MockServer {
             budgets: vec![],
             counters: vec![],
             mounts: vec![],
+            cache_eviction_attempts_blocked_by_reservation: 0,
         })
     }
 

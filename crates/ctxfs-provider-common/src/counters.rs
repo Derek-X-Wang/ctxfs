@@ -6,6 +6,7 @@
 //! cost".
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Prefix used to mark transient "resolving ref" counter buckets created
 /// before a concrete commit SHA is known. Format: `"<resolving:{ref}>"`.
@@ -24,6 +25,39 @@ pub struct CounterKey {
     pub mount_id: String,
 }
 
+/// Bounded ring of sample paths recorded when LFS pointer files are
+/// detected. Caps at 3 to keep `ctxfs status` output compact while still
+/// giving operators the breadcrumbs they need to understand which files
+/// will not work until Phase 5 ships LFS smudge.
+#[derive(Debug, Default)]
+pub struct LfsSampleBuffer {
+    inner: Mutex<Vec<String>>,
+}
+
+impl LfsSampleBuffer {
+    /// Hard cap on sample paths stored.
+    pub const CAP: usize = 3;
+
+    /// Append `path` if there's still room in the buffer. Idempotent on
+    /// duplicate paths (the same pointer file detected twice doesn't
+    /// double-count in the sample list, though counters tick each time).
+    pub fn push(&self, path: String) {
+        let mut v = self.inner.lock().unwrap();
+        if v.len() >= Self::CAP {
+            return;
+        }
+        if !v.iter().any(|p| p == &path) {
+            v.push(path);
+        }
+    }
+
+    /// Return a snapshot of the current sample paths.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<String> {
+        self.inner.lock().unwrap().clone()
+    }
+}
+
 /// Atomic counters for one mount. Cheaply incremented on hot paths.
 #[derive(Debug, Default)]
 pub struct MountCounters {
@@ -40,6 +74,10 @@ pub struct MountCounters {
     cache_hits: AtomicU64,
     cache_misses: AtomicU64,
     lfs_pointer_files: AtomicU64,
+    /// Cache-global counter forwarded here for IPC snapshot convenience.
+    /// Actual tracking lives in `BlobCache::eviction_blocked_total` (T3b).
+    eviction_attempts_blocked_by_reservation: AtomicU64,
+    lfs_samples: LfsSampleBuffer,
 }
 
 /// Read-only snapshot for serialization in `StatusReportV1`.
@@ -58,6 +96,13 @@ pub struct CounterSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub lfs_pointer_files: u64,
+    /// Cache-global eviction-blocked counter carried through the snapshot
+    /// for status assembly. Populated by the daemon in T3c.
+    #[serde(default)]
+    pub eviction_attempts_blocked_by_reservation: u64,
+    /// Up to 3 mount-relative paths of detected LFS pointers (B6).
+    #[serde(default)]
+    pub lfs_pointer_sample_paths: Vec<String>,
 }
 
 impl MountCounters {
@@ -129,6 +174,21 @@ impl MountCounters {
         let _ = self.lfs_pointer_files.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record an LFS pointer detection: increments the counter and appends
+    /// the mount-relative `path` to the bounded sample buffer (up to 3 paths).
+    pub fn record_lfs_pointer_with_path(&self, path: &str) {
+        let _ = self.lfs_pointer_files.fetch_add(1, Ordering::Relaxed);
+        self.lfs_samples.push(path.to_string());
+    }
+
+    /// Record that an LRU eviction candidate was skipped because evicting
+    /// it would have violated a per-repo cache reservation (B5).
+    pub fn record_eviction_blocked_by_reservation(&self) {
+        let _ = self
+            .eviction_attempts_blocked_by_reservation
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Fold all counts from `snap` into this bucket by atomic addition.
     ///
     /// Used by [`crate::observability::Observability::merge_and_drop_placeholder`]
@@ -174,6 +234,14 @@ impl MountCounters {
         let _ = self
             .lfs_pointer_files
             .fetch_add(snap.lfs_pointer_files, Ordering::Relaxed);
+        let _ = self.eviction_attempts_blocked_by_reservation.fetch_add(
+            snap.eviction_attempts_blocked_by_reservation,
+            Ordering::Relaxed,
+        );
+        // Merge sample paths up to the cap.
+        for path in &snap.lfs_pointer_sample_paths {
+            self.lfs_samples.push(path.clone());
+        }
     }
 
     #[must_use]
@@ -192,6 +260,10 @@ impl MountCounters {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             lfs_pointer_files: self.lfs_pointer_files.load(Ordering::Relaxed),
+            eviction_attempts_blocked_by_reservation: self
+                .eviction_attempts_blocked_by_reservation
+                .load(Ordering::Relaxed),
+            lfs_pointer_sample_paths: self.lfs_samples.snapshot(),
         }
     }
 }
