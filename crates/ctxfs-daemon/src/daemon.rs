@@ -411,6 +411,9 @@ impl DaemonServer {
             tree_cache: Some(self.tree_cache.clone()),
             shared_tree_cache: self.shared_tree_cache.clone(),
             singleflight: self.tarball_singleflight.clone(),
+            // T3b: wired to a real RepoKey + MountCacheView after register_mount
+            // ships; None here keeps T3a foundation from affecting live behavior.
+            mount_cache: None,
         };
         Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),

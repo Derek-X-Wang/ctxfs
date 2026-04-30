@@ -1,3 +1,6 @@
+pub mod reservation;
+pub use reservation::{MountCacheView, RepoKey};
+
 mod resolution;
 pub use resolution::{CachedResolution, ResolutionCache};
 
@@ -7,11 +10,12 @@ pub use tree::{TreeCache, SCHEMA_VERSION};
 mod shared;
 pub use shared::SharedTreeCache;
 
+use crate::reservation::ReservationEntry;
 use ctxfs_core::digest::HashAlgorithm;
 use ctxfs_core::error::CtxfsError;
 use ctxfs_core::Digest;
 use linked_hash_map::LinkedHashMap;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,12 +29,23 @@ struct CacheEntry {
     algorithm: HashAlgorithm,
 }
 
-struct LruState {
-    entries: LinkedHashMap<String, CacheEntry>,
-    total_bytes: u64,
+/// Unified cache state behind a single mutex (Codex M5-plan-v1 #5).
+///
+/// Holds the LRU entries, per-blob ownership sets, and per-repo reservation
+/// budgets together so the eviction loop (T3b) can consult all three without
+/// a second lock acquisition or a lock-order dance.
+pub(crate) struct CacheState {
+    pub(crate) entries: LinkedHashMap<String, CacheEntry>,
+    pub(crate) total_bytes: u64,
+    /// blob hex → set of repos whose manifest references this blob.
+    /// Pre-populated at manifest time by `register_mount` (T3b); extended
+    /// by `add_owner` / `put_for` for late-discovered blobs.
+    pub(crate) blob_owners: HashMap<String, BTreeSet<RepoKey>>,
+    /// Per-repo reservation budgets and active-mount refcounts.
+    pub(crate) reservations: HashMap<RepoKey, ReservationEntry>,
 }
 
-impl LruState {
+impl CacheState {
     /// Returns the `(key, size, algorithm)` of the evicted entry, or `None`
     /// if the LRU was already empty. Does NOT remove the on-disk file;
     /// callers must do that themselves.
@@ -45,7 +60,11 @@ impl LruState {
 pub struct BlobCache {
     root: PathBuf,
     max_bytes: Arc<AtomicU64>,
-    state: Mutex<LruState>,
+    state: Mutex<CacheState>,
+    /// Cache-global counter: how many LRU eviction candidates were skipped
+    /// because evicting them would have violated a per-repo reservation.
+    /// Incremented by the T3b eviction loop; read by T3c status assembly.
+    eviction_blocked_total: AtomicU64,
 }
 
 impl std::fmt::Debug for BlobCache {
@@ -66,10 +85,13 @@ impl BlobCache {
         let cache = Self {
             root,
             max_bytes: Arc::new(AtomicU64::new(max_bytes)),
-            state: Mutex::new(LruState {
+            state: Mutex::new(CacheState {
                 entries: LinkedHashMap::new(),
                 total_bytes: 0,
+                blob_owners: HashMap::new(),
+                reservations: HashMap::new(),
             }),
+            eviction_blocked_total: AtomicU64::new(0),
         };
 
         cache.rebuild_index()?;
@@ -153,6 +175,9 @@ impl BlobCache {
             state.total_bytes += size;
             let limit = self.max_bytes.load(Ordering::Relaxed);
             while state.total_bytes > limit && !state.entries.is_empty() {
+                // TODO(T3b): before evicting, check blob_owners vs
+                // reservations; skip and increment eviction_blocked_total
+                // when the candidate is protected by its repo's reservation.
                 if let Some((k, _, algo)) = state.evict_oldest() {
                     evicted.push((k, algo));
                 }
@@ -323,6 +348,73 @@ impl BlobCache {
         }
         let freed = self.state.lock().unwrap().total_bytes;
         initial.saturating_sub(freed)
+    }
+
+    /// Record ownership for a single blob hex without writing data.
+    ///
+    /// Used by `register_mount` (T3b) to seed manifest membership at
+    /// snapshot time, and by `MountCacheView::record_ownership_after_finalize`
+    /// for the streaming tarball commit path. Idempotent.
+    pub fn add_owner(&self, repo_key: &RepoKey, hex: &str) {
+        let mut state = self.state.lock().unwrap();
+        let _ = state
+            .blob_owners
+            .entry(hex.to_string())
+            .or_default()
+            .insert(repo_key.clone());
+    }
+
+    /// Idempotent equivalent of `put` followed by `add_owner`.
+    ///
+    /// Called by `MountCacheView::put` for late-discovered blobs (e.g.,
+    /// truncated-tree fallbacks). Primary ownership tracking goes through
+    /// `register_mount` in T3b.
+    pub fn put_for(
+        &self,
+        repo_key: &RepoKey,
+        digest: &Digest,
+        data: &[u8],
+    ) -> Result<(), CtxfsError> {
+        self.put(digest, data)?;
+        self.add_owner(repo_key, &digest.hex);
+        Ok(())
+    }
+
+    /// Sum the sizes of **cached** blobs whose owner-set contains `key`.
+    ///
+    /// Blobs claimed via `add_owner` but not yet written to the cache (e.g.,
+    /// pre-claimed at manifest time with no local copy yet) contribute 0.
+    #[must_use]
+    pub fn working_set_bytes(&self, key: &RepoKey) -> u64 {
+        let state = self.state.lock().unwrap();
+        let mut total = 0u64;
+        for (hex, owners) in &state.blob_owners {
+            if owners.contains(key) {
+                if let Some(entry) = state.entries.get(hex.as_str()) {
+                    total += entry.size;
+                }
+            }
+        }
+        total
+    }
+
+    /// Cache-global counter: how many times an eviction candidate was skipped
+    /// because evicting it would have violated a per-repo reservation.
+    ///
+    /// Always returns 0 until T3b lands the reservation-aware eviction loop.
+    #[must_use]
+    pub fn eviction_attempts_blocked_by_reservation(&self) -> u64 {
+        self.eviction_blocked_total.load(Ordering::Relaxed)
+    }
+
+    /// Current reservation budget for `key`, or `None` if `key` has no
+    /// active reservation (not yet registered, or already unregistered).
+    ///
+    /// Always returns `None` until T3b lands `register_mount`.
+    #[must_use]
+    pub fn reservation_bytes(&self, key: &RepoKey) -> Option<u64> {
+        let state = self.state.lock().unwrap();
+        state.reservations.get(key).map(|e| e.reserved_bytes)
     }
 
     /// Update the maximum cache size at runtime. If `new_max` is smaller than

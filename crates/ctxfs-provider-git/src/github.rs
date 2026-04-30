@@ -80,6 +80,15 @@ pub struct GitHubProvider {
     /// know the sha) can surface a meaningful sample path on LFS detection.
     /// Cleared and re-populated on each snapshot rebuild.
     sha_to_path: std::sync::Mutex<HashMap<String, PathBuf>>,
+    /// Per-mount cache view for B5 ownership tracking. `None` when the
+    /// provider is constructed without a daemon-supplied `RepoKey` (e.g.,
+    /// integration tests, FSKit shared-cache paths). T3b's tarball commit
+    /// and small-blob commit paths call
+    /// `MountCacheView::record_ownership_after_finalize` when this is `Some`.
+    ///
+    /// Not yet used in T3a (foundation only); wired up in T3b.
+    #[allow(dead_code)]
+    mount_cache: Option<Arc<ctxfs_cache::reservation::MountCacheView>>,
 }
 
 impl std::fmt::Debug for GitHubProvider {
@@ -292,6 +301,7 @@ impl GitHubProvider {
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
             sha_to_path: std::sync::Mutex::new(HashMap::new()),
+            mount_cache: ctx.mount_cache,
         }
     }
 

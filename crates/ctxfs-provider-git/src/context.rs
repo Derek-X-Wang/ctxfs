@@ -10,6 +10,7 @@
 //! extract to a new crate, or migrate `ctxfs-cache` under `provider-common`)
 //! is best made with a second concrete consumer in hand — Phase 6 work.
 
+use ctxfs_cache::reservation::MountCacheView;
 use ctxfs_cache::{BlobCache, SharedTreeCache, TreeCache};
 use ctxfs_provider_common::fetcher::TarballSingleflightMap;
 use ctxfs_provider_common::observability::Observability;
@@ -36,6 +37,11 @@ pub struct ProviderContext {
     pub shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
     /// Singleflight registry for in-flight tarball prefetches.
     pub singleflight: Arc<TarballSingleflightMap>,
+    /// Per-mount cache view that pins a [`RepoKey`](ctxfs_cache::RepoKey) for
+    /// B5 ownership tracking. `None` for paths that don't need ownership
+    /// tracking (NFS test helpers, FSKit shared-cache paths). Wired up by
+    /// the daemon in T3b's `prepare_mount`.
+    pub mount_cache: Option<Arc<MountCacheView>>,
 }
 
 impl std::fmt::Debug for ProviderContext {
@@ -47,6 +53,7 @@ impl std::fmt::Debug for ProviderContext {
             .field("tree_cache", &self.tree_cache.is_some())
             .field("shared_tree_cache", &self.shared_tree_cache.is_some())
             .field("singleflight_len", &self.singleflight.len())
+            .field("mount_cache", &self.mount_cache.is_some())
             .finish()
     }
 }
@@ -66,6 +73,7 @@ impl ProviderContext {
             tree_cache: None,
             shared_tree_cache: None,
             singleflight: Arc::new(TarballSingleflightMap::new()),
+            mount_cache: None,
         }
     }
 }
@@ -86,6 +94,8 @@ pub(crate) fn make_test_provider_context() -> (ProviderContext, tempfile::TempDi
     let dir = tempfile::tempdir().expect("tempdir");
     let cache =
         Arc::new(BlobCache::new(dir.path().to_path_buf(), 1024 * 1024).expect("BlobCache::new"));
+    // mount_cache is None for test contexts — ownership tracking and
+    // reservation enforcement require a daemon-provided RepoKey (T3b).
     let ctx = ProviderContext::minimal("api.github.com", cache);
     (ctx, dir)
 }
