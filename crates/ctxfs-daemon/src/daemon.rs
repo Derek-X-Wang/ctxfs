@@ -12,7 +12,7 @@ use ctxfs_manifest::Snapshot;
 use ctxfs_nfs::{CtxfsNfs, NfsServerHandle};
 use ctxfs_provider_common::fetcher::TarballSingleflightMap;
 use ctxfs_provider_common::resolver::RegistryResolver;
-use ctxfs_provider_git::{FetchOptions, GitHubProvider};
+use ctxfs_provider_git::{FetchOptions, GitHubProvider, ProviderContext};
 use fskit_rs::session::Session as FsKitSession;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -472,14 +472,17 @@ impl DaemonServer {
             subpath: subpath.clone(),
         };
 
+        let ctx = ProviderContext {
+            api_host: self.config.github_host.clone(),
+            observability: self.observability.clone(),
+            cache: self.cache.clone(),
+            tree_cache: Some(self.tree_cache.clone()),
+            shared_tree_cache: self.shared_tree_cache.clone(),
+            singleflight: self.tarball_singleflight.clone(),
+        };
         let provider = Arc::new(GitHubProvider::new(
             self.config.github_token.as_deref(),
-            self.config.github_host.clone(),
-            self.cache.clone(),
-            Some(self.tree_cache.clone()),
-            self.shared_tree_cache.clone(),
-            self.observability.clone(),
-            self.tarball_singleflight.clone(),
+            ctx,
         ));
 
         let fetch_options = FetchOptions {

@@ -18,6 +18,8 @@ use std::sync::Arc;
 use tar::EntryType;
 use tracing::{debug, warn};
 
+use crate::context::ProviderContext;
+
 const USER_AGENT_STR: &str = "ctxfs/0.1";
 
 // Git file mode constants from the GitHub Trees API
@@ -217,52 +219,27 @@ impl Default for FetchOptions {
 
 impl GitHubProvider {
     /// Production constructor. Derives the codeload host automatically from
-    /// `api_host` (e.g. `api.github.com` → `codeload.github.com`).
+    /// `ctx.api_host` (e.g. `api.github.com` → `codeload.github.com`).
     ///
-    /// `tarball_singleflight` is the daemon-level registry shared across
-    /// concurrent mounts so only one tarball download happens per
-    /// `(host, owner, repo, commit)` at a time. Pass
-    /// `Arc::new(dashmap::DashMap::new())` in tests that don't exercise the
-    /// singleflight path.
-    pub fn new(
-        token: Option<&str>,
-        api_host: String,
-        cache: Arc<BlobCache>,
-        tree_cache: Option<Arc<TreeCache>>,
-        shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
-        observability: Arc<Observability>,
-        tarball_singleflight: Arc<TarballSingleflightMap>,
-    ) -> Self {
-        Self::new_with_codeload_host(
-            token,
-            api_host,
-            None,
-            cache,
-            tree_cache,
-            shared_tree_cache,
-            observability,
-            tarball_singleflight,
-        )
+    /// `ctx.singleflight` is the daemon-level registry shared across concurrent
+    /// mounts so only one tarball download happens per `(host, owner, repo,
+    /// commit)` at a time.
+    pub fn new(token: Option<&str>, ctx: ProviderContext) -> Self {
+        Self::new_with_codeload_host(token, None, ctx)
     }
 
     /// Construct with an explicit codeload host override. Production code
-    /// calls [`Self::new`] which derives the codeload host from `api_host`.
+    /// calls [`Self::new`] which derives the codeload host from `ctx.api_host`.
     /// Primarily for tests that need both API calls and tarball redirects
     /// to point at a local mock server.
-    #[allow(clippy::too_many_arguments)] // M4 will collapse via ProviderContext.
     pub fn new_with_codeload_host(
         token: Option<&str>,
-        api_host: String,
         codeload_host_override: Option<String>,
-        cache: Arc<BlobCache>,
-        tree_cache: Option<Arc<TreeCache>>,
-        shared_tree_cache: Option<Arc<dyn SharedTreeCache>>,
-        observability: Arc<Observability>,
-        tarball_singleflight: Arc<TarballSingleflightMap>,
+        ctx: ProviderContext,
     ) -> Self {
         let auth_identity = match token {
-            Some(t) => AuthIdentity::pat(&api_host, t),
-            None => AuthIdentity::anonymous(&api_host),
+            Some(t) => AuthIdentity::pat(&ctx.api_host, t),
+            None => AuthIdentity::anonymous(&ctx.api_host),
         };
 
         let mut default_headers = HeaderMap::new();
@@ -290,19 +267,19 @@ impl GitHubProvider {
             .expect("failed to build codeload HTTP client");
 
         let codeload_host =
-            codeload_host_override.unwrap_or_else(|| Self::codeload_host_for(&api_host));
+            codeload_host_override.unwrap_or_else(|| Self::codeload_host_for(&ctx.api_host));
 
         Self {
             client,
-            cache,
-            tree_cache,
-            shared_tree_cache,
-            observability,
+            cache: ctx.cache,
+            tree_cache: ctx.tree_cache,
+            shared_tree_cache: ctx.shared_tree_cache,
+            observability: ctx.observability,
             auth_identity,
-            api_host,
+            api_host: ctx.api_host,
             codeload_host,
             codeload_client,
-            tarball_singleflight,
+            tarball_singleflight: ctx.singleflight,
             counter_key: std::sync::Mutex::new(None),
             active_source: std::sync::Mutex::new(None),
         }
@@ -1753,21 +1730,30 @@ mod tests {
         std::sync::Arc::new(dashmap::DashMap::new())
     }
 
+    /// Construct a minimal `ProviderContext` for unit tests.
+    fn make_test_provider_context() -> crate::context::ProviderContext {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ctxfs_cache::BlobCache::new(cache_dir.keep(), 1024 * 1024).unwrap());
+        crate::context::ProviderContext {
+            api_host: "api.github.com".to_string(),
+            observability: Arc::new(Observability::new()),
+            cache,
+            tree_cache: None,
+            shared_tree_cache: None,
+            singleflight: make_singleflight(),
+        }
+    }
+
+    /// TDD anchor: the new 2-arg constructor compiles (test fails before impl).
+    #[test]
+    fn new_with_provider_context_compiles_with_two_args() {
+        let ctx = make_test_provider_context();
+        let _provider = GitHubProvider::new(None, ctx);
+    }
+
     /// Minimal `GitHubProvider` for unit tests that don't make real HTTP calls.
     fn make_test_provider() -> GitHubProvider {
-        let cache_dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(
-            ctxfs_cache::BlobCache::new(cache_dir.path().to_path_buf(), 1024 * 1024).unwrap(),
-        );
-        GitHubProvider::new(
-            None,
-            "api.github.com".to_string(),
-            cache,
-            None,
-            None,
-            Arc::new(Observability::new()),
-            make_singleflight(),
-        )
+        GitHubProvider::new(None, make_test_provider_context())
     }
 
     #[test]
@@ -2113,18 +2099,7 @@ mod tests {
     /// empty input regardless of provider state.
     #[tokio::test]
     async fn prefetch_small_blobs_empty_shas_returns_empty_map_without_http() {
-        let cache_dir = tempfile::tempdir().unwrap();
-        let cache =
-            Arc::new(ctxfs_cache::BlobCache::new(cache_dir.path().to_path_buf(), 1024).unwrap());
-        let provider = GitHubProvider::new(
-            None,
-            "api.github.com".to_string(),
-            cache,
-            None,
-            None,
-            Arc::new(Observability::new()),
-            make_singleflight(),
-        );
+        let provider = GitHubProvider::new(None, make_test_provider_context());
         let source = SourceSpec::parse("github:test/repo@main").unwrap();
         let (result, network_fetched) = provider
             .prefetch_small_blobs(&source, vec![], &std::collections::HashSet::new())

@@ -270,15 +270,18 @@ pub fn make_provider(
     observability: Arc<ctxfs_provider_common::observability::Observability>,
     tarball_singleflight: Arc<ctxfs_provider_common::fetcher::TarballSingleflightMap>,
 ) -> ctxfs_provider_git::GitHubProvider {
+    let ctx = ctxfs_provider_git::ProviderContext {
+        api_host: server.host.clone(),
+        observability,
+        cache,
+        tree_cache: None,
+        shared_tree_cache: None,
+        singleflight: tarball_singleflight,
+    };
     ctxfs_provider_git::GitHubProvider::new_with_codeload_host(
         None,
-        server.host.clone(),
         Some(server.host.clone()), // codeload override → same server
-        cache,
-        None,
-        None,
-        observability,
-        tarball_singleflight,
+        ctx,
     )
 }
 
