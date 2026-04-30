@@ -392,6 +392,32 @@ struct MountPrep {
 }
 
 impl DaemonServer {
+    /// Construct a fresh `Arc<GitHubProvider>` for a single mount.
+    ///
+    /// **B8 invariant** (M4): every mount must get its own provider Arc.
+    /// Sharing a provider across mounts re-introduces the `active_source`
+    /// race — each `GitHubProvider` holds per-mount `active_source` and
+    /// `counter_key` state that would conflict if shared.
+    ///
+    /// The singleflight tarball registry IS shared by Arc-clone via
+    /// `ProviderContext` — that's intentional: concurrent mounts of the
+    /// same `(host, owner, repo, commit)` key deduplicate to one tarball
+    /// download.
+    fn build_github_provider_for_mount(&self) -> Arc<GitHubProvider> {
+        let ctx = ProviderContext {
+            api_host: self.config.github_host.clone(),
+            observability: self.observability.clone(),
+            cache: self.cache.clone(),
+            tree_cache: Some(self.tree_cache.clone()),
+            shared_tree_cache: self.shared_tree_cache.clone(),
+            singleflight: self.tarball_singleflight.clone(),
+        };
+        Arc::new(GitHubProvider::new(
+            self.config.github_token.as_deref(),
+            ctx,
+        ))
+    }
+
     /// Build the appropriate registry resolver for a non-GitHub source.
     fn make_resolver(source: &SourceSpec) -> Result<Box<dyn RegistryResolver>, String> {
         match source.provider_type {
@@ -472,18 +498,7 @@ impl DaemonServer {
             subpath: subpath.clone(),
         };
 
-        let ctx = ProviderContext {
-            api_host: self.config.github_host.clone(),
-            observability: self.observability.clone(),
-            cache: self.cache.clone(),
-            tree_cache: Some(self.tree_cache.clone()),
-            shared_tree_cache: self.shared_tree_cache.clone(),
-            singleflight: self.tarball_singleflight.clone(),
-        };
-        let provider = Arc::new(GitHubProvider::new(
-            self.config.github_token.as_deref(),
-            ctx,
-        ));
+        let provider = self.build_github_provider_for_mount();
 
         let fetch_options = FetchOptions {
             prefetch: options.prefetch,
@@ -1242,6 +1257,55 @@ mod tests {
         assert!(
             signal.is_ok(),
             "notifier must fire when FilesystemAdapter::unmount() is called"
+        );
+    }
+
+    // ─── B8 invariant: per-mount provider construction ───────────────────────
+
+    /// B8: every call to `build_github_provider_for_mount` returns a fresh
+    /// `Arc<GitHubProvider>`. Sharing a provider across mounts would
+    /// re-introduce the active_source race.
+    #[tokio::test]
+    async fn b8_per_mount_provider_arcs_are_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+        let p1 = server.build_github_provider_for_mount();
+        let p2 = server.build_github_provider_for_mount();
+        assert!(
+            !Arc::ptr_eq(&p1, &p2),
+            "B8 violation: build_github_provider_for_mount returned the same Arc twice"
+        );
+    }
+
+    /// Stronger: three consecutive calls all produce distinct Arcs. Catches
+    /// a hypothetical regression where someone caches the first Arc.
+    #[tokio::test]
+    async fn b8_three_mount_provider_arcs_all_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+        let p1 = server.build_github_provider_for_mount();
+        let p2 = server.build_github_provider_for_mount();
+        let p3 = server.build_github_provider_for_mount();
+        assert!(!Arc::ptr_eq(&p1, &p2), "p1 == p2");
+        assert!(!Arc::ptr_eq(&p2, &p3), "p2 == p3");
+        assert!(!Arc::ptr_eq(&p1, &p3), "p1 == p3");
+    }
+
+    /// Complement of B8: the singleflight registry IS shared across providers
+    /// (Arc-clone, not copy). Concurrent mounts of the same (repo, commit)
+    /// deduplicate to one tarball download.
+    #[tokio::test]
+    async fn b8_singleflight_registry_arc_is_shared_across_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = make_test_server(&tmp);
+        let initial_registry = Arc::clone(&server.tarball_singleflight);
+        let _p1 = server.build_github_provider_for_mount();
+        let _p2 = server.build_github_provider_for_mount();
+        // initial_registry + server + p1's internal clone + p2's internal clone = ≥ 4
+        assert!(
+            Arc::strong_count(&initial_registry) >= 3,
+            "singleflight registry must be Arc-cloned into every provider (got {} strong refs)",
+            Arc::strong_count(&initial_registry)
         );
     }
 }
