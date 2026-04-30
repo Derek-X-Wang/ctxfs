@@ -1,3 +1,47 @@
+## v0.1.4-m4 — 2026-04-29
+
+### Phase 4 M4: ContentFetcher full lift + ProviderContext refactor
+
+- **`ContentFetcher` trait first concrete impl**: `GitHubProvider` now
+  implements the source-agnostic `ContentFetcher` trait that landed
+  skeletal in M3. Future native-CDN content providers (npm tarballs,
+  PyPI sdists, crates.io `.crate` files) implement the same trait without
+  re-deriving the auto-gate / singleflight / observability machinery.
+  `fetch_batch` is only called for `FetchPolicy::Tarball`; Lazy and
+  LazyOversized paths skip it entirely. Return contract is "best-effort
+  cache state" — missing paths are allowed; GitHub's tarball flow warms
+  `BlobCache` by digest.
+- **`MockContentFetcher`** in `ctxfs-provider-common::mock` proves the
+  trait is implementable from outside `provider-git`. Integration test
+  in `tests/content_fetcher_implementable.rs` is the spec's exit-criterion
+  proof: a hypothetical second provider can plug in without touching
+  `provider-git`.
+- **`ProviderContext`** struct in `ctxfs-provider-git` bundles the
+  daemon-owned `Arc`s (`cache`, `tree_cache`, `shared_tree_cache`,
+  `observability`, `singleflight`, `api_host`). `GitHubProvider::new`
+  shrinks from 7 args to 2 (`token`, `ctx`). `new_with_codeload_host`
+  shrinks from 8 to 3. Both `#[allow(clippy::too_many_arguments)]`
+  annotations removed.
+- **B8 invariant test**: `build_github_provider_for_mount` helper
+  extracted from `prepare_mount` in `ctxfs-daemon`. Three inline unit
+  tests assert that consecutive calls produce distinct `Arc<GitHubProvider>`
+  instances (`Arc::ptr_eq == false`). Complement test asserts the
+  singleflight registry IS shared by Arc-clone (intentional: concurrent
+  mounts of the same repo/commit deduplicate to one tarball download).
+- **No external behavior change** — pure refactor. Replay tests,
+  singleflight dedupe test, NFS integration tests, and full workspace
+  suite all green.
+
+### Internal changes (not user-facing)
+
+- `FetchBatchContext { source: SourceSpec, resolved_revision: String }`
+  added to `ctxfs-provider-common::fetcher`. Separates load-bearing fetch
+  context from telemetry `CounterKey`.
+- `dispatch_fetch_policy` renamed to `dispatch_tarball_for_requests`
+  (no longer dispatches policy; auto-gate lives in `fetch_snapshot_inner`).
+- `tree_entry_to_request` maps `TreeEntry → ContentRequest` at the
+  GitHub-specific boundary.
+
 ## v0.1.3-m3 — 2026-04-28
 
 ### Phase 4 M3: Tarball prefetch with smart gate (B2)
