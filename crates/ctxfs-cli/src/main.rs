@@ -943,7 +943,7 @@ fn print_global_status(report: &ctxfs_ipc::service::StatusReportV1) {
         }
     }
 
-    // Per-mount cache usage (B5 surface)
+    // Per-mount cache usage:
     let mounts_with_cache: Vec<_> = report
         .mounts
         .iter()
@@ -1469,5 +1469,19 @@ mod tests {
         assert_eq!(parse_size_bytes("512K").unwrap(), 512 * 1_024);
         assert_eq!(parse_size_bytes("1024").unwrap(), 1_024);
         assert_eq!(parse_size_bytes("1024B").unwrap(), 1_024);
+    }
+
+    #[test]
+    fn format_bytes_boundaries() {
+        use super::format_bytes;
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        // 1 MiB - 1: still in KiB range — visually "1024.0 KiB" but correct
+        assert_eq!(format_bytes(1_048_575), "1024.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        // 1 GiB - 1: still in MiB range
+        assert_eq!(format_bytes(1_073_741_823), "1024.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
     }
 }

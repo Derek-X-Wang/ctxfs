@@ -1428,7 +1428,7 @@ mod tests {
         );
     }
 
-    /// T3c: working_set_bytes and cache_reservation_bytes are populated by
+    /// Verifies working_set_bytes and cache_reservation_bytes are populated by
     /// assemble_status_report when a MountHandle carries a RepoKey.
     #[tokio::test]
     async fn working_set_and_reservation_appear_in_status() {
