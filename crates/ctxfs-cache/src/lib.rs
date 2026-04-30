@@ -390,9 +390,8 @@ impl BlobCache {
                         to_delete.push((hex.clone(), algo));
                     } else if algo == HashAlgorithm::Sha1 {
                         // Replace existing sha256 with the sha1 version.
-                        let old_algo = o.get().0;
                         *o.get_mut() = (algo, size, mtime);
-                        to_delete.push((hex.clone(), old_algo));
+                        to_delete.push((hex.clone(), existing_algo));
                     } else {
                         // Both sha256 — keep the older (already in map). Shouldn't happen.
                         to_delete.push((hex.clone(), algo));

@@ -1423,8 +1423,7 @@ impl GitHubProvider {
                     continue;
                 }
 
-                // Git blob SHA-1 hex stored under HashAlgorithm::Sha1 (B3-label fix).
-                // The 40-char hexes from the GitHub Trees API are SHA-1s, not SHA-256s.
+                // Git blob SHA-1 hex; the 40-char hexes from the GitHub Trees API are SHA-1s, not SHA-256s.
                 let digest = Digest::from_sha1_hex(&expected_sha);
                 writer.finalize(&digest)?;
 
