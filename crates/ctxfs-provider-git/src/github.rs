@@ -404,9 +404,9 @@ impl GitHubProvider {
     ///
     /// Note: per-subtree responses include `size` for blob entries (per
     /// GitHub Trees API docs). If an entry returns `size=None`, the auto-gate
-    /// in `dispatch_fetch_policy` treats the manifest as having unknown total
-    /// bytes and falls back to Lazy (fail-closed). Don't try to estimate by
-    /// file extension or cache mtimes — be honest about the missing signal.
+    /// in `fetch_snapshot_inner` degrades to Lazy (fail-closed) via
+    /// `effective_prefetch_policy`. Don't try to estimate by file extension or
+    /// cache mtimes — be honest about the missing signal.
     async fn fetch_tree_walked(
         &self,
         source: &SourceSpec,
@@ -1513,9 +1513,9 @@ impl GitHubProvider {
         // correctly to the real commit bucket.
         //
         // Skip tree-cache on Force: if the user explicitly requested tarball
-        // prefetch, we must fall through to dispatch_fetch_policy even after a
-        // tree-cache hit. Otherwise a `ctxfs cache prune` + remount with
-        // `--prefetch=force` would silently skip the tarball and leave
+        // prefetch, we must fall through to the auto-gate / ContentFetcher::fetch_batch
+        // even after a tree-cache hit. Otherwise a `ctxfs cache prune` + remount
+        // with `--prefetch=force` would silently skip the tarball and leave
         // BlobCache empty (lazy reads instead of the requested prefetch).
         let skip_tree_cache =
             options.prefetch == ctxfs_provider_common::fetcher::PrefetchPolicy::Force;
@@ -2596,9 +2596,9 @@ mod tests {
     }
 
     // ---- effective_prefetch_policy unit tests ----
-    // (dispatch_fetch_policy was renamed to dispatch_tarball_for_requests in M4;
-    //  its old Disabled/Lazy auto-gate behavior is now in fetch_snapshot_inner.
-    //  Auto-gate correctness is proven by provider-common::fetcher::tests.)
+    // The old dispatch function was renamed in M4 and its auto-gate logic was
+    // lifted into fetch_snapshot_inner. Auto-gate correctness is proven by
+    // provider-common::fetcher::tests.
 
     /// Auto-gate degrades to Lazy (fail-closed) when any blob has unknown size.
     /// Directly exercises `effective_prefetch_policy` — the extracted logic.
@@ -2772,5 +2772,30 @@ mod tests {
         let estimate = provider.estimate_cost(&requests);
         assert_eq!(estimate.total_bytes, None);
         assert_eq!(estimate.request_count, 2);
+    }
+
+    /// `fetch_batch` must reject `FetchMode::Lazy` with a Provider error.
+    /// The invariant: callers only invoke fetch_batch for BulkPrefetch/Forced;
+    /// Lazy is handled entirely inside fetch_snapshot_inner (no batch call).
+    #[tokio::test]
+    async fn fetch_batch_errors_on_lazy_mode() {
+        use ctxfs_provider_common::fetcher::FetchBatchContext;
+        let provider = make_test_provider();
+        let batch_ctx = FetchBatchContext {
+            source: make_test_source(),
+            resolved_revision: "abc123def456abc123def456abc123def456abc1".to_string(),
+        };
+        let result = provider
+            .fetch_batch(&batch_ctx, &[], FetchMode::Lazy, None)
+            .await;
+        assert!(
+            result.is_err(),
+            "fetch_batch must return Err for FetchMode::Lazy"
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("Lazy"),
+            "error message should mention 'Lazy', got: {err_str}"
+        );
     }
 }
