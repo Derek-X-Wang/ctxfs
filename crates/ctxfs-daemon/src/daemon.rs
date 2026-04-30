@@ -716,9 +716,11 @@ impl DaemonServer {
     /// Build the full `StatusReportV1` by augmenting observability's
     /// budget+counter view with cache-level details.
     ///
-    /// **T2 (B6):** per-mount LFS fields (`lfs_pointer_files`,
-    /// `lfs_pointer_sample_paths`) are already carried in the
-    /// `CounterSnapshot` and surfaced by `observability.status_report()`.
+    /// LFS fields are populated directly from the `CounterSnapshot`
+    /// in `observability.status_report()`. This seam exists for
+    /// future cache-level fields (`working_set_bytes`, `reservation_bytes`,
+    /// `cache_eviction_attempts_blocked_by_reservation`) that the cache
+    /// owns but observability cannot see.
     ///
     /// **T3c (B5, not yet):** `working_set_bytes`, `cache_reservation_bytes`,
     /// and `cache_eviction_attempts_blocked_by_reservation` will be filled

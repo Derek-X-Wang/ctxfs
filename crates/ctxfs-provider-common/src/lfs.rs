@@ -133,4 +133,15 @@ mod tests {
             format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize one\n");
         assert!(detect_lfs_pointer(bytes.as_bytes()).is_none());
     }
+
+    #[test]
+    fn rejects_crlf_line_endings() {
+        // Windows-format pointer with \r\n line endings: parser rejects
+        // because the trailing \r on the version line breaks the exact
+        // string match with LFS_VERSION_LINE.
+        let oid = "a".repeat(64);
+        let bytes =
+            format!("version https://git-lfs.github.com/spec/v1\r\noid sha256:{oid}\r\nsize 1\r\n");
+        assert!(detect_lfs_pointer(bytes.as_bytes()).is_none());
+    }
 }

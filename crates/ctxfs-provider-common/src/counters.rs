@@ -170,10 +170,6 @@ impl MountCounters {
         let _ = self.cache_misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_lfs_pointer_file(&self) {
-        let _ = self.lfs_pointer_files.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Record an LFS pointer detection: increments the counter and appends
     /// the mount-relative `path` to the bounded sample buffer (up to 3 paths).
     pub fn record_lfs_pointer_with_path(&self, path: &str) {

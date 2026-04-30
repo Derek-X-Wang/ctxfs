@@ -479,9 +479,9 @@ impl GitHubProvider {
             .decode(&cleaned)
             .map_err(|e| CtxfsError::Provider(format!("base64 decode error: {e}")))?;
 
-        // B6: LFS pointer detection — single leaf for lazy reads and small-blob
+        // LFS pointer detection — single leaf for lazy reads and small-blob
         // prefetch (prefetch_small_blobs → fetch_blob_with_sha → here).
-        // Detecting once avoids double-counting (Codex M5-plan-v1 #8).
+        // Detecting once avoids double-counting.
         if let Some(_info) = ctxfs_provider_common::lfs::detect_lfs_pointer(&data) {
             let path_str = self
                 .sha_to_path
@@ -1470,7 +1470,7 @@ impl GitHubProvider {
                     continue;
                 }
 
-                // B6: LFS detection — after SHA-1 verify, before atomic finalize.
+                // LFS detection — after SHA-1 verify, before atomic finalize.
                 // Only small entries (≤ 1024 bytes) have a peek buffer; larger files
                 // cannot be LFS pointers (real pointers are < 200 bytes).
                 if let Some(ref buf) = peek_buf {
