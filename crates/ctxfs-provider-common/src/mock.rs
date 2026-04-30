@@ -1,10 +1,17 @@
-//! Test fixture: an HTTP-shaped `MockProvider` that records every call
-//! it would have made, so workload-replay integration tests can assert
-//! exact provider call counts without hitting the real GitHub API.
+//! Test fixtures for provider-level unit and integration testing.
 //!
-//! Used cross-crate: M2's tests will pull this in from
-//! `ctxfs-provider-git/tests/`, so it lives in `src/`, not `tests/`.
+//! - [`MockProvider`]: HTTP-shaped recorder that tracks call counts without
+//!   hitting a real GitHub API. Used by workload-replay integration tests.
+//! - [`MockContentFetcher`]: trivial [`crate::fetcher::ContentFetcher`] impl
+//!   that returns canned bytes. Proves the trait is implementable from outside
+//!   `provider-git` (M4 spec exit-criterion).
+//!
+//! Lives in `src/` (not `tests/`) so cross-crate test suites can import it.
 
+use crate::counters::CounterKey;
+use crate::fetcher::{ContentFetcher, ContentRequest, CostEstimate, FetchBatchContext, FetchMode};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -94,6 +101,49 @@ impl MockProvider {
             .lock()
             .expect("MockProvider mutex poisoned")
             .len()
+    }
+}
+
+/// Trivial [`ContentFetcher`] impl for tests. Returns canned bytes for paths
+/// in `canned_bytes`; missing paths produce an empty-map entry per the trait's
+/// best-effort contract. Proves the trait is implementable from outside
+/// `provider-git` (M4 spec exit-criterion).
+#[derive(Debug, Default)]
+pub struct MockContentFetcher {
+    /// Pre-seeded bytes keyed by mount-relative path.
+    pub canned_bytes: HashMap<PathBuf, Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl ContentFetcher for MockContentFetcher {
+    fn estimate_cost(&self, requests: &[ContentRequest]) -> CostEstimate {
+        let total_bytes: Option<u64> = if requests.iter().any(|r| r.size.is_none()) {
+            None
+        } else {
+            Some(requests.iter().filter_map(|r| r.size).sum())
+        };
+        CostEstimate {
+            total_bytes,
+            request_count: requests.len(),
+            fetch_mode: None,
+        }
+    }
+
+    async fn fetch_batch(
+        &self,
+        _ctx: &FetchBatchContext,
+        requests: &[ContentRequest],
+        _mode: FetchMode,
+        _counter_key: Option<CounterKey>,
+    ) -> Result<HashMap<PathBuf, Vec<u8>>, ctxfs_core::error::CtxfsError> {
+        Ok(requests
+            .iter()
+            .filter_map(|r| {
+                self.canned_bytes
+                    .get(&r.path)
+                    .map(|b| (r.path.clone(), b.clone()))
+            })
+            .collect())
     }
 }
 
