@@ -86,7 +86,7 @@ async fn two_concurrent_mounts_share_one_tarball_download() {
             ],
             body: tarball_bytes,
             hit_count: Some(Arc::clone(&tarball_hits)),
-            // 100 ms delay: ensures both callers reach dispatch_fetch_policy
+            // 100 ms delay: ensures both callers reach dispatch_tarball_for_requests
             // and attempt to claim the singleflight slot before the tarball
             // response arrives.
             delay_ms: Some(100),

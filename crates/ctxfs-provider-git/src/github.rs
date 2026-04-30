@@ -941,6 +941,8 @@ impl GitHubProvider {
         source: &SourceSpec,
         commit_sha: &str,
         requests: &[ContentRequest],
+        // Reserved: a future Forced path may bypass the pre-claim cache check
+        // (today Forced and BulkPrefetch produce identical tarball behavior).
         _mode: FetchMode,
         counter_key: Option<CounterKey>,
     ) -> Result<(), CtxfsError> {
