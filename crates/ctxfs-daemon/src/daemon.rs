@@ -1303,7 +1303,7 @@ mod tests {
         let _p2 = server.build_github_provider_for_mount();
         // initial_registry + server + p1's internal clone + p2's internal clone = ≥ 4
         assert!(
-            Arc::strong_count(&initial_registry) >= 3,
+            Arc::strong_count(&initial_registry) >= 4,
             "singleflight registry must be Arc-cloned into every provider (got {} strong refs)",
             Arc::strong_count(&initial_registry)
         );

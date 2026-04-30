@@ -33,8 +33,9 @@ pub enum ContentKind {
 pub struct ContentRequest {
     /// Mount-relative path (semantic key — what the user would `cat`).
     pub path: PathBuf,
-    /// Content hash if the source provides one. GitHub: blob SHA-1;
-    /// npm: integrity SHA. None => no upstream digest available.
+    /// Content hash if the source provides one. GitHub: blob SHA-1 (per-entry).
+    /// Registry/native archive entries should pass `None` unless the provider
+    /// has a per-entry digest. `None` is always safe.
     pub digest: Option<Digest>,
     /// Estimated bytes from the manifest. None => unknown until fetched.
     pub size: Option<u64>,

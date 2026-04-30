@@ -404,7 +404,7 @@ impl GitHubProvider {
     ///
     /// Note: per-subtree responses include `size` for blob entries (per
     /// GitHub Trees API docs). If an entry returns `size=None`, the auto-gate
-    /// in `fetch_snapshot_inner` degrades to Lazy (fail-closed) via
+    /// in `fetch_snapshot_inner` degrades to Disabled (fail-closed) via
     /// `effective_prefetch_policy`. Don't try to estimate by file extension or
     /// cache mtimes — be honest about the missing signal.
     async fn fetch_tree_walked(
@@ -982,7 +982,12 @@ impl GitHubProvider {
             .cell
             .get_or_init(|| async {
                 match self
-                    .fetch_tarball_into_cache(source, commit_sha, path_to_sha_size)
+                    .fetch_tarball_into_cache(
+                        source,
+                        commit_sha,
+                        path_to_sha_size,
+                        counter_key.clone(),
+                    )
                     .await
                 {
                     Ok(out) => {
@@ -1242,6 +1247,7 @@ impl GitHubProvider {
         source: &SourceSpec,
         commit_sha: &str,
         path_to_sha_size: HashMap<PathBuf, (String, u64)>,
+        counter_key: Option<CounterKey>,
     ) -> Result<TarballOutcome, CtxfsError> {
         // Tee adapter: copies bytes to both hasher and writer in one io::copy.
         struct Tee<'a, W: std::io::Write> {
@@ -1322,7 +1328,6 @@ impl GitHubProvider {
         let async_reader = StreamReader::new(body_stream);
 
         let cache = Arc::clone(&self.cache);
-        let counter_key = self.counter_key.lock().unwrap().clone();
         let observability = Arc::clone(&self.observability);
         // Hoist counters_for outside the per-entry loop: one DashMap lookup
         // rather than one per entry. Falls through to None when no key set.
@@ -1564,67 +1569,67 @@ impl GitHubProvider {
         //     decide the FetchPolicy, and call fetch_batch only for Tarball.
         //     Failures are non-fatal — snapshot still completes; lazy reads
         //     pick up uncached blobs.
+        //     Short-circuit for Disabled: skip the Vec allocation entirely.
         {
             use ctxfs_provider_common::fetcher::{decide_policy, FetchPolicy, PrefetchPolicy};
 
-            let requests: Vec<ContentRequest> = tree
-                .tree
-                .iter()
-                .filter_map(Self::tree_entry_to_request)
-                .collect();
+            if options.prefetch != PrefetchPolicy::Disabled {
+                let requests: Vec<ContentRequest> = tree
+                    .tree
+                    .iter()
+                    .filter_map(Self::tree_entry_to_request)
+                    .collect();
 
-            let blob_count = requests.len() as u64;
-            let estimated_bytes: u64 = requests.iter().filter_map(|r| r.size).sum();
-            let effective_policy = Self::effective_prefetch_policy(&tree.tree, options.prefetch);
-            if effective_policy != options.prefetch {
-                tracing::info!(
-                    target: "ctxfs.provider.tarball",
-                    "manifest has entries with unknown size; degrading auto-gate to Lazy"
-                );
-            }
-            let decision = decide_policy(
-                blob_count,
-                estimated_bytes,
-                effective_policy,
-                options.prefetch_threshold_count,
-                options.prefetch_max_bytes,
-            );
-
-            match decision {
-                FetchPolicy::Lazy => {}
-                FetchPolicy::LazyOversized {
-                    estimated_bytes,
-                    blob_count,
-                    cap,
-                } => {
-                    if let Some(key) = self.counter_key.lock().unwrap().clone() {
-                        self.observability
-                            .counters_for(key)
-                            .record_prefetch_skipped_oversized();
-                    }
-                    tracing::warn!(
+                let blob_count = requests.len() as u64;
+                let estimated_bytes: u64 = requests.iter().filter_map(|r| r.size).sum();
+                let effective_policy =
+                    Self::effective_prefetch_policy(&tree.tree, options.prefetch);
+                if effective_policy != options.prefetch {
+                    tracing::info!(
                         target: "ctxfs.provider.tarball",
+                        "manifest has entries with unknown size; degrading auto-gate from Auto to Disabled (fail-closed)"
+                    );
+                }
+                let decision = decide_policy(
+                    blob_count,
+                    estimated_bytes,
+                    effective_policy,
+                    options.prefetch_threshold_count,
+                    options.prefetch_max_bytes,
+                );
+
+                match decision {
+                    FetchPolicy::Lazy => {}
+                    FetchPolicy::LazyOversized {
                         estimated_bytes,
                         blob_count,
                         cap,
-                        "tarball auto-gate skipped: estimated_bytes > prefetch_max_bytes"
-                    );
-                }
-                FetchPolicy::Tarball { .. } => {
-                    let mode = match effective_policy {
-                        PrefetchPolicy::Force => FetchMode::Forced,
-                        _ => FetchMode::BulkPrefetch,
-                    };
-                    let batch_ctx = FetchBatchContext {
-                        source: source.clone(),
-                        resolved_revision: commit_sha.clone(),
-                    };
-                    // Trait dispatch via ContentFetcher::fetch_batch.
-                    // Non-fatal: discard the Result; lazy reads fill any gaps.
-                    // Clone counter_key before the await to avoid holding the
-                    // MutexGuard across an await point (not Send).
-                    let ckey = self.counter_key.lock().unwrap().clone();
-                    let _outcome = self.fetch_batch(&batch_ctx, &requests, mode, ckey).await;
+                    } => {
+                        self.observability
+                            .counters_for(real_key.clone())
+                            .record_prefetch_skipped_oversized();
+                        tracing::warn!(
+                            target: "ctxfs.provider.tarball",
+                            estimated_bytes,
+                            blob_count,
+                            cap,
+                            "tarball auto-gate skipped: estimated_bytes > prefetch_max_bytes"
+                        );
+                    }
+                    FetchPolicy::Tarball { .. } => {
+                        let mode = match effective_policy {
+                            PrefetchPolicy::Force => FetchMode::Forced,
+                            _ => FetchMode::BulkPrefetch,
+                        };
+                        let batch_ctx = FetchBatchContext {
+                            source: source.clone(),
+                            resolved_revision: commit_sha.clone(),
+                        };
+                        // Non-fatal: discard the Result; lazy reads fill any gaps.
+                        let _outcome = self
+                            .fetch_batch(&batch_ctx, &requests, mode, Some(real_key.clone()))
+                            .await;
+                    }
                 }
             }
         }
@@ -1644,11 +1649,9 @@ impl GitHubProvider {
         // 7. Record prefetch_hits only for blobs fetched via REST (not those
         //    served from BlobCache). Avoids double-counting when the tarball
         //    path already committed the same blobs and incremented per-entry.
-        if let Some(key) = self.counter_key.lock().unwrap().clone() {
-            self.observability
-                .counters_for(key)
-                .record_prefetch_hits(small_blob_network_fetched as u64);
-        }
+        self.observability
+            .counters_for(real_key.clone())
+            .record_prefetch_hits(small_blob_network_fetched as u64);
 
         // 8. Build directories with inline content and resolved symlink
         //    targets. Fails if a symlink SHA is absent from the inline map
@@ -1744,7 +1747,7 @@ impl ContentFetcher for GitHubProvider {
 
     /// Bulk-fetch the given requests via the GitHub tarball endpoint.
     ///
-    /// **M4 contract:** `fetch_batch` is only called for [`FetchPolicy::Tarball`].
+    /// **Contract:** `fetch_batch` is only called for [`FetchPolicy::Tarball`].
     /// The auto-gate (`effective_prefetch_policy` + `decide_policy`) lives in
     /// `fetch_snapshot_inner`; `Lazy` and `LazyOversized` paths never reach here.
     ///
@@ -1752,10 +1755,10 @@ impl ContentFetcher for GitHubProvider {
     ///
     /// ## Return contract
     ///
-    /// The map is best-effort: it contains whatever blobs are in `BlobCache`
-    /// after the tarball commits. GitHub's tarball flow warms the cache by
-    /// digest; reads still go through `Provider::fetch_blob`. Missing paths
-    /// are NOT errors.
+    /// Always returns an empty map for GitHub. The tarball flow warms
+    /// `BlobCache` by digest; content retrieval goes through
+    /// `Provider::fetch_blob`. Returning empty avoids a `BlobCache` scan that
+    /// `fetch_snapshot_inner` immediately discards with `let _outcome = ...`.
     async fn fetch_batch(
         &self,
         ctx: &FetchBatchContext,
@@ -1777,18 +1780,7 @@ impl ContentFetcher for GitHubProvider {
         )
         .await?;
 
-        // Best-effort map: read BlobCache for each request that has a digest.
-        // VFS still uses Provider::fetch_blob for read-time retrieval; this
-        // map is for callers that prefer in-memory bytes (future CDN providers).
-        let mut bytes_map = HashMap::new();
-        for req in requests {
-            if let Some(digest) = &req.digest {
-                if let Some(bytes) = self.cache.get(digest) {
-                    let _ = bytes_map.insert(req.path.clone(), bytes);
-                }
-            }
-        }
-        Ok(bytes_map)
+        Ok(HashMap::new())
     }
 }
 
@@ -1818,16 +1810,13 @@ mod tests {
     // duplicating construction here.
     use crate::context::make_test_provider_context;
 
-    /// TDD anchor: the new 2-arg constructor compiles (test fails before impl).
-    #[test]
-    fn new_with_provider_context_compiles_with_two_args() {
-        let ctx = make_test_provider_context();
-        let _provider = GitHubProvider::new(None, ctx);
-    }
-
     /// Minimal `GitHubProvider` for unit tests that don't make real HTTP calls.
-    fn make_test_provider() -> GitHubProvider {
-        GitHubProvider::new(None, make_test_provider_context())
+    ///
+    /// Returns `(GitHubProvider, TempDir)` — caller must hold `TempDir` for
+    /// the provider's lifetime so the cache directory isn't deleted early.
+    fn make_test_provider() -> (GitHubProvider, tempfile::TempDir) {
+        let (ctx, tmp) = make_test_provider_context();
+        (GitHubProvider::new(None, ctx), tmp)
     }
 
     #[test]
@@ -2131,7 +2120,7 @@ mod tests {
 
     #[test]
     fn claim_singleflight_slot_first_caller_is_leader() {
-        let provider = make_test_provider();
+        let (provider, _tmp) = make_test_provider();
         use ctxfs_provider_common::fetcher::TarballKey;
         let key = TarballKey {
             host: "api.github.com".to_string(),
@@ -2148,7 +2137,7 @@ mod tests {
 
     #[test]
     fn claim_singleflight_slot_second_caller_is_waiter_with_same_slot() {
-        let provider = make_test_provider();
+        let (provider, _tmp) = make_test_provider();
         use ctxfs_provider_common::fetcher::TarballKey;
         let key = TarballKey {
             host: "api.github.com".to_string(),
@@ -2173,7 +2162,7 @@ mod tests {
     /// empty input regardless of provider state.
     #[tokio::test]
     async fn prefetch_small_blobs_empty_shas_returns_empty_map_without_http() {
-        let provider = GitHubProvider::new(None, make_test_provider_context());
+        let (provider, _tmp) = make_test_provider();
         let source = SourceSpec::parse("github:test/repo@main").unwrap();
         let (result, network_fetched) = provider
             .prefetch_small_blobs(&source, vec![], &std::collections::HashSet::new())
@@ -2733,7 +2722,7 @@ mod tests {
     /// `estimate_cost` sums sizes when all requests have known sizes.
     #[test]
     fn estimate_cost_aggregates_request_sizes() {
-        let provider = make_test_provider();
+        let (provider, _tmp) = make_test_provider();
         let requests = vec![
             ContentRequest {
                 path: PathBuf::from("a.rs"),
@@ -2756,7 +2745,7 @@ mod tests {
     /// `estimate_cost` returns `None` for `total_bytes` when any size is unknown.
     #[test]
     fn estimate_cost_returns_none_total_when_any_size_unknown() {
-        let provider = make_test_provider();
+        let (provider, _tmp) = make_test_provider();
         let requests = vec![
             ContentRequest {
                 path: PathBuf::from("a.rs"),
@@ -2782,7 +2771,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_batch_errors_on_lazy_mode() {
         use ctxfs_provider_common::fetcher::FetchBatchContext;
-        let provider = make_test_provider();
+        let (provider, _tmp) = make_test_provider();
         let batch_ctx = FetchBatchContext {
             source: make_test_source(),
             resolved_revision: "abc123def456abc123def456abc123def456abc1".to_string(),

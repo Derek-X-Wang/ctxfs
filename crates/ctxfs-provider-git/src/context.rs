@@ -57,24 +57,29 @@ impl std::fmt::Debug for ProviderContext {
 /// `github`, and any other in-crate test module that needs a provider context
 /// without making real network calls.
 ///
+/// Returns `(ProviderContext, TempDir)` — the caller must hold `TempDir` for
+/// the lifetime of the provider; dropping it deletes the cache directory.
+///
 /// Exposed as `pub(crate)` so sibling modules (e.g. `github::tests`) can call
 /// `crate::context::make_test_provider_context()` instead of duplicating the
 /// construction.
 #[cfg(test)]
-pub(crate) fn make_test_provider_context() -> ProviderContext {
+pub(crate) fn make_test_provider_context() -> (ProviderContext, tempfile::TempDir) {
     use std::sync::Arc;
     let dir = tempfile::tempdir().expect("tempdir");
-    let cache = Arc::new(BlobCache::new(dir.keep(), 1024 * 1024).expect("BlobCache::new"));
+    let cache =
+        Arc::new(BlobCache::new(dir.path().to_path_buf(), 1024 * 1024).expect("BlobCache::new"));
     let observability = Arc::new(Observability::new());
     let singleflight = Arc::new(TarballSingleflightMap::new());
-    ProviderContext {
+    let ctx = ProviderContext {
         api_host: "api.github.com".to_string(),
         observability,
         cache,
         tree_cache: None,
         shared_tree_cache: None,
         singleflight,
-    }
+    };
+    (ctx, dir)
 }
 
 #[cfg(test)]
@@ -84,7 +89,7 @@ mod tests {
 
     #[test]
     fn provider_context_clones_arcs_correctly() {
-        let ctx = make_test_provider_context();
+        let (ctx, _tmp) = make_test_provider_context();
         let cloned = ctx.clone();
         assert!(Arc::ptr_eq(&ctx.cache, &cloned.cache));
         assert!(Arc::ptr_eq(&ctx.observability, &cloned.observability));
@@ -93,7 +98,7 @@ mod tests {
 
     #[test]
     fn provider_context_debug_redacts_arc_contents() {
-        let ctx = make_test_provider_context();
+        let (ctx, _tmp) = make_test_provider_context();
         let dbg = format!("{ctx:?}");
         assert!(dbg.contains("api_host"));
         assert!(dbg.contains("<Arc<Observability>>"));
