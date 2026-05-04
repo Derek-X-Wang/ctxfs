@@ -118,11 +118,10 @@ impl CacheState {
             .filter(|e| !e.is_explicit_override)
             .count() as u64;
 
-        let per = if default_count == 0 {
-            0
-        } else {
-            max_bytes.saturating_sub(explicit_total) / default_count
-        };
+        let per = max_bytes
+            .saturating_sub(explicit_total)
+            .checked_div(default_count)
+            .unwrap_or(0);
 
         for entry in self.reservations.values_mut() {
             if !entry.is_explicit_override {
@@ -443,7 +442,7 @@ impl BlobCache {
     /// SHA-1 for the tarball path's external hasher + tee).
     ///
     /// See [`commit_atomic`] for the self-verifying entry point.
-    pub fn commit_atomic_with_writer(&self) -> Result<BlobTempWriter, CtxfsError> {
+    pub fn commit_atomic_with_writer(&self) -> Result<BlobTempWriter<'_>, CtxfsError> {
         let tmp_dir = self.root.join("tmp");
         fs::create_dir_all(&tmp_dir)
             .map_err(|e| CtxfsError::Cache(format!("mkdir tmp failed: {e}")))?;
