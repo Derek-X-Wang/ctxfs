@@ -10,7 +10,6 @@ import argparse
 import email.utils
 import sys
 import xml.etree.ElementTree as ET
-from xml.sax.saxutils import escape
 
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
@@ -43,9 +42,13 @@ def build_item_xml(
     sparkle_short.text = short_version
 
     desc = ET.SubElement(item, "description")
-    # Wrap in CDATA by hex-escaping — but ElementTree serializes text as
-    # escaped characters, which browsers and Sparkle both accept. Don't
-    # try to emit raw CDATA sections (stdlib doesn't support it cleanly).
+    # description_html is HTML (rendered upstream from Markdown via pandoc).
+    # ElementTree XML-escapes desc.text once on serialize, producing
+    # &lt;h1&gt;… in the appcast. Sparkle XML-decodes once when parsing the
+    # feed, then feeds the resulting HTML to its WebView. Do NOT escape
+    # here — the manual escape() that used to live here caused
+    # double-escaping (&amp;lt;h1&amp;gt;) and the dialog rendered as raw
+    # markup. (v0.1.1 incident, 2026-05-04.)
     desc.text = description_html
 
     pub = ET.SubElement(item, "pubDate")
@@ -126,16 +129,16 @@ def main() -> int:
     p.add_argument("--enclosure-url", required=True)
     p.add_argument("--ed-signature", required=True)
     p.add_argument("--length", required=True, type=int)
-    p.add_argument("--description-file", required=True, help="markdown/html file with release notes")
+    p.add_argument(
+        "--description-file",
+        required=True,
+        help="HTML file with release notes (typically rendered from Markdown via pandoc by the workflow)",
+    )
     p.add_argument("--pub-date", default=None, help="RFC 2822 date (default: now)")
     args = p.parse_args()
 
     with open(args.description_file) as f:
-        description = f.read().strip()
-
-    # Description field: pre-escape any XML-unsafe characters so that
-    # browsers rendering the feed (and Sparkle itself) receive safe HTML.
-    description_safe = escape(description)
+        description_html = f.read().strip()
 
     pub_date = args.pub_date or email.utils.formatdate(usegmt=True)
 
@@ -145,7 +148,7 @@ def main() -> int:
         enclosure_url=args.enclosure_url,
         ed_signature=args.ed_signature,
         length=args.length,
-        description_html=description_safe,
+        description_html=description_html,
         pub_date=pub_date,
     )
 

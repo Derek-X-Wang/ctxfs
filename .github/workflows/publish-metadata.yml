@@ -100,8 +100,14 @@ jobs:
           arm_sha=$(grep "ctxfs-${VERSION}-darwin-arm64.tar.gz" "${ASSETS}/checksums.txt" | awk '{print $1}')
           x86_sha=$(grep "ctxfs-${VERSION}-darwin-x86_64.tar.gz" "${ASSETS}/checksums.txt" | awk '{print $1}')
 
-          # Fetch release body for appcast description
+          # Fetch release body and render Markdown -> HTML for the appcast.
+          # Sparkle's update dialog renders <description> in a WebView, so
+          # raw markdown shows up to users as literal '#', '**', and '`'
+          # characters mashed onto one line. pandoc is preinstalled on
+          # ubuntu-latest. Use GFM (matches what GitHub renders for the
+          # release page) and html5 with no document wrapper.
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/release-body.md
+          pandoc --from=gfm --to=html5 /tmp/release-body.md > /tmp/release-body.html
 
           {
             echo "ed_sig=$SIG"
@@ -137,7 +143,7 @@ jobs:
             --enclosure-url "$ZIP_URL" \
             --ed-signature "${{ steps.meta.outputs.ed_sig }}" \
             --length "${{ steps.meta.outputs.zip_len }}" \
-            --description-file /tmp/release-body.md
+            --description-file /tmp/release-body.html
           # Validate via stdlib xml.etree — xmllint isn't on ubuntu-latest by default.
           python3 -c "import xml.etree.ElementTree as ET; ET.parse('gh-pages/appcast.xml')"
 
