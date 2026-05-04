@@ -69,22 +69,9 @@ ctxfs daemon status
 
 If `ctxfs` isn't on `PATH`, try `ctxfs-dev` (a symlink to the local dev build). If neither exists, substitute the build path (e.g., `./target/release/ctxfs`). If the binary doesn't exist at all, ask the user to build or install it first.
 
-### Check 0c: Is passwordless sudo configured for mounts?
+### Check 0c: Is the FSKit backend available? (macOS 26+ only — preferred path)
 
-NFS kernel mounts require sudo on macOS and Linux. Without passwordless sudo, the mount command will prompt for a password — which hangs forever in non-interactive Bash.
-
-```bash
-ctxfs setup check
-```
-
-- "Configured: /etc/sudoers.d/ctxfs exists" → continue to Step 1
-- "Not configured" → **stop and escalate** (see fallback below)
-
-> **Fallback for "Not configured"**: Tell the user: "ctxfs needs passwordless sudo to run NFS kernel mounts non-interactively. Please run `ctxfs setup install` **from your own terminal** (not through me — the install itself prompts for a sudo password and needs a real TTY). Alternatively, I can print the exact `sudo mount_nfs` command for you to run manually one time. Which do you prefer?" Wait for the answer. Do NOT try to run `ctxfs setup install` or `ctxfs mount` yourself — both will hang.
-
-### Check 0c-fskit: Is the FSKit backend available and preferred?
-
-On macOS 26+, ctxfs supports a FSKit backend that does not require sudo or Full Disk Access.
+On macOS 26 (Tahoe) and later, ctxfs supports an FSKit backend that does **not** require sudo or Full Disk Access. Always check this first — if FSKit is ready, you can skip the rest of Step 0 entirely (no sudo, no FDA, no NFS issues).
 
 ```bash
 ctxfs setup check
@@ -92,11 +79,24 @@ ctxfs setup check
 
 Look at the "FSKit backend" section of the output:
 
-- **macOS version: 26+** AND **App installed: yes** → FSKit is ready. `ctxfs mount` will use it automatically (or you can force it with `--backend fskit`). Skip checks 0c and 0d entirely — they apply only to the NFS backend.
-- **macOS version: <26** → FSKit not available on this system. Continue with check 0c.
-- **App installed: no** → FSKit available but not yet set up. Run `ctxfs setup install-fskit` to enable it. After install, FSKit is ready and you can skip 0c and 0d.
+- **macOS version: 26+** AND **App installed: yes** → FSKit is ready. `ctxfs mount` will use it automatically (or force it with `--backend fskit`). **Skip checks 0d and 0e — go to check 0f (`GITHUB_TOKEN`), then Step 1.**
+- **App installed: no** (on macOS 26+) → FSKit available but not yet enabled. Run `ctxfs setup install-fskit` to install the system extension, then re-check. After install, **skip checks 0d and 0e**.
+- **macOS version: <26** OR **Linux** → FSKit not available. Continue to check 0d.
 
-### Check 0d: Can you actually read files from an NFS mount?
+### Check 0d: Is passwordless sudo configured for mounts? (NFS path only)
+
+Only needed when FSKit is unavailable (macOS 15.4–25, or Linux). NFS kernel mounts require sudo. Without passwordless sudo, the mount command prompts for a password — which hangs forever in non-interactive Bash.
+
+```bash
+ctxfs setup check
+```
+
+- "Configured: /etc/sudoers.d/ctxfs exists" → continue to check 0e
+- "Not configured" → **stop and escalate** (see fallback below)
+
+> **Fallback for "Not configured"**: Tell the user: "ctxfs needs passwordless sudo to run NFS kernel mounts non-interactively. Please run `ctxfs setup install` **from your own terminal** (not through me — the install itself prompts for a sudo password and needs a real TTY). Alternatively, I can print the exact `sudo mount_nfs` command for you to run manually one time. Which do you prefer?" Wait for the answer. Do NOT try to run `ctxfs setup install` or `ctxfs mount` yourself — both will hang.
+
+### Check 0e: Can you actually read files from an NFS mount? (NFS path only)
 
 On macOS, the process running your session needs **Full Disk Access** to read files from NFS mounts. Without it, the mount succeeds but every `Read`, `Grep`, or `ls` against the mount point returns `EPERM / Operation not permitted` — the kernel blocks the syscall at the client side before it ever reaches ctxfs's NFS server.
 
@@ -119,7 +119,7 @@ The cheapest way to detect it is empirical: after the first mount, attempt to re
 >
 > **Note on stuck mounts**: If you created an NFS mount and now the access is blocked, the mount can only be cleaned up from a terminal that DOES have Full Disk Access (e.g., your own terminal app running `sudo umount /path/to/mount`). The ctxfs daemon itself can't force-unmount a sandboxed mount.
 
-### Check 0e: Is GITHUB_TOKEN set?
+### Check 0f: Is GITHUB_TOKEN set?
 
 ```bash
 echo "${GITHUB_TOKEN:+set}"
@@ -188,7 +188,7 @@ If the conversation is ongoing and more deps might come up, leave mounts in plac
 
 ```bash
 ctxfs daemon status                                      # Step 0b
-ctxfs setup check                                        # Step 0c
+ctxfs setup check                                        # Steps 0c–0e (FSKit + sudo + FDA)
 ctxfs mount crate:tokio@1.40.0 -p ./ctxfs-deps/tokio    # Step 1
 # Grep for the definition, Read the file, explain
 ctxfs unmount ./ctxfs-deps/tokio                         # Step 4
@@ -237,13 +237,13 @@ If you can't do a kernel mount, the right path is to stop and ask the user to he
 
 **"already mounted"** — The mount point is in use. Either use a different `-p` path, read from the existing mount, or unmount first.
 
-**"mount command exited with status: exit status: 1"** — Usually a sudo failure. See Step 0c.
+**"mount command exited with status: exit status: 1"** — Usually a sudo failure on the NFS path. See Step 0d. (Doesn't apply on macOS 26+ FSKit — FSKit doesn't shell out to `mount_nfs`.)
 
 **`ctxfs setup check` says "Not configured" but sudoers is actually installed** — Known issue: `setup check` can report false negatives. Verify directly: `ls /etc/sudoers.d/ctxfs` (should exist) and `sudo -n mount_nfs` (should return usage without prompting for a password). If both pass, setup is actually configured and you can proceed.
 
-**"Operation not permitted" when reading a mounted file** — macOS TCC is blocking NFS access. See Step 0d. This is NOT a file-permission issue; the mount is world-readable but the runtime process lacks Full Disk Access. The fix is confirmed working on macOS Tahoe 26 with cmux: grant Full Disk Access to the session's host app in System Settings → Privacy & Security → Full Disk Access, then restart the session. Do NOT spin on this — fall back to training knowledge and ask the user to apply the grant.
+**"Operation not permitted" when reading a mounted file** — macOS TCC is blocking NFS access. See Step 0e. This is NOT a file-permission issue; the mount is world-readable but the runtime process lacks Full Disk Access. The fix is confirmed working on macOS Tahoe 26 with cmux: grant Full Disk Access to the session's host app in System Settings → Privacy & Security → Full Disk Access, then restart the session. Do NOT spin on this — fall back to training knowledge and ask the user to apply the grant. (FSKit on macOS 26+ doesn't trigger TCC — if you have the choice, prefer FSKit.)
 
-**"sudo: a password is required"** — Passwordless sudo is not configured. See Step 0c fallback.
+**"sudo: a password is required"** — Passwordless sudo is not configured (NFS path only). See Step 0d fallback.
 
 **"no GitHub repository found"** — The package on npm/PyPI/crates.io doesn't list a GitHub source URL. Find the repo manually and use the `github:owner/repo@ref` form.
 
