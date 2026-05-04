@@ -103,11 +103,12 @@ jobs:
           # Fetch release body and render Markdown -> HTML for the appcast.
           # Sparkle's update dialog renders <description> in a WebView, so
           # raw markdown shows up to users as literal '#', '**', and '`'
-          # characters mashed onto one line. pandoc is preinstalled on
-          # ubuntu-latest. Use GFM (matches what GitHub renders for the
-          # release page) and html5 with no document wrapper.
+          # characters mashed onto one line. Use Python's `markdown` lib
+          # (pure-Python, ~1s install) for portability — pandoc is NOT
+          # preinstalled on ubuntu-latest as I once assumed (v0.1.2 dry-run).
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/release-body.md
-          pandoc --from=gfm --to=html5 /tmp/release-body.md > /tmp/release-body.html
+          pip3 install --quiet markdown
+          python3 -m markdown -x fenced_code -x tables /tmp/release-body.md > /tmp/release-body.html
 
           {
             echo "ed_sig=$SIG"
