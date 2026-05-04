@@ -25,7 +25,12 @@ struct MenuContent: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("ContextFS").font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("ContextFS").font(.headline)
+                    Text(versionString)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 summaryLine
             }
             Spacer()
@@ -33,6 +38,16 @@ struct MenuContent: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
+    }
+
+    private var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String
+        if let build, build != short {
+            return "v\(short) (\(build))"
+        }
+        return "v\(short)"
     }
 
     @ViewBuilder
