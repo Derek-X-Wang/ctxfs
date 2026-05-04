@@ -172,7 +172,7 @@ impl Observability {
         // Sort by rest_calls_total descending so the top-N consumers are first.
         // When two mounts have equal cost, iteration order is undefined (acceptable
         // for top-N reporting where only the top 10 are shown by the CLI).
-        mounts.sort_by(|a, b| b.rest_calls_total.cmp(&a.rest_calls_total));
+        mounts.sort_by_key(|m| std::cmp::Reverse(m.rest_calls_total));
 
         StatusReportV1 {
             schema_version: 1,

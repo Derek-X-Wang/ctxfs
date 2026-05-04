@@ -55,20 +55,15 @@ pub enum FetchMode {
 }
 
 /// User-facing prefetch policy from `MountOptions`.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PrefetchPolicy {
     /// Auto-gate: tarball if (count >= threshold) AND (bytes <= cap).
+    #[default]
     Auto,
     /// Bypass the byte cap; warn if estimated_bytes > cache budget.
     Force,
     /// Never prefetch; always lazy.
     Disabled,
-}
-
-impl Default for PrefetchPolicy {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Result of the auto-gate computation: which fetch shape to use this mount.
