@@ -6,35 +6,26 @@
     <description>Updates for ContextFS.app</description>
     <language>en</language>
     
-  <item><title>Version 0.1.1</title><sparkle:version>241</sparkle:version><sparkle:shortVersionString>0.1.1</sparkle:shortVersionString><description># ContextFS 0.1.1
-
-Patch release — adds the running app version to the menu-bar popover.
-
-## What's new
-
-- **Menu-bar version label.** The popover now shows `v&amp;lt;version&amp;gt;` (or `v&amp;lt;version&amp;gt; (&amp;lt;build&amp;gt;)` when build differs) next to the "ContextFS" header. Easier to confirm which version you're running and to verify Sparkle auto-updates have applied.
-
-## Install
-
-**Mac app (recommended)**:
-
-```bash
-brew install --cask Derek-X-Wang/ctxfs/contextfs
-```
-
-**CLI only**:
-
-```bash
-brew install Derek-X-Wang/ctxfs/contextfs
-```
-
-Already installed via the cask? The app's Sparkle updater will offer 0.1.1 the next time it polls, or click **Check for Updates…** from the menu-bar popover.
-
-## Requirements
-
-- macOS 26.0 or later (FSKit backend)
-- macOS 15.4 or later (NFS backend fallback)
-- Apple Silicon or Intel Mac</description><pubDate>Mon, 04 May 2026 16:47:00 GMT</pubDate><enclosure url="https://github.com/Derek-X-Wang/ctxfs/releases/download/v0.1.1/ContextFS-0.1.1.zip" length="13576723" type="application/octet-stream" sparkle:edSignature="vmM2dsuwMq59d5lFMnb8qmTKgT0weVUgCoufRmytQlq4svJnyIq1sBTkL5Qj9iAVPpBg7kch5m9kwC5fhtyYBQ==" /></item><item><title>Version 0.1.0</title><sparkle:version>240</sparkle:version><sparkle:shortVersionString>0.1.0</sparkle:shortVersionString><description># ContextFS 0.1.0
+  <item><title>Version 0.1.1</title><sparkle:version>241</sparkle:version><sparkle:shortVersionString>0.1.1</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.1&lt;/h1&gt;
+&lt;p&gt;Patch release — adds the running app version to the menu-bar popover.&lt;/p&gt;
+&lt;h2&gt;What's new&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Menu-bar version label.&lt;/strong&gt; The popover now shows &lt;code&gt;v&amp;lt;version&amp;gt;&lt;/code&gt; (or &lt;code&gt;v&amp;lt;version&amp;gt; (&amp;lt;build&amp;gt;)&lt;/code&gt; when build differs) next to the "ContextFS" header. Easier to confirm which version you're running and to verify Sparkle auto-updates have applied.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;Install&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;Mac app (recommended)&lt;/strong&gt;:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew install --cask Derek-X-Wang/ctxfs/contextfs
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;CLI only&lt;/strong&gt;:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew install Derek-X-Wang/ctxfs/contextfs
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Already installed via the cask? The app's Sparkle updater will offer 0.1.1 the next time it polls, or click &lt;strong&gt;Check for Updates…&lt;/strong&gt; from the menu-bar popover.&lt;/p&gt;
+&lt;h2&gt;Requirements&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;macOS 26.0 or later (FSKit backend)&lt;/li&gt;
+&lt;li&gt;macOS 15.4 or later (NFS backend fallback)&lt;/li&gt;
+&lt;li&gt;Apple Silicon or Intel Mac&lt;/li&gt;
+&lt;/ul&gt;</description><pubDate>Mon, 04 May 2026 16:47:00 GMT</pubDate><enclosure url="https://github.com/Derek-X-Wang/ctxfs/releases/download/v0.1.1/ContextFS-0.1.1.zip" length="13576723" type="application/octet-stream" sparkle:edSignature="vmM2dsuwMq59d5lFMnb8qmTKgT0weVUgCoufRmytQlq4svJnyIq1sBTkL5Qj9iAVPpBg7kch5m9kwC5fhtyYBQ==" /></item><item><title>Version 0.1.0</title><sparkle:version>240</sparkle:version><sparkle:shortVersionString>0.1.0</sparkle:shortVersionString><description># ContextFS 0.1.0
 
 First public release of ContextFS — a read-only, mountable filesystem for
 cloning-free access to Git repos, npm packages, PyPI packages, and crates.io
