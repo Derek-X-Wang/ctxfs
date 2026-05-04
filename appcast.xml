@@ -6,7 +6,28 @@
     <description>Updates for ContextFS.app</description>
     <language>en</language>
     
-  <item><title>Version 0.1.1</title><sparkle:version>241</sparkle:version><sparkle:shortVersionString>0.1.1</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.1&lt;/h1&gt;
+  <item><title>Version 0.1.2</title><sparkle:version>242</sparkle:version><sparkle:shortVersionString>0.1.2</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.2&lt;/h1&gt;
+&lt;p&gt;Release-pipeline dry run — validates three fixes shipped between v0.1.1 and v0.1.2:&lt;/p&gt;
+&lt;h2&gt;What's new&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Sparkle version compare uses &lt;code&gt;CFBundleVersion&lt;/code&gt;.&lt;/strong&gt; &lt;code&gt;&amp;lt;sparkle:version&amp;gt;&lt;/code&gt; in the appcast is now the build number (e.g. &lt;code&gt;242&lt;/code&gt;), not the marketing string. Previously the comparator parsed &lt;code&gt;0.1.1&lt;/code&gt; as &lt;code&gt;[0,1,1]&lt;/code&gt; and the installed &lt;code&gt;CFBundleVersion=240&lt;/code&gt; as &lt;code&gt;[240]&lt;/code&gt;, then refused to install. Future updates compare correctly.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Update dialog renders Markdown as HTML.&lt;/strong&gt; Release notes are now rendered via pandoc in CI (&lt;code&gt;gfm → html5&lt;/code&gt;) before going into the appcast. The Sparkle dialog shows headings, lists, code blocks, and bold instead of one wall of raw &lt;code&gt;#&lt;/code&gt; and &lt;code&gt;**&lt;/code&gt; characters.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Cleaner appcast description encoding.&lt;/strong&gt; Removed the manual &lt;code&gt;xml.sax.saxutils.escape()&lt;/code&gt; from &lt;code&gt;append-appcast-item.py&lt;/code&gt;, fixing the double-escape that produced &lt;code&gt;&amp;amp;lt;…&amp;amp;gt;&lt;/code&gt; artefacts in the published feed.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;If this dialog renders cleanly with formatted headings, code blocks, and bullets — the pipeline is healthy.&lt;/p&gt;
+&lt;h2&gt;Install&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;Mac app (recommended)&lt;/strong&gt;:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew install --cask Derek-X-Wang/ctxfs/contextfs
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;CLI only&lt;/strong&gt;:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew install Derek-X-Wang/ctxfs/contextfs
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h2&gt;Requirements&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;macOS 26.0 or later (FSKit backend)&lt;/li&gt;
+&lt;li&gt;macOS 15.4 or later (NFS backend fallback)&lt;/li&gt;
+&lt;li&gt;Apple Silicon or Intel Mac&lt;/li&gt;
+&lt;/ul&gt;</description><pubDate>Mon, 04 May 2026 17:38:57 GMT</pubDate><enclosure url="https://github.com/Derek-X-Wang/ctxfs/releases/download/v0.1.2/ContextFS-0.1.2.zip" length="13585860" type="application/octet-stream" sparkle:edSignature="z+1JnKgPiPCRDM/mGqC0nzCqAArvHCgFJ9TfrJIvgu0pP+nu0tuPS36dDUCS2pormsRzKP6FOh5l2MxzfxJtCA==" /></item><item><title>Version 0.1.1</title><sparkle:version>241</sparkle:version><sparkle:shortVersionString>0.1.1</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.1&lt;/h1&gt;
 &lt;p&gt;Patch release — adds the running app version to the menu-bar popover.&lt;/p&gt;
 &lt;h2&gt;What's new&lt;/h2&gt;
 &lt;ul&gt;
