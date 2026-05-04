@@ -1,3 +1,28 @@
+## v0.1.2 — 2026-05-04 (release-pipeline dry run)
+
+No-op patch release (no Rust/Swift behavior change) used to validate three
+release-pipeline fixes shipped right after v0.1.1:
+
+- **Sparkle `<sparkle:version>` bug.** Pipeline previously emitted the
+  marketing string (`0.1.1`); the comparator parsed `[0,1,1]` vs the
+  installed `CFBundleVersion=240` (`[240]`) and refused the install.
+  `publish-metadata.yml` now extracts `CFBundleVersion` from the outer
+  `ContextFS.app/Contents/Info.plist` inside the release zip
+  (stdlib `zipfile` + `plistlib`) and passes it as `--version`.
+- **Markdown release notes rendered as raw text in the update dialog.**
+  Sparkle's `<description>` is rendered in a WebView; we fed it the
+  GitHub release body as Markdown. The dialog showed `#`/`**` literally.
+  `publish-metadata.yml` now runs `pandoc --from=gfm --to=html5` on the
+  body before passing it to `append-appcast-item.py`.
+- **Double-escape in `append-appcast-item.py`.** Removed the manual
+  `xml.sax.saxutils.escape()` call. ElementTree XML-escapes `desc.text`
+  on serialize, so the manual call produced `&amp;lt;…&amp;gt;` artefacts.
+
+If the v0.1.0 / v0.1.1 path also exists in the wild, a separate fix on
+`gh-pages` patched both items (build numbers, HTML-rendered v0.1.1
+description) so the in-flight update dialog renders correctly without
+waiting for v0.1.2.
+
 ## v0.1.5-m5 — 2026-04-30 (Phase 4 M5)
 
 **Closed bugs:**
