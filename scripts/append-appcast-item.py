@@ -106,8 +106,23 @@ def append_item_to_appcast(
 def main() -> int:
     p = argparse.ArgumentParser(description="Prepend an item to appcast.xml")
     p.add_argument("--appcast", required=True, help="path to appcast.xml to modify in place")
-    p.add_argument("--version", required=True, help="Sparkle numeric version (often monotonic int or semver)")
-    p.add_argument("--short-version", required=True, help="User-facing version string")
+    p.add_argument(
+        "--version",
+        required=True,
+        help=(
+            "Value for <sparkle:version>. MUST be the app's CFBundleVersion "
+            "(monotonic build number, e.g. '241'), NOT the marketing string. "
+            "Sparkle's SUStandardVersionComparator compares this against the "
+            "installed CFBundleVersion; passing '0.1.1' against an installed "
+            "build of 240 is parsed as [0,1,1] vs [240,0,0] and Sparkle then "
+            "reports 'up to date' (v0.1.1 incident, 2026-05-04)."
+        ),
+    )
+    p.add_argument(
+        "--short-version",
+        required=True,
+        help="Value for <sparkle:shortVersionString>. The user-facing marketing label (e.g. '0.1.1').",
+    )
     p.add_argument("--enclosure-url", required=True)
     p.add_argument("--ed-signature", required=True)
     p.add_argument("--length", required=True, type=int)

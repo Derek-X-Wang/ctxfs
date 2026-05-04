@@ -72,6 +72,29 @@ jobs:
           ZIP_LEN=$(stat -c%s "${ASSETS}/ContextFS-${VERSION}.zip" 2>/dev/null || \
                     stat -f%z "${ASSETS}/ContextFS-${VERSION}.zip")
 
+          # CFBundleVersion (build number) from the outer .app's Info.plist.
+          # Sparkle's SUStandardVersionComparator compares <sparkle:version>
+          # against the installed CFBundleVersion — passing the marketing
+          # string ('0.1.1') causes a [0,1,1] vs [241] mismatch that makes
+          # Sparkle treat newer releases as older. See v0.1.1 incident.
+          BUILD_NUMBER=$(python3 - <<EOF
+          import plistlib, sys, zipfile
+          target = 'ContextFS.app/Contents/Info.plist'
+          with zipfile.ZipFile("${ASSETS}/ContextFS-${VERSION}.zip") as z:
+              candidates = [n for n in z.namelist()
+                            if n.endswith(target) and 'Frameworks/' not in n and '.appex/' not in n]
+              if not candidates:
+                  sys.exit('outer ContextFS.app Info.plist not found in release zip')
+              with z.open(candidates[0]) as f:
+                  print(plistlib.load(f)['CFBundleVersion'])
+          EOF
+          )
+          if [ -z "$BUILD_NUMBER" ]; then
+            echo "::error::failed to extract CFBundleVersion from release zip"
+            exit 1
+          fi
+          echo "Extracted CFBundleVersion=${BUILD_NUMBER} for sparkle:version"
+
           # SHA-256 per artifact (read from checksums.txt)
           dmg_sha=$(grep "ContextFS-${VERSION}.dmg" "${ASSETS}/checksums.txt" | awk '{print $1}')
           arm_sha=$(grep "ctxfs-${VERSION}-darwin-arm64.tar.gz" "${ASSETS}/checksums.txt" | awk '{print $1}')
@@ -83,6 +106,7 @@ jobs:
           {
             echo "ed_sig=$SIG"
             echo "zip_len=$ZIP_LEN"
+            echo "build_number=$BUILD_NUMBER"
             echo "dmg_sha=$dmg_sha"
             echo "arm_sha=$arm_sha"
             echo "x86_sha=$x86_sha"
@@ -103,9 +127,12 @@ jobs:
           VERSION="${{ steps.tag.outputs.version }}"
           TAG="${{ steps.tag.outputs.tag }}"
           ZIP_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/ContextFS-${VERSION}.zip"
+          # --version becomes <sparkle:version> and MUST be the build number
+          # (CFBundleVersion); --short-version is the marketing label. See
+          # the comment on BUILD_NUMBER extraction in the parse-metadata step.
           python3 scripts/append-appcast-item.py \
             --appcast gh-pages/appcast.xml \
-            --version "$VERSION" \
+            --version "${{ steps.meta.outputs.build_number }}" \
             --short-version "$VERSION" \
             --enclosure-url "$ZIP_URL" \
             --ed-signature "${{ steps.meta.outputs.ed_sig }}" \
