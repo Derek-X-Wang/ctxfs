@@ -6,7 +6,41 @@
     <description>Updates for ContextFS.app</description>
     <language>en</language>
     
-  <item><title>Version 0.1.2</title><sparkle:version>242</sparkle:version><sparkle:shortVersionString>0.1.2</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.2&lt;/h1&gt;
+  <item><title>Version 0.1.3</title><sparkle:version>354</sparkle:version><sparkle:shortVersionString>0.1.3</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.3&lt;/h1&gt;
+&lt;p&gt;Homebrew now lives in the shared &lt;strong&gt;&lt;code&gt;derek-x-wang/tap&lt;/code&gt;&lt;/strong&gt;. ContextFS moved off its
+own per-project tap (&lt;code&gt;derek-x-wang/ctxfs&lt;/code&gt;) into the consolidated tap that serves
+all of Derek's tools, so a single &lt;code&gt;brew tap&lt;/code&gt; covers everything.&lt;/p&gt;
+&lt;h2&gt;What's new&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Single shared Homebrew tap.&lt;/strong&gt; The cask and CLI formula are now published to
+  &lt;code&gt;github.com/Derek-X-Wang/homebrew-tap&lt;/code&gt; (standard &lt;code&gt;Casks/&lt;/code&gt; + &lt;code&gt;Formula/&lt;/code&gt;
+  layout) instead of the standalone &lt;code&gt;homebrew-ctxfs&lt;/code&gt; tap. The release pipeline
+  pushes &lt;code&gt;contextfs.rb&lt;/code&gt; directly to the tap's &lt;code&gt;main&lt;/code&gt;, matching how the other
+  tools on that tap publish.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;No functional changes to the app or CLI.&lt;/strong&gt; This is an infrastructure /
+  distribution release; the binary and &lt;code&gt;ContextFS.app&lt;/code&gt; are unchanged from 0.1.2
+  apart from the version bump.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;Install&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;Mac app (recommended)&lt;/strong&gt;:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew install --cask derek-x-wang/tap/contextfs
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;CLI only&lt;/strong&gt;:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew install derek-x-wang/tap/contextfs
+&lt;/code&gt;&lt;/pre&gt;
+&lt;h3&gt;Already tapped the old &lt;code&gt;derek-x-wang/ctxfs&lt;/code&gt;?&lt;/h3&gt;
+&lt;p&gt;Re-point to the shared tap once:&lt;/p&gt;
+&lt;pre&gt;&lt;code class="language-bash"&gt;brew untap derek-x-wang/ctxfs
+brew tap derek-x-wang/tap
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Existing installs keep working and update normally over Sparkle; the tap change
+only affects fresh &lt;code&gt;brew install&lt;/code&gt; / &lt;code&gt;brew upgrade&lt;/code&gt; resolution.&lt;/p&gt;
+&lt;h2&gt;Requirements&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;macOS 26.0 or later (FSKit backend)&lt;/li&gt;
+&lt;li&gt;macOS 15.4 or later (NFS backend fallback)&lt;/li&gt;
+&lt;li&gt;Apple Silicon or Intel Mac&lt;/li&gt;
+&lt;/ul&gt;</description><pubDate>Thu, 25 Jun 2026 07:17:28 GMT</pubDate><enclosure url="https://github.com/Derek-X-Wang/ctxfs/releases/download/v0.1.3/ContextFS-0.1.3.zip" length="13544332" type="application/octet-stream" sparkle:edSignature="fowMsjf+yBZpzV7o1cbORgCTcGYh8i5z/EzA+AUq58sI1qYTeZf1VeKJSs+4nCnUjaNFEBG2wGRUSd+xecGGAA==" /></item><item><title>Version 0.1.2</title><sparkle:version>242</sparkle:version><sparkle:shortVersionString>0.1.2</sparkle:shortVersionString><description>&lt;h1&gt;ContextFS 0.1.2&lt;/h1&gt;
 &lt;p&gt;Release-pipeline dry run — validates three fixes shipped between v0.1.1 and v0.1.2:&lt;/p&gt;
 &lt;h2&gt;What's new&lt;/h2&gt;
 &lt;ul&gt;
